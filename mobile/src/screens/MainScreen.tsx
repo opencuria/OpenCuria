@@ -21,7 +21,7 @@ import {
   formatSendTime,
   sendLaterTaskInput,
 } from "@opencuria/chat-core/sendLater";
-import type { ResolvedChatMedia } from "../components/useWorkspaceMedia";
+import type { ChatMediaResolver } from "../components/useWorkspaceMedia";
 import {
   filterMentionCandidates,
   mentionFileSearchQuery,
@@ -436,18 +436,25 @@ export function MainScreen(): React.JSX.Element {
   activeSessionRef.current = chat.activeSessionId;
   /**
    * Pictures come from the workspace and are saved with the chat; offline,
-   * or while the workspace is stopped, the saved copy shows.
+   * or while the workspace is stopped, the saved copy shows. Large media wait
+   * for a tap (`describe`).
    */
-  const resolveMedia = useCallback(
-    async (path: string): Promise<ResolvedChatMedia> => {
+  const resolveMedia = useMemo<ChatMediaResolver>(() => {
+    /** Finds the copy saved with the chat shown when it was called. */
+    const savedCopy = (path: string) => {
       const sessionId = activeSessionRef.current;
       const account = savedRef.current;
-      const savedCopy = () =>
+      return () =>
         sessionId && account
           ? account.media(sessionId, path).catch(() => null)
           : Promise.resolve(null);
+    };
+    const resolve = async (path: string) => {
+      const sessionId = activeSessionRef.current;
+      const account = savedRef.current;
+      const saved = savedCopy(path);
       if (offlineRef.current) {
-        const uri = await savedCopy();
+        const uri = await saved();
         if (uri) return uri;
         throw Object.assign(
           new Error("This picture is not saved on this device."),
@@ -463,13 +470,25 @@ export function MainScreen(): React.JSX.Element {
             .catch(() => undefined);
         return pinned;
       } catch (cause) {
-        const uri = await savedCopy();
+        const uri = await saved();
         if (uri) return uri;
         throw cause;
       }
-    },
-    [media],
-  );
+    };
+    // Without the workspace, saved copies show as they are.
+    const describe = async (path: string) => {
+      const saved = savedCopy(path);
+      if (offlineRef.current) return null;
+      if (!media) throw new Error("No workspace selected");
+      try {
+        return await media.describe(path);
+      } catch (cause) {
+        if (await saved()) return null;
+        throw cause;
+      }
+    };
+    return Object.assign(resolve, { describe });
+  }, [media]);
 
   const loadOverview = useCallback(
     async (background = false) => {
@@ -1007,10 +1026,6 @@ export function MainScreen(): React.JSX.Element {
         throw new Error(
           "Choose an available, running workspace before sending a message.",
         );
-      if (files.length && !client.realtime.isConnected)
-        throw new Error(
-          "Connect to the workspace before uploading attachments.",
-        );
       sendingRef.current = true;
       const ownerGeneration = generation.current;
       const ownerWorkspace = workspace.id;
@@ -1136,8 +1151,6 @@ export function MainScreen(): React.JSX.Element {
       throw new Error(
         "Choose an available, running workspace before editing a message.",
       );
-    if (files.length && !client.realtime.isConnected)
-      throw new Error("Connect to the workspace before uploading attachments.");
     const ownerGeneration = generation.current;
     const paths = files.length
       ? await uploadAttachments(client, workspace.id, files)
@@ -1188,10 +1201,6 @@ export function MainScreen(): React.JSX.Element {
       )
         throw new Error(
           "Choose an available, running workspace before scheduling a message.",
-        );
-      if (files.length && !client.realtime.isConnected)
-        throw new Error(
-          "Connect to the workspace before uploading attachments.",
         );
       const ownerGeneration = generation.current;
       const ownerWorkspace = workspace.id;

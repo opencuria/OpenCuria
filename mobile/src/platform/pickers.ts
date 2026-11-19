@@ -1,17 +1,15 @@
-import { File } from "expo-file-system";
+import { File, UploadType } from "expo-file-system";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import {
   CHAT_UPLOAD_DIR,
-  resolveUniqueFilename,
   sanitizeUploadFilename,
-  uploadTargetPath,
 } from "@opencuria/chat-core/chatUploads";
 import {
-  decodedBase64Size,
-  UPLOAD_MAX_BYTES,
-} from "@opencuria/chat-core/fileChunks";
+  canTransferFile,
+  fileTransferLimitMessage,
+} from "@opencuria/chat-core/workspaceFiles";
 import type { OpenCuriaClient } from "@opencuria/client";
 import type { ComposerAttachment } from "../components/ChatComposer";
 
@@ -96,7 +94,11 @@ export async function pickDocuments(): Promise<ComposerAttachment[]> {
   }));
 }
 
-/** Read and upload picked composer files via the authenticated workspace socket. */
+/**
+ * Upload picked composer files from disk into the chat upload folder and
+ * return their workspace paths. Names that exist get a suffix (`name_1.ext`)
+ * from the server.
+ */
 export async function uploadAttachments(
   client: Pick<OpenCuriaClient, "files">,
   workspaceId: string,
@@ -106,6 +108,7 @@ export async function uploadAttachments(
     throw new TypeError("A workspace is required to upload attachments.");
   if (attachments.length === 0) return [];
 
+  // Check every file before the first upload starts.
   const prepared = attachments.map((attachment) => {
     if (!attachment.uri)
       throw new NativePickerError(
@@ -120,52 +123,55 @@ export async function uploadAttachments(
         "file_unavailable",
       );
     }
-    // Inspect every size before any base64 representation is allocated.
-    if (size > UPLOAD_MAX_BYTES) {
+    if (!canTransferFile(size)) {
       throw new NativePickerError(
-        `${attachment.name || "This file"} exceeds the 10 MiB upload limit.`,
+        `${attachment.name || "This file"} is too large. ${fileTransferLimitMessage()}`,
         "size_limit",
       );
     }
     return { attachment, file, size };
   });
 
-  // Do not retry after arbitrary listing failures: otherwise a listing outage
-  // could make us overwrite a user's prior upload with the same name.
-  const existing = await existingUploadNames(client, workspaceId);
   const paths: string[] = [];
   for (const { attachment, file, size } of prepared) {
-    const sourceName = sanitizeUploadFilename(
-      attachment.name || file.name || "upload",
-    );
-    // UUID prefix prevents races between concurrent uploads whose directory
-    // listings began at the same time while retaining the source basename.
-    const uniqueName = resolveUniqueFilename(
-      existing,
-      `${randomId().slice(0, 8)}_${sourceName}`,
-    );
-    const base64 = await file.base64();
-    const actualBytes = decodedBase64SizeSafe(base64);
-    if (actualBytes !== size || actualBytes > UPLOAD_MAX_BYTES) {
-      throw new NativePickerError(
-        `${attachment.name || "This file"} changed or exceeds the 10 MiB upload limit.`,
-        "size_limit",
-      );
-    }
-    const result = await client.files.uploadFile(workspaceId, {
+    const target = await client.files.createUpload(workspaceId, {
       directory: CHAT_UPLOAD_DIR,
-      filename: uniqueName,
-      base64,
+      filename: sanitizeUploadFilename(
+        attachment.name || file.name || "upload",
+      ),
+      size,
+      conflict: "rename",
     });
-    if (result.status !== "success") {
-      throw new NativePickerError(
-        result.error || "The file upload failed.",
-        "upload_failed",
-      );
-    }
-    paths.push(uploadTargetPath(uniqueName));
+    const response = await file.upload(target.uploadUrl, {
+      httpMethod: "PUT",
+      uploadType: UploadType.BINARY_CONTENT,
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+    const path = uploadedPath(response);
+    client.files.forget(workspaceId, path);
+    paths.push(path);
   }
   return paths;
+}
+
+/** The workspace path of a finished upload (HTTP 201 `{path, size}`). */
+function uploadedPath(response: { status: number; body: string }): string {
+  let payload: { path?: unknown; detail?: unknown; code?: unknown } = {};
+  try {
+    payload = JSON.parse(response.body) as typeof payload;
+  } catch {
+    // Not JSON: report the status below.
+  }
+  if (response.status === 201 && typeof payload.path === "string")
+    return payload.path;
+  throw new NativePickerError(
+    typeof payload.detail === "string" && payload.detail
+      ? payload.detail
+      : `The upload failed (${response.status}).`,
+    typeof payload.code === "string" && payload.code
+      ? payload.code
+      : "upload_failed",
+  );
 }
 
 interface ImageAsset {
@@ -194,24 +200,13 @@ async function photoAttachment(asset: ImageAsset): Promise<ComposerAttachment> {
       "file_unavailable",
     );
 
+  // Models cannot read HEIC.
   if (
     mimeType.toLowerCase() === "image/heic" ||
     mimeType.toLowerCase() === "image/heif" ||
     /\.(?:heic|heif)$/i.test(name)
   ) {
-    const converted = await convertImageToJpeg(uri, asset.width);
-    uri = converted.uri;
-    name = `${withoutExtension(name)}.jpg`;
-    mimeType = "image/jpeg";
-  } else if (actualSize > UPLOAD_MAX_BYTES) {
-    if (!mimeType.toLowerCase().startsWith("image/")) {
-      throw new NativePickerError(
-        "This photo is larger than the 10 MiB upload limit.",
-        "size_limit",
-      );
-    }
-    const converted = await convertImageToJpeg(uri, asset.width);
-    uri = converted.uri;
+    uri = await convertImageToJpeg(uri, asset.width);
     name = `${withoutExtension(name)}.jpg`;
     mimeType = "image/jpeg";
   }
@@ -231,42 +226,26 @@ async function photoAttachment(asset: ImageAsset): Promise<ComposerAttachment> {
 async function convertImageToJpeg(
   sourceUri: string,
   sourceWidth?: number,
-): Promise<{ uri: string; size: number }> {
-  const initialWidth =
-    sourceWidth && sourceWidth > 0
-      ? Math.min(MAX_IMAGE_WIDTH, sourceWidth)
-      : MAX_IMAGE_WIDTH;
-  const attempts = [
-    { width: initialWidth, quality: 0.82 },
-    { width: initialWidth, quality: 0.65 },
-    { width: Math.min(initialWidth, 1600), quality: 0.72 },
-    { width: Math.min(initialWidth, 1280), quality: 0.68 },
-    { width: Math.min(initialWidth, 1024), quality: 0.64 },
-    { width: Math.min(initialWidth, 768), quality: 0.6 },
-    { width: Math.min(initialWidth, 512), quality: 0.55 },
-    { width: Math.min(initialWidth, 384), quality: 0.5 },
-    { width: Math.min(initialWidth, 256), quality: 0.45 },
-  ];
-  for (const attempt of attempts) {
-    const context = ImageManipulator.ImageManipulator.manipulate(sourceUri);
-    context.resize({ width: Math.min(MAX_IMAGE_WIDTH, attempt.width) });
-    const image = await context.renderAsync();
-    const result = await image.saveAsync({
-      format: ImageManipulator.SaveFormat.JPEG,
-      compress: attempt.quality,
-    });
-    const converted = new File(result.uri);
-    const size = converted.size;
-    if (size > 0 && size <= UPLOAD_MAX_BYTES) {
-      pickedTemporaryUris.add(result.uri);
-      return { uri: result.uri, size };
-    }
-    if (converted.exists) converted.delete();
-  }
-  throw new NativePickerError(
-    "The photo could not be converted below the 10 MiB upload limit.",
-    "size_limit",
-  );
+): Promise<string> {
+  const context = ImageManipulator.ImageManipulator.manipulate(sourceUri);
+  context.resize({
+    width:
+      sourceWidth && sourceWidth > 0
+        ? Math.min(MAX_IMAGE_WIDTH, sourceWidth)
+        : MAX_IMAGE_WIDTH,
+  });
+  const image = await context.renderAsync();
+  const result = await image.saveAsync({
+    format: ImageManipulator.SaveFormat.JPEG,
+    compress: 0.82,
+  });
+  pickedTemporaryUris.add(result.uri);
+  if (new File(result.uri).size <= 0)
+    throw new NativePickerError(
+      "The photo could not be converted.",
+      "file_unavailable",
+    );
+  return result.uri;
 }
 
 /** Delete temporary converted image outputs created by this adapter, not picker originals. */
@@ -276,58 +255,6 @@ export function clearPickedPhotoCache(): void {
     if (file.exists) file.delete();
   }
   pickedTemporaryUris.clear();
-}
-
-export async function existingUploadNames(
-  client: Pick<OpenCuriaClient, "files">,
-  workspaceId: string,
-): Promise<Set<string>> {
-  try {
-    const result = await client.files.listFiles(workspaceId, CHAT_UPLOAD_DIR);
-    if (result.error) {
-      if (isExplicitMissingUploadDirectory(result.error)) return new Set();
-      throw new NativePickerError(result.error, "listing_failed");
-    }
-    if (!Array.isArray(result.entries)) {
-      throw new NativePickerError(
-        "The upload directory could not be listed safely.",
-        "listing_failed",
-      );
-    }
-    return new Set(
-      (result.entries ?? []).map((entry) => entry.name).filter(Boolean),
-    );
-  } catch (error) {
-    if (isExplicitMissingUploadDirectory(error)) return new Set();
-    throw error;
-  }
-}
-
-function isExplicitMissingUploadDirectory(error: unknown): boolean {
-  // Runner errors carry raw `find` stderr including its trailing newline.
-  const message = (
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : ""
-  ).trim();
-  return (
-    /^failed to list files:.*(?:no such file or directory|enoent).*$/i.test(
-      message,
-    ) && message.includes(CHAT_UPLOAD_DIR)
-  );
-}
-
-function decodedBase64SizeSafe(base64: string): number {
-  try {
-    return decodedBase64Size(base64.replace(/\s+/g, ""));
-  } catch {
-    throw new NativePickerError(
-      "The selected file contains invalid data.",
-      "invalid_payload",
-    );
-  }
 }
 
 function mimeFromName(name: string): string | null {

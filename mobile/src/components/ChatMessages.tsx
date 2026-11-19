@@ -97,7 +97,7 @@ import {
   NativeModal,
   NativeAction,
 } from "../ui/primitives";
-import { ChatMarkdown, type ResolvedChatMedia } from "./ChatMarkdown";
+import { ChatMarkdown } from "./ChatMarkdown";
 import { PromptImages, PromptParagraph } from "./PromptContent";
 import { PromptFlight, TranscriptReadyContext } from "./PromptFlight";
 import { promptLayout, type PromptLayout } from "./promptBlocks";
@@ -113,6 +113,7 @@ import {
   MediaViewer,
   type OpenMediaGallery,
 } from "./MediaViewer";
+import type { ChatMediaResolver } from "./useWorkspaceMedia";
 
 export interface ChatMessagesProps {
   messages: HarnessMessage[];
@@ -122,7 +123,7 @@ export interface ChatMessagesProps {
   loading?: boolean;
   streamingMessageId?: string | null;
   disabled?: boolean;
-  resolveMedia?: (path: string) => Promise<ResolvedChatMedia>;
+  resolveMedia?: ChatMediaResolver;
   /** Edits a sent prompt; the host moves it into the composer. */
   onEdit?: (message: HarnessMessage) => void;
   /**

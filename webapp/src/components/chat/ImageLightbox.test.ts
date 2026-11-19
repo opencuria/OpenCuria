@@ -1,24 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
 import ImageLightbox from './ImageLightbox.vue'
 import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
 import { activePointingWorkspace, pointingEngaged, pointingError } from '@/lib/voicePointing'
 
-const notifyError = vi.hoisted(() => vi.fn())
-vi.mock('@/stores/notifications', () => ({
-  useNotificationStore: () => ({ error: notifyError }),
-}))
-
 let wrapper: VueWrapper
 let stageRect: DOMRect
 let stageTransformScale: number
 let resizeStage: () => void
 const disconnect = vi.fn()
-const createObjectURL = vi.fn(() => 'blob:download')
-const revokeObjectURL = vi.fn()
-const OriginalURL = URL
 
 async function loadImage(dialog: HTMLElement, width = 2000, height = 1400): Promise<void> {
   const image = dialog.querySelector('img')!
@@ -53,6 +45,10 @@ function viewport(dialog: HTMLElement): HTMLElement {
 
 function button(name: string): HTMLButtonElement {
   return document.body.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!
+}
+
+function downloadLink(): HTMLAnchorElement {
+  return document.body.querySelector<HTMLAnchorElement>('a[aria-label="Download image"]')!
 }
 
 function percent(dialog: HTMLElement): string {
@@ -163,20 +159,6 @@ describe('ImageLightbox', () => {
         disconnect = disconnect
       },
     )
-    vi.stubGlobal(
-      'URL',
-      class extends OriginalURL {
-        static createObjectURL = createObjectURL
-        static revokeObjectURL = revokeObjectURL
-      },
-    )
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        blob: async () => new Blob(['image bytes'], { type: 'image/png' }),
-      })),
-    )
   })
 
   afterEach(() => {
@@ -201,7 +183,7 @@ describe('ImageLightbox', () => {
     expect(dialog.querySelector('img')?.getAttribute('alt')).toBe('Chat photo')
     expect(dialog.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,abc')
     expect(
-      [...dialog.querySelectorAll('button')].map((el) => el.getAttribute('aria-label')),
+      [...dialog.querySelectorAll('button, a')].map((el) => el.getAttribute('aria-label')),
     ).toEqual(['Zoom out', 'Zoom in', 'Download image', 'Close image preview'])
     expect(button('Zoom out').disabled).toBe(true)
     expect(button('Zoom in').disabled).toBe(false)
@@ -217,7 +199,7 @@ describe('ImageLightbox', () => {
       '/workspace/design.png',
     )
     expect(dialog.querySelector('img')?.getAttribute('data-voice-workspace')).toBe('workspace-a')
-    expect(dialog.querySelectorAll('button')).toHaveLength(4)
+    expect(dialog.querySelectorAll('button, a')).toHaveLength(4)
   })
 
   it('shows controls for an active dictation and hides them when it ends', async () => {
@@ -245,7 +227,7 @@ describe('ImageLightbox', () => {
     voiceCaptureControls.value = null
     await nextTick()
     expect(dialog.querySelector('[data-testid="voice-capture-bar"]')).toBeNull()
-    expect(dialog.querySelectorAll('button')).toHaveLength(4)
+    expect(dialog.querySelectorAll('button, a')).toHaveLength(4)
   })
 
   it('keeps an existing dictation active when opening and closing the viewer', async () => {
@@ -470,91 +452,42 @@ describe('ImageLightbox', () => {
     )
     expect(button('Zoom in').disabled).toBe(true)
     expect(button('Zoom out').disabled).toBe(true)
-    expect(button('Download image').disabled).toBe(true)
     expect(button('Close image preview').disabled).toBe(false)
     await wrapper.setProps({ src: 'blob:replacement' })
     await loadImage(dialog, 400, 200)
     expect(percent(dialog)).toBe('100%')
-    expect(button('Download image').disabled).toBe(false)
     expect(dialog.querySelector('[role="status"]')).toBeNull()
   })
 
-  it.each([
-    {
-      src: 'blob:workspace-image',
+  it('downloads workspace images from their signed download URL', async () => {
+    await mountLightbox()
+    await wrapper.setProps({
+      src: 'https://files.test/content/workspace/design.png',
       path: '/workspace/design.png',
-      mime: 'image/png',
-      filename: 'design.png',
-    },
-    {
-      src: 'data:image/jpeg;base64,abc',
-      path: undefined,
-      mime: 'image/jpeg',
-      filename: 'image.jpg',
-    },
+      downloadUrl: 'https://files.test/download/workspace/design.png',
+    })
+    const link = downloadLink()
+    expect(link.getAttribute('href')).toBe('https://files.test/download/workspace/design.png')
+    // The server names the file (`Content-Disposition`).
+    expect(link.getAttribute('download')).toBe('')
+  })
+
+  it.each([
+    { src: 'data:image/jpeg;base64,abc', path: undefined, filename: 'image.jpg' },
+    { src: 'data:image/svg+xml;base64,abc', path: undefined, filename: 'image.svg' },
     {
       src: 'https://example.com/chat%20photo.webp?signature=abc',
       path: undefined,
-      mime: 'image/webp',
       filename: 'chat photo.webp',
     },
-  ])(
-    'downloads $src with the correct name and releases the browser URL',
-    async ({ src, path, mime, filename }) => {
-      const dialog = await mountLightbox()
-      await wrapper.setProps({ src, path })
-      await loadImage(dialog)
-      const blob = new Blob(['image bytes'], { type: mime })
-      vi.mocked(fetch).mockResolvedValue({ ok: true, blob: async () => blob } as Response)
-      const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
-        this: HTMLAnchorElement,
-      ) {
-        expect(this.download).toBe(filename)
-        expect(this.href).toBe('blob:download')
-        expect(this.isConnected).toBe(true)
-      })
-      vi.useFakeTimers()
-      button('Download image').click()
-      await flushPromises()
-      expect(fetch).toHaveBeenCalledWith(src, { signal: expect.any(AbortSignal) })
-      expect(createObjectURL).toHaveBeenCalledWith(blob)
-      expect(click).toHaveBeenCalledOnce()
-      expect(button('Download image').disabled).toBe(false)
-      expect(document.querySelector('a[download]')).toBeNull()
-      expect(revokeObjectURL).not.toHaveBeenCalled()
-      vi.advanceTimersByTime(30_000)
-      expect(revokeObjectURL).toHaveBeenCalledWith('blob:download')
-    },
-  )
-
-  it('reports failed downloads and allows retrying', async () => {
+    { src: 'blob:inline-image', path: '/workspace/design.png', filename: 'design.png' },
+  ])('downloads $src directly as $filename', async ({ src, path, filename }) => {
     await mountLightbox()
-    vi.mocked(fetch).mockResolvedValueOnce({ ok: false } as Response)
-    button('Download image').click()
-    await flushPromises()
-    expect(notifyError).toHaveBeenCalledWith('Download failed', expect.any(String))
-    expect(createObjectURL).not.toHaveBeenCalled()
-    expect(button('Download image').disabled).toBe(false)
-  })
-
-  it('aborts a pending download on unmount without starting a stale download', async () => {
-    await mountLightbox()
-    let resolveDownload!: (response: Response) => void
-    vi.mocked(fetch).mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveDownload = resolve
-      }),
-    )
-    button('Download image').click()
-    await nextTick()
-    expect(button('Download image').disabled).toBe(true)
-    const signal = vi.mocked(fetch).mock.calls[0]![1]!.signal!
-    wrapper.unmount()
-    expect(signal.aborted).toBe(true)
-    resolveDownload({ ok: true, blob: async () => new Blob(['image']) } as Response)
-    await flushPromises()
-    expect(createObjectURL).not.toHaveBeenCalled()
-    expect(notifyError).not.toHaveBeenCalled()
+    await wrapper.setProps({ src, path })
+    const link = downloadLink()
+    expect(link.getAttribute('href')).toBe(src)
+    expect(link.getAttribute('download')).toBe(filename)
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer')
   })
 
   it('disconnects observation on unmount and ignores keys outside the modal', async () => {

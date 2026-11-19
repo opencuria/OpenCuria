@@ -303,14 +303,6 @@ export interface FileNode {
 
 export type { FileEntry as FileEntryRaw } from '@opencuria/client/types'
 
-export interface FilesUploadResultEvent {
-  workspace_id: string
-  request_id: string
-  path: string
-  status: 'success' | 'error'
-  error?: string
-}
-
 // --- Background processes ---
 
 export enum ProcessStatus {

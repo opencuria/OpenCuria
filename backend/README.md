@@ -11,6 +11,16 @@ images passed as paths. Tool images and PDFs are stored once under
 `/workspace/.opencuria/tool-media/<sha256>.<ext>`; later turns reference the path
 instead of base64.
 
+## Workspace files
+
+Clients never receive file contents over Socket.IO. They request signed,
+path-bound links (`POST /api/v1/workspaces/{id}/files/links/`, upload links via
+`.../files/uploads/`) and stream bytes through the raw ASGI transport under
+`/api/v1/workspace-files/` (`apps/workspace_files/http.py`): `Range` downloads,
+folders as `.tar.gz`, blurred 48 px previews, all-or-nothing uploads. Every request
+re-checks workspace ownership and runs one guest process stream; at most 500 MB
+per file and four transfers per workspace at a time.
+
 ## Codex harness
 
 Engine internals: [Codex engine README](apps/harness/engines/codex/README.md).

@@ -15,19 +15,13 @@ from apps.runners.enums import WorkspaceStatus
 from apps.runners.services import RunnerRepositories, RunnerService
 from common import realtime
 
-# These are the completion events consumed by useWorkspaceFileEvents. In
-# particular, reads return content_result and upload chunks fail upload_result.
+# The completion events the clients wait for when a relay is refused.
 RELAYS = [
     ("terminal_input", "forward_terminal_input", "terminal:error"),
     ("terminal_resize", "forward_terminal_resize", "terminal:error"),
     ("terminal_close", "forward_terminal_close", "terminal:error"),
     ("files_list", "forward_files_event", "files:list_result"),
     ("files_find", "forward_files_event", "files:find_result"),
-    ("files_read", "forward_files_event", "files:content_result"),
-    ("files_upload_start", "forward_files_event", "files:upload_result"),
-    ("files_upload_chunk", "forward_files_event", "files:upload_result"),
-    ("files_upload_finish", "forward_files_event", "files:upload_result"),
-    ("files_download", "forward_files_event", "files:download_result"),
 ]
 
 
@@ -107,16 +101,6 @@ async def test_capture_conflict_completes_request_once(
     elif result_event == "files:find_result":
         assert payload["paths"] == []
         assert payload["truncated"] is False
-    elif result_event == "files:content_result":
-        assert payload["content"] == ""
-        assert payload["size"] == 0
-        assert payload["truncated"] is False
-    elif result_event == "files:upload_result":
-        assert payload["status"] == "error"
-    elif result_event == "files:download_result":
-        assert payload["content"] == ""
-        assert payload["filename"] == ""
-        assert payload["is_archive"] is False
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 /** Browser File and drag/drop transport helpers for workspace chat uploads. */
 
-/** Encode a browser File as base64 (same arrayBuffer → btoa path as FileUploadZone). */
+/** Encode a browser File as base64 (for JSON request bodies). */
 export async function fileToBase64(file: File): Promise<string> {
   const buffer = await file.arrayBuffer()
   const bytes = new Uint8Array(buffer)

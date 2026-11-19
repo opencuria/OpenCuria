@@ -20,8 +20,13 @@ import { useTheme } from "../ui/theme";
 import { WorkspaceFileIcon } from "../tools/files/WorkspaceFileIcon";
 import { galleryFor, type MediaGallery } from "./chatGallery";
 import { isSafeExternalUrl, type MarkdownMedia } from "./markdownMedia";
+import { MediaPlaceholder } from "./MediaPlaceholder";
 import { MediaGalleryContext, MediaViewer } from "./MediaViewer";
-import { useWorkspaceMedia, type ResolvedChatMedia } from "./useWorkspaceMedia";
+import {
+  placeholderState,
+  useWorkspaceMedia,
+  type ChatMediaResolver,
+} from "./useWorkspaceMedia";
 import type { PromptRun } from "./promptBlocks";
 import { shortFileName } from "./composerDisplay";
 
@@ -149,7 +154,7 @@ export function PromptImages({
   testID = "prompt-images",
 }: {
   images: ComposerFileToken[];
-  resolveMedia?: (path: string) => Promise<ResolvedChatMedia>;
+  resolveMedia?: ChatMediaResolver;
   mediaVisible?: boolean;
   mediaScopeKey?: string | number;
   testID?: string;
@@ -166,7 +171,7 @@ export function PromptImages({
     [images],
   );
   const paths = useMemo(() => images.map((image) => image.path), [images]);
-  const { media, retry, reportDisplayError } = useWorkspaceMedia({
+  const { media, retry, request, reportDisplayError } = useWorkspaceMedia({
     paths,
     resolve: resolveMedia,
     scope,
@@ -203,6 +208,20 @@ export function PromptImages({
                 onError={() => reportDisplayError(item.path!)}
               />
             </NativeAction>
+          );
+        const placeholder = placeholderState(state);
+        if (placeholder)
+          return (
+            <MediaPlaceholder
+              key={item.path}
+              state={placeholder}
+              kind="image"
+              label={item.label}
+              fit="cover"
+              compact
+              onLoad={() => request(item.path!)}
+              style={frame}
+            />
           );
         if (state?.status === "failed")
           return (

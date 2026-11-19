@@ -3,10 +3,6 @@ import { describe, expect, it } from "vitest";
 import * as publicApi from "@opencuria/chat-core";
 import * as reducerApi from "@opencuria/chat-core/harnessReducer";
 import {
-  createChunkedTransferStore,
-  splitBase64Chunks,
-} from "@opencuria/chat-core/fileChunks";
-import {
   detectMentionQuery,
   filterMentionCandidates,
 } from "@opencuria/chat-core/harnessMentions";
@@ -119,38 +115,6 @@ describe("mentions", () => {
         "/workspace/src/util.ts",
       ]).map((candidate) => candidate.label),
     ).toEqual(["src/util.ts", "src/utilities.ts"]);
-  });
-});
-
-describe("chunking", () => {
-  it("splits base64 in aligned chunks and reassembles path-pinned transfers", () => {
-    const chunks = splitBase64Chunks("QUJDREVGR0g=", 8);
-    expect(chunks).toEqual(["QUJDREVG", "R0g="]);
-
-    const store = createChunkedTransferStore({ maxChars: 32 });
-    store.start("request-1", 2, { size: 8 }, "/workspace/file.txt");
-    store.addChunk("request-1", {
-      workspace_id: "workspace-1",
-      request_id: "request-1",
-      path: "/workspace/file.txt",
-      index: 1,
-      total_chunks: 2,
-      content: chunks[1]!,
-    });
-    store.addChunk("request-1", {
-      workspace_id: "workspace-1",
-      request_id: "request-1",
-      path: "/workspace/file.txt",
-      index: 0,
-      total_chunks: 2,
-      content: chunks[0]!,
-    });
-
-    expect(store.finish("request-1")).toEqual({
-      content: "QUJDREVGR0g=",
-      meta: { size: 8 },
-      path: "/workspace/file.txt",
-    });
   });
 });
 

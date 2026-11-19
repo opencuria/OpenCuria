@@ -990,49 +990,6 @@ export interface FileFindResult extends Omit<FileFindResultEvent, "paths"> {
   paths: string[];
 }
 
-export interface FileContentResult {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  content: string;
-  size: number;
-  truncated: boolean;
-  mime_type?: string;
-  chunked?: boolean;
-  total_chunks?: number;
-  error?: string;
-}
-
-export interface FileDownloadResult {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  content: string;
-  size: number;
-  filename: string;
-  is_archive: boolean;
-  chunked?: boolean;
-  total_chunks?: number;
-  error?: string;
-}
-
-export interface FileUploadResult {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  status: "success" | "error" | string;
-  error?: string;
-}
-
-export interface FileChunkEvent {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  index: number;
-  total_chunks: number;
-  content: string;
-}
-
 /** One published version of an app an agent sent to the user. */
 export interface PublishedAppVersion {
   id: string;

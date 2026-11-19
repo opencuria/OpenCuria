@@ -238,7 +238,8 @@ def _serialize_process(process: Any) -> dict[str, Any]:
     }
 
 
-#: Bounded per-stream queue depth (chunks of at most 64KiB each).
+#: Bounded per-stream queue depth (chunks of at most
+#: ``WorkspaceByteStream.MAX_CHUNK_SIZE`` each).
 STREAM_QUEUE_DEPTH = 64
 
 #: Queued chunks from which output ACKs wait for the consumer. The runner
@@ -246,6 +247,12 @@ STREAM_QUEUE_DEPTH = 64
 #: downloading through the app gateway) slows the stream down instead of
 #: overflowing its queue.
 STREAM_PAUSE_DEPTH = STREAM_QUEUE_DEPTH // 2
+
+#: Queued bytes from which output ACKs wait for the consumer, and the most a
+#: stream may queue before it fails: large chunks must not let one slow
+#: consumer hold the depth limit times the chunk size in memory.
+STREAM_PAUSE_BYTES = 4 * 1024 * 1024
+STREAM_QUEUE_BYTES = 16 * 1024 * 1024
 
 #: Longest an output ACK waits for the consumer; below the runner's ACK
 #: timeout so a stalled consumer still ends in the queue-overflow path.
@@ -304,6 +311,7 @@ class _StreamState:
         "stdout_bytes",
         "managed",
         "drained",
+        "queued_bytes",
     )
 
     def __init__(self, connection_id: str, queue: asyncio.Queue) -> None:
@@ -325,6 +333,7 @@ class _StreamState:
         self.opened_at = 0.0
         self.stdout_bytes = 0
         self.managed = False
+        self.queued_bytes = 0
 
     def append_stderr(self, data: bytes) -> None:
         """Buffer bounded stderr bytes (newest win; unbounded total kept)."""
@@ -343,7 +352,10 @@ class _StreamState:
 
     def update_drained(self) -> None:
         """Track whether the consumer keeps up (call on the owning loop)."""
-        if self.closed or self.queue.qsize() < STREAM_PAUSE_DEPTH:
+        if self.closed or (
+            self.queue.qsize() < STREAM_PAUSE_DEPTH
+            and self.queued_bytes < STREAM_PAUSE_BYTES
+        ):
             self.drained.set()
         else:
             self.drained.clear()
@@ -1378,12 +1390,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             )
             return False
         try:
-            decoded_len = len(base64.b64decode(raw, validate=True))
+            decoded = base64.b64decode(raw, validate=True)
         except Exception:
             log.warning(
                 "stream_output_bad_base64", connection_id=connection_id
             )
             return False
+        decoded_len = len(decoded)
         if decoded_len > WorkspaceByteStream.MAX_CHUNK_SIZE:
             log.warning(
                 "stream_output_oversize", connection_id=connection_id
@@ -1394,6 +1407,8 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             if state.closed:
                 return
             try:
+                if state.queued_bytes + decoded_len > STREAM_QUEUE_BYTES:
+                    raise asyncio.QueueFull
                 # Count stdout bytes at enqueue time (secret-free size
                 # only; content never leaves the queue into logs).
                 if stream == "stdout":
@@ -1402,15 +1417,16 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                     # Stderr is captured per stream (bounded, newest
                     # win): it stays out of the MCP stdout framing and
                     # is only ever surfaced as a sanitized excerpt.
-                    try:
-                        state.append_stderr(
-                            base64.b64decode(raw, validate=True)
-                        )
-                    except Exception:  # pragma: no cover - validated above
-                        pass
+                    state.append_stderr(decoded)
                 state.queue.put_nowait(
-                    {"type": "chunk", "stream": stream, "data": raw}
+                    {
+                        "type": "chunk",
+                        "stream": stream,
+                        "data": decoded,
+                        "size": decoded_len,
+                    }
                 )
+                state.queued_bytes += decoded_len
                 state.update_drained()
             except asyncio.QueueFull:
                 # Overflow: mark the failure AND best-effort remote close
@@ -1588,6 +1604,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise StreamClosedError(f"stream {connection_id!r} is not open")
         while True:
             item = await state.queue.get()
+            state.queued_bytes = max(0, state.queued_bytes - int(item.get("size", 0)))
             state.update_drained()
             kind = item.get("type")
             if kind == "closed":
@@ -1600,13 +1617,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             if item.get("stream") == "stderr":
                 if self._on_stderr is not None:
                     try:
-                        raw = "".join(
-                            str(item.get("data", "")).split()
-                        )
-                        self._on_stderr(
-                            connection_id,
-                            base64.b64decode(raw, validate=True),
-                        )
+                        self._on_stderr(connection_id, bytes(item.get("data", b"")))
                     except Exception:
                         log.warning(
                             "stream_stderr_callback_failed",
@@ -1618,15 +1629,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                         connection_id=connection_id,
                     )
                 continue
-            try:
-                return base64.b64decode(
-                    "".join(str(item.get("data", "")).split()),
-                    validate=True,
-                )
-            except Exception as exc:
-                raise StreamClosedError(
-                    f"stream {connection_id!r}: invalid chunk"
-                ) from exc
+            data = item.get("data")
+            if not isinstance(data, bytes):
+                raise StreamClosedError(f"stream {connection_id!r}: invalid chunk")
+            return data
 
     async def _stream_send(self, connection_id: str, data: bytes) -> None:
         """Write bounded bytes to one stream (ACK each input event)."""

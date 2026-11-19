@@ -5,7 +5,11 @@ import { useEditorStore } from './editor'
 import { ApiRequestError } from '@/services/api'
 import { readEditorFile, saveEditorFile } from '@/services/editor.api'
 import { readGitFileContent, runGitOperation } from '@/services/git.api'
-import { readWorkspaceFile } from '@/services/socket'
+import {
+  makeFileLink,
+  resetWorkspaceFiles,
+  workspaceFiles,
+} from '@/services/workspaceFiles.fixtures'
 import { onEditorModelDisposal } from '@/lib/editorModelLifecycle'
 
 vi.mock('@/services/editor.api', () => ({
@@ -16,7 +20,9 @@ vi.mock('@/services/git.api', () => ({
   readGitFileContent: vi.fn(),
   runGitOperation: vi.fn(),
 }))
-vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn() }))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
+
+const files = workspaceFiles()
 
 const WS = 'ws-1'
 const REPO = '/workspace/repo'
@@ -39,6 +45,7 @@ function content(path = FILE, text = 'before\n', revision = 'worktree-1') {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  resetWorkspaceFiles()
   setActivePinia(createPinia())
   vi.mocked(readEditorFile).mockImplementation(async (_ws, path) => content(path))
   vi.mocked(saveEditorFile).mockImplementation(async (_ws, path, text) =>
@@ -417,7 +424,7 @@ describe('editor previews', () => {
       readOnly: false,
       content: modified,
     })
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
     await store.openDiff(WS, REPO, 'icon.svg')
     expect(store.activeTab).toMatchObject({
       mediaType: 'text',
@@ -431,51 +438,94 @@ describe('editor previews', () => {
     expect(store.activeTab!.content).toBe('<svg />\n')
   })
 
-  it('keeps image and PDF previews without requesting editable text', async () => {
-    vi.mocked(readWorkspaceFile).mockResolvedValue({
-      workspace_id: WS,
-      request_id: 'read',
-      path: '/workspace/image.png',
-      content: 'AQID',
-      size: 3,
-      truncated: false,
-    })
-    const store = useEditorStore()
-    await store.openFile(WS, '/workspace/image.png')
-    expect(readEditorFile).not.toHaveBeenCalled()
-    expect(store.activeTab).toMatchObject({
-      mediaType: 'image',
-      mimeType: 'image/png',
-      rawBase64: 'AQID',
-      readOnly: true,
-      previewBytes: 3,
-    })
-    store.updateContent(store.activeTab!.id, 'bad overwrite')
-    expect(store.activeTab!.dirty).toBe(false)
-    expect(await store.saveTab(store.activeTab!.id)).toBe(false)
-  })
+  it.each([
+    ['/workspace/image.png', 'image', 'image/png'],
+    ['/workspace/spec.pdf', 'pdf', 'application/pdf'],
+  ] as const)(
+    'streams %s from its signed link without editable text',
+    async (path, mediaType, mimeType) => {
+      const store = useEditorStore()
+      await store.openFile(WS, path)
+      expect(readEditorFile).not.toHaveBeenCalled()
+      expect(files.readBytes).not.toHaveBeenCalled()
+      expect(store.activeTab).toMatchObject({
+        mediaType,
+        mimeType,
+        contentUrl: `https://files.test/content${path}`,
+        readOnly: true,
+        size: 1024,
+      })
+      store.updateContent(store.activeTab!.id, 'bad overwrite')
+      expect(store.activeTab!.dirty).toBe(false)
+      expect(await store.saveTab(store.activeTab!.id)).toBe(false)
+
+      // Reloading asks for a fresh link; an unchanged file keeps its preview URL.
+      files.link.mockResolvedValueOnce(makeFileLink(path, { contentUrl: 'https://files.test/new' }))
+      await store.reloadTab(store.activeTab!.id)
+      expect(files.forget).toHaveBeenCalledWith(WS, path)
+      expect(files.link).toHaveBeenCalledTimes(2)
+      expect(store.activeTab!.contentUrl).toBe(`https://files.test/content${path}`)
+      files.link.mockResolvedValueOnce(
+        makeFileLink(path, { contentUrl: 'https://files.test/new', modifiedAt: 1_800_000_000 }),
+      )
+      await store.reloadTab(store.activeTab!.id)
+      expect(store.activeTab!.contentUrl).toBe('https://files.test/new')
+    },
+  )
 
   it('allows only readonly preview for oversized text and never saves truncated bytes', async () => {
     vi.mocked(readEditorFile).mockRejectedValueOnce(
       new ApiRequestError(413, 'Too large', 'file_too_large'),
     )
-    vi.mocked(readWorkspaceFile).mockResolvedValue({
-      workspace_id: WS,
-      request_id: 'read',
-      path: FILE,
-      content: btoa('preview'),
-      size: 9_000_000,
+    files.readBytes.mockResolvedValue({
+      link: makeFileLink(FILE, { size: 9_000_000 }),
+      bytes: new TextEncoder().encode('preview'),
       truncated: true,
     })
+    files.link.mockResolvedValue(makeFileLink(FILE, { size: 9_000_000 }))
     const store = useEditorStore()
     await store.openFile(WS, FILE)
+    expect(files.readBytes).toHaveBeenCalledWith(WS, FILE, {
+      maxBytes: 1024 * 1024,
+      signal: expect.any(AbortSignal),
+    })
     expect(store.activeTab).toMatchObject({
       mediaType: 'text',
       content: 'preview',
       truncated: true,
       readOnly: true,
+      size: 9_000_000,
+      previewBytes: 7,
     })
     expect(await store.saveTab(store.activeTab!.id)).toBe(false)
     expect(saveEditorFile).not.toHaveBeenCalled()
+  })
+
+  it('shows binary files without decoding them as text', async () => {
+    vi.mocked(readEditorFile).mockRejectedValueOnce(
+      new ApiRequestError(415, 'Binary', 'binary_file'),
+    )
+    files.readBytes.mockResolvedValue({
+      link: makeFileLink('/workspace/app.bin'),
+      bytes: new Uint8Array([0x7f, 0x45, 0x00, 0x01]),
+      truncated: false,
+    })
+    const store = useEditorStore()
+    await store.openFile(WS, '/workspace/app.bin')
+    expect(store.activeTab).toMatchObject({
+      mediaType: 'binary',
+      content: '',
+      contentUrl: '',
+      readOnly: true,
+      size: 1024,
+    })
+  })
+
+  it('does not open previews above the transfer limit', async () => {
+    files.link.mockResolvedValue(makeFileLink('/workspace/huge.png', { size: 600 * 1024 * 1024 }))
+    const store = useEditorStore()
+    await store.openFile(WS, '/workspace/huge.png')
+    expect(store.activeTab).toMatchObject({ mediaType: 'binary', contentUrl: '' })
+    expect(files.readBytes).not.toHaveBeenCalled()
   })
 })

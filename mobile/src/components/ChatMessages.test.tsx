@@ -579,7 +579,16 @@ describe("ChatMessages", () => {
       },
       detail_loaded: true,
     });
-    const resolveMedia = jest.fn(() => new Promise<string>(() => {}));
+    // Large tool pictures wait for a tap like any chat picture.
+    const resolveMedia = Object.assign(
+      jest.fn(() => new Promise<string>(() => {})),
+      {
+        describe: jest.fn().mockResolvedValue({
+          size: 6 * 1024 * 1024,
+          thumbnailUrl: "",
+        }),
+      },
+    );
     const onOpenFile = jest.fn();
     const onOpenAttachment = jest.fn();
     render(
@@ -606,6 +615,9 @@ describe("ChatMessages", () => {
     fireEvent.press(screen.getByRole("button", { name: "Worked" }));
     fireEvent.press(screen.getByRole("button", { name: "Explored 1 file" }));
     fireEvent.press(screen.getByRole("button", { name: "read" }));
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Load image cat.png, 6.0 MB" }),
+    );
     await waitFor(() => expect(resolveMedia).toHaveBeenCalledWith(image));
     fireEvent.press(
       screen.getByRole("button", { name: "Open attachment spec.pdf" }),
@@ -1121,6 +1133,63 @@ describe("ChatMessages", () => {
     view.unmount();
     for (const release of releases) expect(release).toHaveBeenCalledTimes(1);
   });
+
+  it("loads the shown picture of the gallery and previews large neighbours", async () => {
+    const resolveMedia = Object.assign(
+      jest.fn(async (path: string) => `file:///cache${path}`),
+      {
+        describe: jest.fn(async (path: string) => ({
+          size: path.includes("big") ? 9 * 1024 * 1024 : 1024,
+          thumbnailUrl: `https://curia.test/thumbnail${path}`,
+        })),
+      },
+    );
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              ...message([
+                part(
+                  "answer",
+                  "text",
+                  "![Small](/workspace/small.png)\n\n![Big](/workspace/big.png)",
+                  0,
+                ),
+              ]),
+              completed_at: "2026-10-30T10:00:05Z",
+            },
+          ]}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="gallery-scope"
+        />
+      </ThemeProvider>,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Load image Big, 9.0 MB" }),
+    ).toBeTruthy();
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Open image preview Small" }),
+    );
+    const viewer = await screen.findByTestId("image-preview");
+    // The neighbour waits with its preview until it is shown.
+    expect(await within(viewer).findByLabelText("Big, 9.0 MB")).toBeTruthy();
+    expect(resolveMedia.mock.calls.map(([path]) => path)).not.toContain(
+      "/workspace/big.png",
+    );
+    fireEvent.press(
+      within(viewer).getByRole("button", { name: "Show image 2 of 2, Big" }),
+    );
+    // Shown, it loads, and the transcript shows it as well.
+    await waitFor(() =>
+      expect(resolveMedia.mock.calls.map(([path]) => path)).toContain(
+        "/workspace/big.png",
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Open image preview Big" }),
+    ).toBeTruthy();
+  });
 });
 
 describe("user message context", () => {
@@ -1148,6 +1217,46 @@ describe("user message context", () => {
     // Code keeps a mention as typed.
     expect(screen.getByText(/@file:\/workspace\/raw\.ts/)).toBeTruthy();
     expect(screen.queryByText(/@file:\/workspace\/src/)).toBeNull();
+  });
+
+  it("shows large mentioned pictures as previews that load on tap", async () => {
+    const resolveMedia = Object.assign(
+      jest.fn(async (path: string) => `file:///cache${path}`),
+      {
+        describe: jest.fn().mockResolvedValue({
+          size: 7 * 1024 * 1024,
+          thumbnailUrl: "https://curia.test/thumbnail/photo.png",
+        }),
+      },
+    );
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              id: "u1",
+              session_id: "s1",
+              role: "user",
+              content: "Look @file:/workspace/photo.png",
+              parts: [],
+              position: 0,
+            },
+          ]}
+          resolveMedia={resolveMedia}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(
+      await screen.findByRole("button", {
+        name: "Load image photo.png, 7.0 MB",
+      }),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Open image preview photo.png",
+      }),
+    ).toBeTruthy();
+    expect(resolveMedia).toHaveBeenCalledWith("/workspace/photo.png");
   });
 
   it("shows mentioned pictures as thumbnails below the bubble", async () => {

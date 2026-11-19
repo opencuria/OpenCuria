@@ -8,7 +8,11 @@ import { useEditorStore } from '@/stores/editor'
 import { ApiRequestError } from '@/services/api'
 import { readEditorFile, saveEditorFile } from '@/services/editor.api'
 import { readGitFileContent, runGitOperation } from '@/services/git.api'
-import { readWorkspaceFile } from '@/services/socket'
+import {
+  makeFileLink,
+  resetWorkspaceFiles,
+  workspaceFiles,
+} from '@/services/workspaceFiles.fixtures'
 
 enableAutoUnmount(afterEach)
 
@@ -25,7 +29,7 @@ vi.mock('@/services/git.api', () => ({
   readGitFileContent: vi.fn(),
   runGitOperation: vi.fn(),
 }))
-vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn() }))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
 vi.mock('@/lib/monaco', () => ({ disposeMonacoModel: vi.fn(), disposeMonacoModels: vi.fn() }))
 vi.mock('./MonacoEditor.vue', () => ({
   __esModule: true,
@@ -114,12 +118,7 @@ beforeEach(() => {
     revision: `${revision}-revision`,
     exists: true,
   }))
-  vi.mocked(readWorkspaceFile).mockResolvedValue({
-    content: btoa('preview'),
-    size: 7,
-    truncated: false,
-    mime_type: 'image/png',
-  } as never)
+  resetWorkspaceFiles()
 })
 
 describe('editor tabs and unsaved-close dialog', () => {
@@ -288,8 +287,13 @@ describe('workspace editor content states and commands', () => {
     await store.openFile(WS, '/workspace/repo/docs/README.md')
     const wrapper = mount(frame)
     await flushPromises()
-    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/repo/assets/screen shot.png', 20 * 1024 * 1024, expect.any(AbortSignal))
-    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/logo.png', 20 * 1024 * 1024, expect.any(AbortSignal))
+    const files = workspaceFiles()
+    expect(files.link).toHaveBeenCalledWith(
+      WS,
+      '/workspace/repo/assets/screen shot.png',
+      expect.any(AbortSignal),
+    )
+    expect(files.link).toHaveBeenCalledWith(WS, '/workspace/logo.png', expect.any(AbortSignal))
     expect(wrapper.findAll('[data-testid="editor-markdown-preview"] img')).toHaveLength(2)
   })
 
@@ -297,7 +301,7 @@ describe('workspace editor content states and commands', () => {
     vi.mocked(readEditorFile).mockResolvedValueOnce({
       path: '/workspace/README.md', content: '# Guide\n\n![Missing](missing.png)', revision: 'markdown-1',
     })
-    vi.mocked(readWorkspaceFile).mockRejectedValueOnce(new Error('File not found'))
+    workspaceFiles().link.mockRejectedValueOnce(new Error('File not found'))
     const store = useEditorStore()
     await store.openFile(WS, '/workspace/README.md')
     const wrapper = mount(frame)
@@ -533,11 +537,11 @@ describe('workspace editor content states and commands', () => {
         vi.mocked(readEditorFile).mockRejectedValueOnce(
           new ApiRequestError(422, 'Binary', 'binary_file'),
         )
-        vi.mocked(readWorkspaceFile).mockResolvedValueOnce({
-          content: btoa('\0binary'),
-          size: 7,
+        workspaceFiles().readBytes.mockResolvedValueOnce({
+          link: makeFileLink(`/workspace/${filename}`),
+          bytes: new TextEncoder().encode('\0binary'),
           truncated: false,
-        } as never)
+        })
       }
       const store = useEditorStore()
       await store.openFile(WS, `/workspace/${filename}`)
@@ -545,11 +549,15 @@ describe('workspace editor content states and commands', () => {
       await flushPromises()
       expect(wrapper.find('[data-testid="monaco-stub"]').exists()).toBe(false)
       expect(wrapper.find('[data-testid="editor-save"]').attributes('disabled')).toBeDefined()
-      if (filename.endsWith('.png'))
-        expect(wrapper.find('img').attributes('src')).toBe('data:image/png;base64,cHJldmlldw==')
-      else if (filename.endsWith('.pdf'))
-        expect(wrapper.find('iframe').attributes('title')).toBe('PDF preview')
-      else expect(wrapper.find('[data-testid="editor-binary"]').exists()).toBe(true)
+      const url = `https://files.test/content/workspace/${filename}`
+      if (filename.endsWith('.png')) expect(wrapper.find('img').attributes('src')).toBe(url)
+      else if (filename.endsWith('.pdf')) expect(wrapper.find('iframe').attributes('src')).toBe(url)
+      else {
+        const binary = wrapper.get('[data-testid="editor-binary"]')
+        expect(binary.text()).toContain('Binary file · 1.0 KB')
+        await binary.get('button').trigger('click')
+        expect(mocks.downloadFile).toHaveBeenLastCalledWith(WS, `/workspace/${filename}`)
+      }
     },
   )
 })

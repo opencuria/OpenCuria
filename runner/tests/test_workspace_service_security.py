@@ -14,21 +14,6 @@ from src.services.credentials import (
     WORKSPACE_CREDENTIAL_DIR,
     WORKSPACE_CREDENTIAL_ENV_FILE,
 )
-from src.services.files import convert_archive_to_tar
-
-
-@pytest.mark.parametrize("link_type", ["sym", "hard"])
-def test_convert_archive_to_tar_rejects_links(link_type: str) -> None:
-    source = io.BytesIO()
-    with tarfile.open(fileobj=source, mode="w") as tar:
-        info = tarfile.TarInfo(name="malicious-link")
-        info.linkname = "/etc/passwd"
-        info.type = tarfile.SYMTYPE if link_type == "sym" else tarfile.LNKTYPE
-        tar.addfile(info)
-    source.seek(0)
-
-    with pytest.raises(ValueError, match="unsafe links"):
-        convert_archive_to_tar(source.getvalue())
 
 
 @pytest.mark.asyncio

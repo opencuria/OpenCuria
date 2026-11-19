@@ -74,7 +74,9 @@ const mockComposer: { onDraftChange?: (value: string) => void } = {};
 /** The props the transcript got last, to call its handlers directly. */
 const mockTranscript: {
   props?: {
-    resolveMedia?: (path: string) => Promise<unknown>;
+    resolveMedia?: ((path: string) => Promise<unknown>) & {
+      describe?: (path: string) => Promise<unknown>;
+    };
     onFork?: unknown;
     onEdit?: (message: unknown) => void;
     editingMessageId?: string | null;
@@ -133,6 +135,7 @@ const mockController = {
   withdrawScheduled: jest.fn().mockResolvedValue(null),
   sendScheduledNow: jest.fn().mockResolvedValue(undefined),
   dismissError: jest.fn(),
+  previewPrompt: jest.fn(() => jest.fn()),
 };
 const mockUseSession = useSession as jest.MockedFunction<typeof useSession>;
 
@@ -270,6 +273,18 @@ jest.mock("../components", () => {
           },
           ReactRuntime.createElement(Text, null, "Send"),
         ),
+        ReactRuntime.createElement(Pressable, {
+          testID: "test-send-photo",
+          onPress: () => {
+            void props.onSend({
+              text: "see photo",
+              skillIds: [],
+              attachments: [
+                { id: "photo", uri: "file:///photo.jpg", name: "photo.jpg" },
+              ] as never,
+            });
+          },
+        }),
         ReactRuntime.createElement(
           Text,
           { testID: "composer-steering" },
@@ -393,7 +408,8 @@ jest.mock("../tools/terminal", () => ({ releaseTerminalSessions: jest.fn() }));
 jest.mock("../platform", () => ({
   MediaCache: jest.fn().mockImplementation(() => ({
     dispose: jest.fn(),
-    resolve: jest.fn(),
+    describe: jest.fn().mockResolvedValue({ size: 1024, thumbnailUrl: "" }),
+    resolvePinned: jest.fn(),
     openFile: jest.fn(),
     saveAttachment: jest.fn(),
   })),
@@ -491,9 +507,11 @@ function mockClient() {
     },
     files: {
       findFiles: jest.fn().mockResolvedValue({ paths: [] }),
-      readFile: jest
-        .fn()
-        .mockResolvedValue({ content: btoa("const answer = 42;"), size: 18 }),
+      readBytes: jest.fn().mockResolvedValue({
+        link: { size: 18 },
+        bytes: new TextEncoder().encode("const answer = 42;"),
+        truncated: false,
+      }),
     },
   };
 }
@@ -610,6 +628,41 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
       }),
     ),
   );
+  tree.unmount();
+});
+
+it("uploads attachments over HTTP while the live connection is down", async () => {
+  const client = mockClient();
+  client.realtime.isConnected = false;
+  const { uploadAttachments, MediaCache } = jest.requireMock("../platform");
+  uploadAttachments.mockResolvedValueOnce([
+    "/workspace/.opencuria/user-uploaded/photo_1.jpg",
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+  );
+  fireEvent.press(screen.getByTestId("test-send-photo"));
+  await waitFor(() =>
+    expect(mockController.send).toHaveBeenCalledWith(
+      "see photo\n@file:/workspace/.opencuria/user-uploaded/photo_1.jpg ",
+      expect.anything(),
+    ),
+  );
+  expect(uploadAttachments).toHaveBeenCalledWith(client, runningWorkspace.id, [
+    expect.objectContaining({ uri: "file:///photo.jpg" }),
+  ]);
+  // Chat media learn their size from the workspace's media cache.
+  await expect(
+    mockTranscript.props!.resolveMedia!.describe!("/workspace/big.png"),
+  ).resolves.toEqual({ size: 1024, thumbnailUrl: "" });
+  const media = MediaCache.mock.results.at(-1)!.value;
+  expect(media.describe).toHaveBeenCalledWith("/workspace/big.png");
   tree.unmount();
 });
 
@@ -2014,10 +2067,10 @@ it("opens chat file links in the explorer viewer and closes back to chat", async
   await screen.findByTestId("file-source");
   expect(screen.getByTestId("file-viewer")).toBeTruthy();
   expect(screen.queryByTestId("media-viewer-sheet")).toBeNull();
-  expect(client.files.readFile).toHaveBeenCalledWith(
+  expect(client.files.readBytes).toHaveBeenCalledWith(
     runningWorkspace.id,
     "/workspace/index.ts",
-    1024 * 1024,
+    { maxBytes: 1024 * 1024 },
   );
   fireEvent(screen.getByTestId("file-viewer"), "accessibilityEscape");
   expect(screen.queryByTestId("file-viewer")).toBeNull();
@@ -2042,7 +2095,7 @@ it("opens tool attachments in the shared file viewer", async () => {
   ).toBeTruthy();
   expect(screen.getByRole("button", { name: "Share or open" })).toBeTruthy();
   expect(screen.queryByTestId("media-viewer-sheet")).toBeNull();
-  expect(client.files.readFile).not.toHaveBeenCalled();
+  expect(client.files.readBytes).not.toHaveBeenCalled();
 });
 
 it("closes the file viewer when navigating to a different chat", async () => {
@@ -2183,6 +2236,10 @@ describe("offline", () => {
     await expect(
       mockTranscript.props!.resolveMedia!("/workspace/missing.png"),
     ).rejects.toMatchObject({ retryable: false });
+    // Saved copies show whatever their size.
+    await expect(
+      mockTranscript.props!.resolveMedia!.describe!("/workspace/shot.png"),
+    ).resolves.toBeNull();
 
     fireEvent.press(
       within(screen.getByTestId("offline-notice")).getByRole("button", {

@@ -435,9 +435,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         await handlers["files:list"](
             _payload(workspace_id, "l-external", path="/etc")
         )
-        await handlers["files:read"](
-            _payload(workspace_id, "r-external", path="/etc/passwd")
-        )
 
         emitted = {
             call.args[0]: call.args[1]
@@ -448,15 +445,7 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
             "Path must be under /workspace",
             emitted["files:list_result"]["error"],
         )
-        self.assertEqual(emitted["files:content_result"]["content"], "")
-        self.assertIn(
-            "Path must be under /workspace",
-            emitted["files:content_result"]["error"],
-        )
-        self.assertEqual(
-            service.file_access_calls,
-            [("list", "/etc", False), ("read", "/etc/passwd", False)],
-        )
+        self.assertEqual(service.file_access_calls, [("list", "/etc", False)])
 
     async def test_files_find_emits_capped_paths(self) -> None:
         service = _FakeService()
@@ -1032,35 +1021,6 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(shlex.quote(evil), shell_cmd)
         self.assertNotIn("'x'; touch", shell_cmd.replace(shlex.quote(evil), ""))
 
-    async def test_download_dir_passes_single_quote_path_as_argv(self) -> None:
-        from src.models import WorkspaceInfo
-
-        service, captured, workspace_id = self._service()
-
-        class DirRuntime:
-            async def exec_command_wait(
-                self, instance_id, command, workdir=None, env=None
-            ):
-                if command[:2] == ["realpath", "-m"]:
-                    return 0, command[2] + "\n"
-                captured.append(command)
-                if command[3] == "opencuria-file-download":
-                    return 0, "directory\n"
-                return 0, "3\nQUJD"
-
-        service.registry._runtime = DirRuntime()
-        info = service.registry._cache[workspace_id]
-        service.registry._cache[workspace_id] = WorkspaceInfo(
-            workspace_id=info.workspace_id,
-            instance_id="instance-1",
-            status="running",
-        )
-        evil = "/workspace/x'; touch /tmp/pwned; echo '"
-        result = await service.files.download_file(workspace_id, evil)
-        self.assertTrue(result["content"])
-        argv = next(c for c in captured if c[3] == "opencuria-directory-download")
-        self.assertEqual(argv[-3:-1], evil.rsplit("/", 1))
-
 
 class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
     """Symlink containment: realpath escapes fail closed with ValueError."""
@@ -1112,11 +1072,6 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
         service, _runtime, workspace_id = self._service("/etc")
         with self.assertRaises(ValueError):
             await service.files.list_files(workspace_id, "/workspace/link")
-
-    async def test_download_file_rejects_symlink_escape(self) -> None:
-        service, _runtime, workspace_id = self._service("/etc/shadow")
-        with self.assertRaises(ValueError):
-            await service.files.download_file(workspace_id, "/workspace/link")
 
     async def test_write_file_content_rejects_symlink_escape(self) -> None:
         service, _runtime, workspace_id = self._service("/etc/cron.d/evil")

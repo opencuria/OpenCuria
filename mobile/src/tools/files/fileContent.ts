@@ -1,9 +1,7 @@
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
+import { TEXT_PREVIEW_MAX_BYTES } from "@opencuria/chat-core/workspaceFiles";
 import type { OpenCuriaClient } from "@opencuria/client";
-import { base64ToBytes, createUtf8StreamDecoder } from "../utf8";
-
-/** Source preview limit; larger files show their beginning (like t3code). */
-export const FILE_PREVIEW_MAX_BYTES = 1024 * 1024;
+import { createUtf8StreamDecoder } from "../utf8";
 
 export interface WorkspaceText {
   text: string;
@@ -26,25 +24,23 @@ export function looksBinary(bytes: Uint8Array): boolean {
   return false;
 }
 
-/** Read a workspace file as UTF-8 text, at most the preview limit. */
+/** Read the beginning of a workspace file as UTF-8 text (like t3code). */
 export async function readWorkspaceText(
-  client: OpenCuriaClient,
+  client: Pick<OpenCuriaClient, "files">,
   workspaceId: string,
   path: string,
 ): Promise<WorkspaceText> {
-  const result = await client.files.readFile(
+  const { link, bytes, truncated } = await client.files.readBytes(
     workspaceId,
     path,
-    FILE_PREVIEW_MAX_BYTES,
+    { maxBytes: TEXT_PREVIEW_MAX_BYTES },
   );
-  if (result.error) throw new Error(result.error);
-  const bytes = base64ToBytes(result.content ?? "");
   if (looksBinary(bytes)) throw new BinaryFileError();
   const text = createUtf8StreamDecoder().decode(bytes);
   return {
     text: text.replace(/^﻿/, ""),
-    truncated: result.truncated === true || result.size > bytes.length,
-    size: result.size,
+    truncated,
+    size: link.size,
   };
 }
 

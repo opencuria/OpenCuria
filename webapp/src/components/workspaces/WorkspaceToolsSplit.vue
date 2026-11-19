@@ -2,8 +2,8 @@
 /**
  * WorkspaceToolsSplit — chat/home column plus the Git/Desktop/Terminal/Files
  * side panel. Moves the existing chat into the side panel while editing,
- * retaining its mounted instance. Owns file-socket routing and tool-store
- * reset when the workspace changes or this host unmounts.
+ * retaining its mounted instance. Owns tool-store reset when the workspace
+ * changes or this host unmounts.
  */
 import {
   computed,
@@ -13,16 +13,13 @@ import {
   onMounted,
   onUnmounted,
   ref,
-  toRef,
   watch,
   watchEffect,
 } from 'vue'
 import DesktopSurface from '@/components/workspaces/DesktopSurface.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
-import { useWorkspaceFileEvents } from '@/composables/useWorkspaceFileEvents'
 import { useDesktopStore } from '@/stores/desktop'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useGitStore } from '@/stores/git'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { useEditorStore } from '@/stores/editor'
@@ -36,10 +33,6 @@ const WorkspaceSidePanel = defineAsyncComponent(
   () => import('@/components/workspaces/WorkspaceSidePanel.vue'),
 )
 
-// Media URLs are keyed by path in the store. Keep them across Home → chat
-// transitions for the same workspace, but never reuse them in another one.
-let mediaWorkspaceId: string | null = null
-
 const props = defineProps<{
   workspaceId: string
   canPrompt: boolean
@@ -50,11 +43,6 @@ const layout = useWorkspaceLayoutStore()
 const leftChatTarget = inject(sidebarChatTargetKey, ref<HTMLElement | null>(null))
 const desktopStore = useDesktopStore()
 const fileExplorerStore = useFileExplorerStore()
-const workspaceImageStore = useWorkspaceImageStore()
-if (props.workspaceId && mediaWorkspaceId !== props.workspaceId) {
-  workspaceImageStore.reset()
-  mediaWorkspaceId = props.workspaceId
-}
 const gitStore = useGitStore()
 const editorStore = useEditorStore()
 const workspaceEditor = ref<{
@@ -105,8 +93,6 @@ function refreshActiveFile(): void {
     void editorStore.reloadTab(tab.id)
 }
 onMounted(() => window.addEventListener('focus', refreshActiveFile))
-
-useWorkspaceFileEvents(toRef(props, 'workspaceId'))
 
 const showingEditor = computed(() => props.canPrompt && editorStore.isOpen)
 const showingSidebarChat = computed(() => showingEditor.value && sidebarChatOpen.value)
@@ -165,10 +151,6 @@ watch(
     if (!oldId || newId === oldId) return
     sidebarChatOpen.value = false
     resetToolStores({ resetDesktop: false })
-    if (newId && newId !== mediaWorkspaceId) {
-      workspaceImageStore.reset()
-      mediaWorkspaceId = newId
-    }
   },
 )
 

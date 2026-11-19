@@ -1,11 +1,9 @@
 /** Pure naming, token, and file-tree helpers shared by chat upload clients. */
 
-import { UPLOAD_MAX_BYTES } from "./fileChunks";
 import type { FileNode } from "./types";
 
-/** Workspace directory chat uploads are stored in (created via `mkdir -p`). */
+/** Workspace directory chat uploads are stored in (created on upload). */
 export const CHAT_UPLOAD_DIR = "/workspace/.opencuria/user-uploaded";
-export { UPLOAD_MAX_BYTES };
 
 let chatUploadFallbackCounter = 0;
 

@@ -143,8 +143,10 @@ class WorkspaceByteStream(abc.ABC):
     ``on_stderr`` callback (logging only — never mixed into stdout).
     """
 
-    #: Max raw bytes per stream chunk in either direction.
-    MAX_CHUNK_SIZE = 64 * 1024
+    #: Max raw bytes per stream chunk in either direction. Every chunk is one
+    #: ACKed runner round trip, so file transfers need large ones; the runner
+    #: still forwards small reads at once.
+    MAX_CHUNK_SIZE = 1024 * 1024
 
     def __init__(self, workspace_id: str, connection_id: str) -> None:
         self.workspace_id = workspace_id

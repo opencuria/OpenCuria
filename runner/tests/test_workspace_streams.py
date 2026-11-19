@@ -218,7 +218,7 @@ class StreamValidationTests(unittest.IsolatedAsyncioTestCase):
         service, _rt, ws_id = _service()
         await service.streams.stream_start_process(ws_id, "w1", ["cat"])
         with self.assertRaises(ValueError):
-            await service.streams.stream_write("w1", b"x" * (64 * 1024 + 1))
+            await service.streams.stream_write("w1", b"x" * (1024 * 1024 + 1))
         await service.streams.stream_write("w1", b"hello")
 
     async def test_close_unknown_returns_closed_false(self) -> None:

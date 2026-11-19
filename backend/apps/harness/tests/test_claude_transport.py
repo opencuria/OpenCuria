@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from apps.harness.access.base import WorkspaceByteStream
 from apps.harness.engines.claude.transport import ClaudeWorkspaceTransport
 
 
@@ -73,8 +74,9 @@ async def test_transport_frames_ndjson_across_chunks_and_bounds_writes() -> None
     assert messages == [{"type": "one"}, {"type": "two", "text": "a b"}]
     assert accessor.opened["command"] == ["/opt/claude"]
 
-    await transport.write("x" * (64 * 1024 + 5))
-    assert [len(chunk) for chunk in stream.sent] == [64 * 1024, 5]
+    limit = WorkspaceByteStream.MAX_CHUNK_SIZE
+    await transport.write("x" * (limit + 5))
+    assert [len(chunk) for chunk in stream.sent] == [limit, 5]
     await transport.end_input()
     await transport.close()
     await transport.close()

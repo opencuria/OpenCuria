@@ -13,7 +13,6 @@ import {
   sanitizeUploadFilename,
   uploadTargetPath,
 } from '@opencuria/chat-core/chatUploads'
-import { UPLOAD_MAX_BYTES } from '@opencuria/chat-core/fileChunks'
 import type { FileNode } from '@/types'
 
 function makeNode(overrides: Partial<FileNode> & { name: string; path: string }): FileNode {
@@ -110,10 +109,6 @@ describe('chatUpload', () => {
     const file = new File(['hi'], 'a.txt', { type: 'text/plain' })
     vi.spyOn(file, 'arrayBuffer').mockResolvedValue(new Uint8Array([104, 105]).buffer)
     expect(await fileToBase64(file)).toBe(btoa('hi'))
-  })
-
-  it('rejects oversize browser files against the 10 MiB cap', () => {
-    expect(UPLOAD_MAX_BYTES).toBe(10 * 1024 * 1024)
   })
 
   it('detects file drags and extracts dropped files', () => {

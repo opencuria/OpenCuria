@@ -7,19 +7,26 @@ import { marked } from 'marked'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import ImageLightbox from './ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useEditorStore } from '@/stores/editor'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import WorkspaceEditor from '@/components/editor/WorkspaceEditor.vue'
-import { readWorkspaceFile } from '@/services/socket'
 import { readEditorFile } from '@/services/editor.api'
+import {
+  makeFileLink,
+  resetWorkspaceFiles,
+  workspaceFiles,
+} from '@/services/workspaceFiles.fixtures'
+import type { WorkspaceFileLink } from '@opencuria/chat-core/workspaceFiles'
 
 vi.mock('@/services/socket', () => ({
   listWorkspaceFiles: vi.fn(async () => ({ entries: [] })),
   findWorkspaceFiles: vi.fn(),
-  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
 }))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
+
+const files = workspaceFiles()
+const content = (path: string) => `https://files.test/content${path}`
 
 vi.mock('@/services/editor.api', () => ({
   readEditorFile: vi.fn(() => new Promise(() => {})),
@@ -56,10 +63,8 @@ describe('HarnessMarkdown', () => {
   beforeEach(() => {
     vi.useRealTimers()
     setActivePinia(createPinia())
-    const store = useWorkspaceImageStore()
-    store.reset()
     vi.clearAllMocks()
-    vi.mocked(readWorkspaceFile).mockReset().mockImplementation(() => new Promise(() => {}))
+    resetWorkspaceFiles()
   })
 
   afterEach(() => {
@@ -115,63 +120,51 @@ describe('HarnessMarkdown', () => {
     parseSpy.mockRestore()
   })
 
-  it('reacquires markdown media pins after reset and releases them when the segment disappears', async () => {
-    const store = useWorkspaceImageStore()
-    const payload = Buffer.alloc(5 * 1024 * 1024, 1).toString('base64')
-    vi.mocked(readWorkspaceFile).mockImplementation(async (_, path) => ({
-      workspace_id: 'ws-1', request_id: 'media-1', path,
-      content: payload, size: 5 * 1024 * 1024, truncated: false, mime_type: 'image/png',
-    }))
-    const wrapper = mountMarkdown('![a](/workspace/a.png) ![b](/workspace/b.png) ![c](/workspace/c.png)')
-    await flushPromises()
-    expect(store.getImageUrl('/workspace/a.png')).not.toBeNull()
-
-    store.reset()
-    expect(store.getImageUrl('/workspace/a.png')).toBeNull()
-    await flushPromises()
-    expect(store.getImageUrl('/workspace/a.png')).not.toBeNull()
-    expect(readWorkspaceFile).toHaveBeenCalledTimes(6)
-
-    await wrapper.setProps({ text: '![b](/workspace/b.png) ![c](/workspace/c.png)' })
-    expect(store.getImageUrl('/workspace/a.png')).toBeNull()
-    wrapper.unmount()
-  })
-
-  it('renders a video element when the store has a cached URL', () => {
-    const store = useWorkspaceImageStore()
-    store.videoCache['/workspace/a.mp4'] = 'blob:video-test'
-    store.videoMimeTypes['/workspace/a.mp4'] = 'video/mp4'
-
+  it('renders a video element streaming from the workspace link', async () => {
     const wrapper = mountMarkdown('![clip](/workspace/a.mp4)')
+    await flushPromises()
 
-    const video = wrapper.find('video')
-    expect(video.exists()).toBe(true)
-    expect(video.attributes('src')).toBe('blob:video-test')
+    const video = wrapper.get('video')
+    expect(video.attributes('src')).toBe(content('/workspace/a.mp4'))
     expect(video.attributes('controls')).toBeDefined()
+    expect(video.attributes('preload')).toBe('metadata')
   })
 
-  it('renders an image element when the store has a cached URL', () => {
-    const store = useWorkspaceImageStore()
-    store.imageCache['/workspace/a.png'] = 'data:image/png;base64,abc'
-
+  it('renders an image element streaming from the workspace link', async () => {
     const wrapper = mountMarkdown('![pic](/workspace/a.png)')
+    await flushPromises()
 
-    const image = wrapper.find('img')
-    expect(image.exists()).toBe(true)
-    expect(image.attributes('src')).toBe('data:image/png;base64,abc')
+    const image = wrapper.get('img')
+    expect(image.attributes('src')).toBe(content('/workspace/a.png'))
     expect(image.attributes('alt')).toBe('pic')
   })
 
-  it('resolves relative image paths to the same cache key as absolute', () => {
-    const store = useWorkspaceImageStore()
-    store.imageCache['/workspace/a.png'] = 'data:image/png;base64,abc'
-
+  it('resolves relative image paths to the same workspace path as absolute', async () => {
     const relative = mountMarkdown('![pic](a.png)')
     const dotted = mountMarkdown('![pic](./a.png)')
+    await flushPromises()
 
-    expect(relative.find('img').attributes('src')).toBe('data:image/png;base64,abc')
-    expect(dotted.find('img').attributes('src')).toBe('data:image/png;base64,abc')
-    expect(relative.find('img').attributes('alt')).toBe('pic')
+    expect(files.link.mock.calls.map((call) => call[1])).toEqual([
+      '/workspace/a.png',
+      '/workspace/a.png',
+    ])
+    expect(relative.get('img').attributes('src')).toBe(content('/workspace/a.png'))
+    expect(dotted.get('img').attributes('src')).toBe(content('/workspace/a.png'))
+    expect(relative.get('img').attributes('alt')).toBe('pic')
+  })
+
+  it('shows a tap-to-load preview for large media', async () => {
+    files.link.mockImplementation(async (_workspaceId: string, path: string) =>
+      makeFileLink(path, { size: 20 * 1024 * 1024 }),
+    )
+    const wrapper = mountMarkdown('![Big](/workspace/big.png)')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="workspace-media-image"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="workspace-media-load"]').trigger('click')
+    expect(wrapper.get('[data-testid="workspace-media-image"]').attributes('src')).toBe(
+      content('/workspace/big.png'),
+    )
   })
 
   it('leaves remote markdown images to regular HTML rendering', () => {
@@ -180,14 +173,10 @@ describe('HarnessMarkdown', () => {
     const image = wrapper.find('img')
     expect(image.exists()).toBe(true)
     expect(image.attributes('src')).toBe('https://example.com/a.png')
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
   })
 
   it('resolves document images, HTML images and reference images from their directory', async () => {
-    const store = useWorkspaceImageStore()
-    store.imageCache['/workspace/repo/docs/images/photo.png'] = 'data:image/png;base64,relative'
-    store.imageCache['/workspace/repo/assets/Photo ä.png'] = 'data:image/png;base64,parent'
-    store.imageCache['/workspace/shared.svg'] = 'data:image/svg+xml;base64,absolute'
     const wrapper = mountMarkdown(
       '![Relative](./images/photo.png)\n\n![Reference][photo]\n\n' +
       '[photo]: ../assets/Photo%20%C3%A4.png?v=1#preview\n\n' +
@@ -197,29 +186,36 @@ describe('HarnessMarkdown', () => {
     )
     await flushPromises()
     expect(wrapper.findAll('img').map((img) => img.attributes('src'))).toEqual([
-      'data:image/png;base64,relative',
-      'data:image/png;base64,parent',
-      'data:image/svg+xml;base64,absolute',
+      content('/workspace/repo/docs/images/photo.png'),
+      content('/workspace/repo/assets/Photo ä.png'),
+      content('/workspace/shared.svg'),
     ])
     wrapper.unmount()
   })
 
   it('opens document links relative to their directory and updates media when the directory changes', async () => {
-    const files = useFileExplorerStore()
-    const openPath = vi.spyOn(files, 'openPath').mockResolvedValue(undefined)
-    const images = useWorkspaceImageStore()
-    const release = vi.spyOn(images, 'releaseMedia')
+    const explorer = useFileExplorerStore()
+    const openPath = vi.spyOn(explorer, 'openPath').mockResolvedValue(undefined)
     const wrapper = mountMarkdown('![Local](photo.png)\n\n[Guide](../guide.md)', 'ws-1', {
       baseDirectory: '/workspace/repo/docs',
     })
     expect(wrapper.get('a').attributes('target')).toBeUndefined()
     click(wrapper.get('a').element)
     expect(openPath).toHaveBeenCalledWith('ws-1', '/workspace/repo/guide.md', { revealInExplorer: false })
-    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/repo/docs/photo.png', 20 * 1024 * 1024, expect.any(AbortSignal))
+    expect(files.link).toHaveBeenCalledWith(
+      'ws-1',
+      '/workspace/repo/docs/photo.png',
+      expect.any(AbortSignal),
+    )
 
     await wrapper.setProps({ baseDirectory: '/workspace/other' })
-    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/other/photo.png', 20 * 1024 * 1024, expect.any(AbortSignal))
-    expect(release).toHaveBeenCalledWith(['/workspace/repo/docs/photo.png'])
+    expect(files.link).toHaveBeenCalledWith(
+      'ws-1',
+      '/workspace/other/photo.png',
+      expect.any(AbortSignal),
+    )
+    await flushPromises()
+    expect(wrapper.get('img').attributes('src')).toBe(content('/workspace/other/photo.png'))
     wrapper.unmount()
   })
 
@@ -231,7 +227,7 @@ describe('HarnessMarkdown', () => {
       { baseDirectory: '/workspace/repo/docs' },
     )
     await flushPromises()
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
     expect(wrapper.html()).not.toContain('javascript:')
     expect(wrapper.html()).not.toContain('onerror')
     expect(wrapper.get('img[alt="Remote"]').attributes('src')).toBe('https://example.com/photo.png')
@@ -256,10 +252,10 @@ describe('HarnessMarkdown', () => {
     const path = '/workspace/sb-laden-konzept/sb-laden-konzept.pdf'
     const store = useFileExplorerStore()
     useSidePanelStore().close()
-    let resolveRead!: (value: Awaited<ReturnType<typeof readWorkspaceFile>>) => void
-    vi.mocked(readWorkspaceFile).mockReturnValueOnce(
+    let resolveLink!: (value: WorkspaceFileLink) => void
+    files.link.mockReturnValueOnce(
       new Promise((resolve) => {
-        resolveRead = resolve
+        resolveLink = resolve
       }),
     )
     const wrapper = mountMarkdown(`**[Aktualisierte PDF öffnen](${href})**`)
@@ -267,27 +263,18 @@ describe('HarnessMarkdown', () => {
 
     expect(wrapper.get('strong a').text()).toBe('Aktualisierte PDF öffnen')
     expect(wrapper.get('a').attributes('target')).toBeUndefined()
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
     expect(click(wrapper.get('strong a').element)).toBe(false)
     await flushPromises()
     expect(useSidePanelStore().isOpen).toBe(false)
     expect(store.selectedPath).toBe(path)
-    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', path, undefined, expect.any(AbortSignal))
+    expect(files.link).toHaveBeenCalledWith('ws-1', path, expect.any(AbortSignal))
     expect(viewer.find('[data-testid="editor-loading"]').exists()).toBe(true)
 
-    resolveRead({
-      workspace_id: 'ws-1',
-      request_id: 'pdf',
-      path,
-      content: btoa('%PDF-1.4\n'),
-      size: 9,
-      truncated: false,
-    })
+    resolveLink(makeFileLink(path))
     await flushPromises()
     expect(useEditorStore().activeTab!.name).toBe('sb-laden-konzept.pdf')
-    expect(viewer.get('iframe[title="PDF preview"]').attributes('src')).toMatch(
-      /^data:application\/pdf;base64,/,
-    )
+    expect(viewer.get('iframe[title="PDF preview"]').attributes('src')).toBe(content(path))
     expect(useEditorStore().closeTab(useEditorStore().activeTab!.id)).toBe(true)
     await nextTick()
     expect(viewer.find('[data-testid="workspace-editor"]').exists()).toBe(false)
@@ -310,7 +297,7 @@ describe('HarnessMarkdown', () => {
   })
 
   it('shows editor errors when a linked file cannot be read', async () => {
-    vi.mocked(readWorkspaceFile).mockRejectedValueOnce(new Error('Permission denied'))
+    files.link.mockRejectedValueOnce(new Error('Permission denied'))
     const wrapper = mountMarkdown('[Missing](missing.pdf)')
     const viewer = mount(WorkspaceEditor)
     await wrapper.get('a').trigger('click')
@@ -337,7 +324,7 @@ describe('HarnessMarkdown', () => {
     const wrapper = mountMarkdown(`[Link](${href})`)
     expect(click(wrapper.get('a').element)).toBe(true)
     expect(openPath).not.toHaveBeenCalled()
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -379,15 +366,20 @@ describe('HarnessMarkdown', () => {
     wrapper.unmount()
   })
 
-  it('shows a loading placeholder while media is fetching', () => {
-    const store = useWorkspaceImageStore()
-    store.fetchingVideos['/workspace/a.mp4'] = true
-
+  it('shows a loading placeholder while the media link resolves', () => {
+    files.link.mockReturnValue(new Promise(() => {}))
     const wrapper = mountMarkdown('![clip](/workspace/a.mp4)')
 
-    expect(wrapper.find('[data-testid="harness-markdown-media-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-media-loading"]').exists()).toBe(true)
     expect(wrapper.find('video').exists()).toBe(false)
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+  })
+
+  it('falls back to alt text when the media file is missing', async () => {
+    files.link.mockRejectedValue(new Error('The file does not exist.'))
+    const wrapper = mountMarkdown('![clip](/workspace/a.mp4)')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="harness-markdown-media-fallback"]').text()).toBe('clip')
   })
 
   it('falls back to alt text when workspace id is missing', () => {
@@ -408,17 +400,18 @@ describe('HarnessMarkdown', () => {
   })
 
   it('opens the shared lightbox for workspace images and closes it again', async () => {
-    useWorkspaceImageStore().imageCache['/workspace/photo.png'] = 'data:image/png;base64,abc'
     const wrapper = mountMarkdown('![Photo](photo.png)')
+    await flushPromises()
     const trigger = wrapper.get('button[aria-haspopup="dialog"]')
 
     expect(trigger.attributes('aria-label')).toBe('Open image preview Photo')
     await trigger.trigger('click')
     expect(wrapper.getComponent(ImageLightbox).props()).toEqual({
-      src: 'data:image/png;base64,abc',
+      src: content('/workspace/photo.png'),
       alt: 'Photo',
       path: '/workspace/photo.png',
       workspaceId: 'ws-1',
+      downloadUrl: 'https://files.test/download/workspace/photo.png',
     })
     wrapper.getComponent(ImageLightbox).vm.$emit('close')
     await wrapper.vm.$nextTick()
@@ -436,7 +429,7 @@ describe('HarnessMarkdown', () => {
     expect(image.attributes('aria-label')).toBe('Open image preview Remote photo')
     await image.trigger(activation === 'click' ? 'click' : 'keydown', { key: activation })
     expect(wrapper.getComponent(ImageLightbox).props('src')).toBe('https://example.com/photo.png')
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -454,29 +447,21 @@ describe('HarnessMarkdown', () => {
   })
 
   it('loads linked workspace media while preserving the original link and avoiding lightbox controls', async () => {
-    const store = useWorkspaceImageStore()
     const wrapper = mountMarkdown('[![Photo](/workspace/photo.png)](https://example.com/full)')
 
-    expect(readWorkspaceFile).toHaveBeenCalledWith(
-      'ws-1',
-      '/workspace/photo.png',
-      20 * 1024 * 1024,
-      expect.any(AbortSignal),
-    )
-    store.imageCache['/workspace/photo.png'] = 'data:image/png;base64,abc'
-    await wrapper.vm.$nextTick()
+    expect(files.link).toHaveBeenCalledWith('ws-1', '/workspace/photo.png', expect.any(AbortSignal))
+    await flushPromises()
 
     const link = wrapper.get('a')
     const image = wrapper.get('img')
     expect(link.attributes('href')).toBe('https://example.com/full')
-    expect(image.attributes('src')).toBe('data:image/png;base64,abc')
+    expect(image.attributes('src')).toBe(content('/workspace/photo.png'))
     expect(image.attributes('role')).toBeUndefined()
     expect(wrapper.find('button[aria-haspopup="dialog"]').exists()).toBe(false)
 
-    vi.mocked(readWorkspaceFile).mockClear()
     await image.trigger('click')
     expect(wrapper.findComponent(ImageLightbox).exists()).toBe(false)
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 
@@ -490,7 +475,7 @@ describe('HarnessMarkdown', () => {
     await icon.trigger('keydown', { key: 'Enter' })
     expect(wrapper.findComponent(ImageLightbox).exists()).toBe(false)
     expect(icon.attributes('role')).toBeUndefined()
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -502,9 +487,9 @@ describe('HarnessMarkdown', () => {
     expect(unavailable.find('button').exists()).toBe(false)
     expect(unavailable.findComponent(ImageLightbox).exists()).toBe(false)
 
-    useWorkspaceImageStore().fetchingPaths['/workspace/loading.png'] = true
+    files.link.mockReturnValue(new Promise(() => {}))
     const loading = mountMarkdown('![Loading](loading.png)')
-    expect(loading.find('[data-testid="harness-markdown-media-loading"]').exists()).toBe(true)
+    expect(loading.find('[data-testid="workspace-media-loading"]').exists()).toBe(true)
     expect(loading.find('button').exists()).toBe(false)
     unavailable.unmount()
     loading.unmount()

@@ -3,7 +3,8 @@ import { computed, nextTick, ref } from 'vue'
 import { ApiRequestError } from '@/services/api'
 import { readEditorFile, saveEditorFile } from '@/services/editor.api'
 import { readGitFileContent, runGitOperation } from '@/services/git.api'
-import { readWorkspaceFile } from '@/services/socket'
+import { workspaceFiles } from '@/services/workspaceFiles'
+import { canTransferFile, TEXT_PREVIEW_MAX_BYTES } from '@opencuria/chat-core/workspaceFiles'
 import { buildMonacoChangePatch, type MonacoChangeRange } from '@/lib/monacoChanges'
 import { disposeEditorModel } from '@/lib/editorModelLifecycle'
 
@@ -24,7 +25,10 @@ interface EditorDocument {
   readOnly: boolean
   mediaType: EditorMediaType
   mimeType: string
-  rawBase64: string
+  /** Signed URL streaming an image or PDF preview. */
+  contentUrl: string
+  /** Unix seconds of the previewed version; unchanged files keep their URL. */
+  modifiedAt: number
   size: number
   previewBytes: number
   truncated: boolean
@@ -64,25 +68,28 @@ export interface EditorTab extends Omit<EditorTabState, 'documentKey'> {
   readOnly: boolean
   mediaType: EditorMediaType
   mimeType: string
-  rawBase64: string
+  /** Signed URL streaming an image or PDF preview. */
+  contentUrl: string
   size: number
   previewBytes: number
   truncated: boolean
   isBinary: boolean
 }
 
-const IMAGE_TYPES: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  bmp: 'image/bmp',
-  ico: 'image/x-icon',
-  tiff: 'image/tiff',
-  tif: 'image/tiff',
-  avif: 'image/avif',
-}
+/** Opened as previews instead of the text editor. */
+const PREVIEW_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
+  'ico',
+  'tiff',
+  'tif',
+  'avif',
+  'pdf',
+])
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unable to load the file. Please retry.'
@@ -153,7 +160,7 @@ export const useEditorStore = defineStore('editor', () => {
       readOnly: document ? document.readOnly : true,
       mediaType: document?.mediaType ?? 'text',
       mimeType: document?.mimeType ?? 'text/plain',
-      rawBase64: document?.rawBase64 ?? '',
+      contentUrl: document?.contentUrl ?? '',
       size: document?.size ?? 0,
       previewBytes: document?.previewBytes ?? 0,
       truncated: document?.truncated ?? false,
@@ -214,7 +221,8 @@ export const useEditorStore = defineStore('editor', () => {
         readOnly: false,
         mediaType: 'text',
         mimeType: 'text/plain',
-        rawBase64: '',
+        contentUrl: '',
+        modifiedAt: 0,
         size: 0,
         previewBytes: 0,
         truncated: false,
@@ -224,40 +232,57 @@ export const useEditorStore = defineStore('editor', () => {
     return { key, document: documents.value[key]! }
   }
 
+  /**
+   * Images and PDFs stream from their signed link; other files show a
+   * read-only text preview of their first bytes unless they are binary.
+   */
   async function loadPreview(document: EditorDocument, signal: AbortSignal): Promise<void> {
-    const result = await readWorkspaceFile(document.workspaceId, document.path, undefined, signal)
+    const files = workspaceFiles()
+    // A reload must see the file as it is now, not a cached link.
+    files.forget(document.workspaceId, document.path)
+    const link = await files.link(document.workspaceId, document.path, signal)
     if (signal.aborted) return
-    const bytes = Uint8Array.from(atob(result.content.replace(/\s+/g, '')), (c) => c.charCodeAt(0))
-    const extension = document.path.split('.').pop()?.toLowerCase() ?? ''
-    const imageMime = IMAGE_TYPES[extension]
+    const transferable = canTransferFile(link.size)
+    let mediaType: EditorMediaType =
+      transferable && (link.kind === 'image' || link.kind === 'pdf') ? link.kind : 'binary'
     let content = ''
-    let binary = !!imageMime || extension === 'pdf'
-    if (!binary) {
+    let previewBytes = 0
+    let truncated = false
+    if (transferable && mediaType === 'binary' && link.kind !== 'video' && link.kind !== 'audio') {
+      const preview = await files.readBytes(document.workspaceId, document.path, {
+        maxBytes: TEXT_PREVIEW_MAX_BYTES,
+        signal,
+      })
+      if (signal.aborted) return
       try {
-        binary = bytes.includes(0)
-        if (!binary) content = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+        if (!preview.bytes.includes(0)) {
+          // `stream` tolerates a character cut off at the preview limit.
+          content = new TextDecoder('utf-8', { fatal: true }).decode(preview.bytes, {
+            stream: preview.truncated,
+          })
+          mediaType = 'text'
+          previewBytes = preview.bytes.length
+          truncated = preview.truncated
+        }
       } catch {
-        binary = true
+        // Not UTF-8: keep the binary view.
       }
     }
     document.content = content
     document.savedContent = content
     document.revision = null
     document.readOnly = true
-    document.mediaType = imageMime
-      ? 'image'
-      : extension === 'pdf'
-        ? 'pdf'
-        : binary
-          ? 'binary'
-          : 'text'
-    document.mimeType =
-      imageMime ?? (extension === 'pdf' ? 'application/pdf' : (result.mime_type ?? 'text/plain'))
-    document.rawBase64 = result.content
-    document.size = result.size
-    document.previewBytes = bytes.length
-    document.truncated = result.truncated
-    document.isBinary = binary
+    document.mediaType = mediaType
+    document.mimeType = mediaType === 'text' ? 'text/plain' : link.mimeType
+    const streamed = mediaType === 'image' || mediaType === 'pdf'
+    // A new URL for the same version would only reload the preview and lose its scroll.
+    const sameVersion = document.size === link.size && document.modifiedAt === link.modifiedAt
+    document.contentUrl = streamed ? (sameVersion && document.contentUrl) || link.contentUrl : ''
+    document.modifiedAt = link.modifiedAt
+    document.size = link.size
+    document.previewBytes = previewBytes
+    document.truncated = truncated
+    document.isBinary = mediaType !== 'text'
   }
 
   function loadDocument(key: string, discardChanges = false): Promise<boolean> {
@@ -273,7 +298,7 @@ export const useEditorStore = defineStore('editor', () => {
     const run = (async (): Promise<boolean> => {
       try {
         const extension = document.path.split('.').pop()?.toLowerCase() ?? ''
-        if (IMAGE_TYPES[extension] || extension === 'pdf') {
+        if (PREVIEW_EXTENSIONS.has(extension)) {
           await loadPreview(document, controller.signal)
         } else {
           try {
@@ -290,7 +315,7 @@ export const useEditorStore = defineStore('editor', () => {
             document.previewBytes = document.size
             document.readOnly = false
             document.truncated = false
-            document.rawBase64 = ''
+            document.contentUrl = ''
             document.mediaType = 'text'
             document.mimeType = 'text/plain'
             document.isBinary = false

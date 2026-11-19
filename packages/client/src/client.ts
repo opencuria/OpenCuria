@@ -15,6 +15,7 @@ import {
   createSkillsApi,
   createWindowsLicensingApi,
 } from "./settings";
+import { createWorkspaceFilesApi, type WorkspaceFilesApi } from "./files";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
 import { createAppsApi } from "./apps";
 import { createDesktopApi } from "./desktop";
@@ -161,10 +162,11 @@ export interface OpenCuriaClient {
   /** Personal and organization skills. */
   skills: ReturnType<typeof createSkillsApi>;
   realtime: RealtimeClient;
-  files: Pick<
-    RealtimeClient,
-    "findFiles" | "listFiles" | "readFile" | "downloadFile" | "uploadFile"
-  >;
+  /**
+   * Workspace files: signed HTTP links (stream, download, blurred preview),
+   * uploads and partial reads; listing and search over Socket.IO.
+   */
+  files: Pick<RealtimeClient, "findFiles" | "listFiles"> & WorkspaceFilesApi;
 }
 
 function segment(value: string): string {
@@ -330,6 +332,10 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     terminal: createTerminalApi(() => api, realtime),
     skills: createSkillsApi(() => api),
     realtime,
-    files: realtime,
+    files: {
+      listFiles: realtime.listFiles.bind(realtime),
+      findFiles: realtime.findFiles.bind(realtime),
+      ...createWorkspaceFilesApi(() => api, options.fetch),
+    },
   };
 }

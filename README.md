@@ -47,7 +47,9 @@ docker compose -f compose.server.yml up -d
 
 This starts PostgreSQL, Redis, the backend (API, execution and lifecycle recovery
 workers) and the webapp. A reverse proxy must route `/api` and `/ws` to the backend
-(with WebSocket upgrades, unbuffered) and everything else to the webapp.
+(with WebSocket upgrades, unbuffered) and everything else to the webapp. Workspace
+files stream through `/api/v1/workspace-files/`: allow request bodies of 500 MB
+there (nginx: `client_max_body_size 500m;`, `proxy_request_buffering off;`).
 
 ### QEMU runner
 

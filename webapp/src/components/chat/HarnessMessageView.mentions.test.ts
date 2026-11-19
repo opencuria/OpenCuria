@@ -6,13 +6,14 @@ import { nextTick, ref } from 'vue'
 import HarnessMessageView from './HarnessMessageView.vue'
 import type { HarnessMessage } from '@opencuria/chat-core/harness'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
-import { readWorkspaceFile } from '@/services/socket'
+import {
+  makeFileLink,
+  resetWorkspaceFiles,
+  workspaceFiles,
+} from '@/services/workspaceFiles.fixtures'
 
-vi.mock('@/services/socket', () => ({
-  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
-}))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -74,9 +75,8 @@ async function flush(): Promise<void> {
 describe('HarnessMessageView mentions', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    useWorkspaceImageStore().reset()
     resetProviderCatalogCache()
-    vi.mocked(readWorkspaceFile).mockClear()
+    resetWorkspaceFiles()
     class ResizeObserverStub {
       observe(): void {}
       disconnect(): void {}
@@ -90,7 +90,6 @@ describe('HarnessMessageView mentions', () => {
   })
 
   it('renders mention badges and image thumbnails in user history without a remove affordance', async () => {
-    useWorkspaceImageStore().imageCache['/workspace/cat.png'] = 'data:image/png;base64,abc'
     const wrapper = mountView(
       makeUser('Fix @file:/workspace/src/a.ts with @agent:build, see @file:/workspace/cat.png'),
     )
@@ -99,8 +98,8 @@ describe('HarnessMessageView mentions', () => {
     expect(wrapper.findAll('[data-testid="mention-badge-file"]').length).toBeGreaterThanOrEqual(1)
     expect(wrapper.find('[data-testid="mention-badge-agent"]').text()).toBe('@agent:build')
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="mention-image"]').attributes('src')).toBe(
-      'data:image/png;base64,abc',
+    expect(wrapper.find('[data-testid="workspace-media-image"]').attributes('src')).toBe(
+      'https://files.test/content/workspace/cat.png',
     )
     expect(wrapper.find('[data-testid="mention-image-remove"]').exists()).toBe(false)
     const bubble = wrapper.get('[data-testid="harness-user-bubble"]')
@@ -125,6 +124,20 @@ describe('HarnessMessageView mentions', () => {
     expect(wrapper.get('[data-testid="mention-images"] .relative').classes()).toContain('w-20')
     await wrapper.get('[data-testid="message-edit"]').trigger('click')
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+  })
+
+  it('asks before loading a large image mention in a user bubble', async () => {
+    vi.mocked(workspaceFiles().link).mockImplementation(async (_workspaceId, path) =>
+      makeFileLink(path, { size: 8 * 1024 * 1024 }),
+    )
+    const wrapper = mountView(makeUser('See @file:/workspace/big.png'))
+    await flush()
+
+    expect(wrapper.find('[data-testid="workspace-media-image"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="workspace-media-load"]').trigger('click')
+    expect(wrapper.get('[data-testid="workspace-media-image"]').attributes('src')).toBe(
+      'https://files.test/content/workspace/big.png',
+    )
   })
 
   it('leaves assistant messages untouched even when they contain mention-like text', async () => {

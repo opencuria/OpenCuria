@@ -41,6 +41,7 @@ from apps.runners.api import (
 )
 from apps.scheduled_tasks.api import scheduled_task_router
 from apps.skills.api import skill_router
+from apps.workspace_files.api import workspace_file_router
 from common.exceptions import ServiceUnavailableError
 
 api = NinjaAPI(
@@ -81,6 +82,7 @@ api.add_router("/workspaces/", workspace_image_artifact_router)
 api.add_router("/workspaces/", git_router)
 api.add_router("/workspaces/", commit_message_router)
 api.add_router("/workspaces/", voice_router)
+api.add_router("/workspaces/", workspace_file_router)
 api.add_router("/voice/", voice_settings_router)
 api.add_router("/image-artifacts/", image_artifact_router)
 api.add_router("/captured-images/", captured_image_router)

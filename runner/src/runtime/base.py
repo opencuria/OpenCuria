@@ -229,7 +229,7 @@ class RuntimeBackend(abc.ABC):
     # Limits shared by all runtime implementations of the generic stream
     # transport (MCP stdio / workspace-local TCP relay).  Chunk sizes are
     # bounded so one peer can never force unbounded buffering.
-    STREAM_CHUNK_SIZE = 64 * 1024
+    STREAM_CHUNK_SIZE = 1024 * 1024
     STREAM_READ_TIMEOUT = 300.0
 
     @property

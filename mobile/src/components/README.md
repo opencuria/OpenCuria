@@ -33,7 +33,9 @@ labels and stable `testID`s.
 
 ## Rules
 
-- `resolveMedia` returns a local URI or `{ uri, release }` lease; release it when hidden.
+- `resolveMedia` returns a URI or `{ uri, release }` lease; release it when hidden.
+  Its `describe` gives size and blurred preview: embedded media above 5 MB wait for
+  a tap (`MediaPlaceholder`), opened media always load.
 - Never attach auth headers to external fetches; only credential-free `http(s)` links
   open externally, workspace links go through `onOpenFile`.
 - Undefined callbacks hide their actions.

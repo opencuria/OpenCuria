@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -14,6 +15,10 @@ if TYPE_CHECKING:
     from ..ports import HarnessGateway, RunnerTransport
 
 logger = logging.getLogger(__name__)
+
+#: Base64 alphabet (whitespace tolerated); strict decoding happens once, in
+#: the consuming byte stream.
+_BASE64 = re.compile(r"[A-Za-z0-9+/\s]+={0,2}\s*")
 
 
 class StreamTransportService:
@@ -41,8 +46,9 @@ class StreamTransportService:
     #: ACK timeout for stream control events (start/input/close).
     _STREAM_CALL_TIMEOUT_SECONDS = 15.0
 
-    #: Max raw bytes per stream chunk in either direction.
-    _STREAM_CHUNK_SIZE = 64 * 1024
+    #: Max raw bytes per stream chunk in either direction (mirrors
+    #: ``WorkspaceByteStream.MAX_CHUNK_SIZE`` and the runner's limit).
+    _STREAM_CHUNK_SIZE = 1024 * 1024
 
     _STREAM_RESULT_EVENTS = frozenset(
         {
@@ -88,21 +94,23 @@ class StreamTransportService:
         return workspace_id, connection_id
 
     def _validate_stream_chunk_payload(self, data: dict) -> bool:
-        """Validate one ``workspace:stream_output`` chunk (bounded base64)."""
+        """Bound one ``workspace:stream_output`` chunk before routing it.
+
+        Only the size is checked here; the consuming byte stream decodes the
+        base64 strictly once (decoding every MiB twice halves throughput).
+        """
         stream = data.get("stream", "")
         if stream not in ("stdout", "stderr"):
             return False
         content = data.get("data", "")
         if not isinstance(content, str) or not content:
             return False
-        import base64 as _b64
-
-        try:
-            clean = "".join(content.split())
-            decoded = _b64.b64decode(clean, validate=True)
-        except Exception:
+        if _BASE64.fullmatch(content) is None:
             return False
-        return 0 < len(decoded) <= self._STREAM_CHUNK_SIZE
+        encoded_limit = (self._STREAM_CHUNK_SIZE + 2) // 3 * 4
+        if len(content) <= encoded_limit:
+            return True
+        return 0 < len("".join(content.split())) <= encoded_limit
 
     def handle_stream_reply(
         self,

@@ -1,6 +1,60 @@
 const files = new Map<string, { data: string; encoding: string }>();
 const directories = new Set<string>();
 
+/** Body a `File.downloadFileAsync` URL serves (utf8); throwing fails it. */
+type DownloadHandler = (
+  url: string,
+  destination: string,
+) => Promise<string> | string;
+/** Response an upload receives. */
+type UploadHandler = (
+  url: string,
+  file: File,
+  options?: UploadOptions,
+) => Promise<UploadResult> | UploadResult;
+let download: DownloadHandler = () => {
+  throw new Error("No download handler");
+};
+let upload: UploadHandler = () => ({ status: 201, body: "{}", headers: {} });
+/** Every download as `[url, destination uri, options]`. */
+export const __downloads: Array<[string, string, DownloadOptions | undefined]> =
+  [];
+/** Every upload as `[url, file uri, options]`. */
+export const __uploads: Array<[string, string, UploadOptions | undefined]> = [];
+export const __setDownload = (handler: DownloadHandler): void => {
+  download = handler;
+};
+export const __setUpload = (handler: UploadHandler): void => {
+  upload = handler;
+};
+
+export enum UploadType {
+  BINARY_CONTENT = 0,
+  MULTIPART = 1,
+}
+export interface UploadOptions {
+  httpMethod?: "POST" | "PUT" | "PATCH";
+  uploadType?: UploadType;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+export interface UploadResult {
+  body: string;
+  status: number;
+  headers: Record<string, string>;
+}
+export interface DownloadOptions {
+  headers?: Record<string, string>;
+  idempotent?: boolean;
+  signal?: AbortSignal;
+}
+
+function abortError(): Error {
+  const error = new Error("The download was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
 function uriOf(...parts: Array<string | Directory>): string {
   return parts
     .map((part) =>
@@ -55,6 +109,33 @@ export class File {
   readonly uri: string;
   constructor(...parts: Array<string | Directory>) {
     this.uri = uriOf(...parts);
+  }
+  /** Writes the handler's body to `destination`, like Android streaming into it. */
+  static async downloadFileAsync(
+    url: string,
+    destination: File,
+    options?: DownloadOptions,
+  ): Promise<File> {
+    __downloads.push([url, destination.uri, options]);
+    if (options?.signal?.aborted) throw abortError();
+    if (destination.exists && !options?.idempotent)
+      throw new Error("DestinationAlreadyExists");
+    const aborted = new Promise<never>((_, reject) =>
+      options?.signal?.addEventListener("abort", () => reject(abortError()), {
+        once: true,
+      }),
+    );
+    const body = await Promise.race([
+      Promise.resolve().then(() => download(url, destination.uri)),
+      aborted,
+    ]);
+    files.set(destination.uri, { data: body, encoding: "utf8" });
+    return destination;
+  }
+  async upload(url: string, options?: UploadOptions): Promise<UploadResult> {
+    if (!files.has(this.uri)) throw new Error("missing file");
+    __uploads.push([url, this.uri, options]);
+    return upload(url, this, options);
   }
   get exists(): boolean {
     return files.has(this.uri);

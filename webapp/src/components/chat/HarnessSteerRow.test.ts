@@ -8,7 +8,7 @@ import HarnessMessageView from './HarnessMessageView.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
 
-vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn(() => new Promise(() => {})) }))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
 
 function makeSteerPart(output: string): HarnessPart {
   return {

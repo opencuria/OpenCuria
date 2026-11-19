@@ -1,12 +1,5 @@
 import { io, type Socket } from "socket.io-client";
-import {
-  CHUNK_TRANSFER_TIMEOUT_MS,
-  MAX_READ_CHUNKS_PER_TRANSFER,
-  createChunkedTransferStore,
-  decodedBase64Size,
-  planFilesUpload,
-  stripBase64Whitespace,
-} from "@opencuria/chat-core/fileChunks";
+import { FileTransferError } from "./files";
 import type {
   HarnessPartUpdatedEvent,
   HarnessPermissionRequiredEvent,
@@ -22,13 +15,9 @@ import type {
   HarnessTodoUpdatedEvent,
 } from "@opencuria/chat-core/harness";
 import type {
-  FileChunkEvent,
-  FileContentResult,
-  FileDownloadResult,
   FileFindResult,
   FileFindResultEvent,
   FileListResult,
-  FileUploadResult,
 } from "./types";
 
 export interface RealtimeEventMap {
@@ -58,11 +47,6 @@ export interface RealtimeEventMap {
   "harness.subtask_finished": HarnessSubtaskFinishedEvent;
   "files:list_result": FileListResult;
   "files:find_result": FileFindResultEvent;
-  "files:content_result": FileContentResult;
-  "files:content_chunk": FileChunkEvent;
-  "files:upload_result": FileUploadResult;
-  "files:download_result": FileDownloadResult;
-  "files:download_chunk": FileChunkEvent;
   "terminal:started": {
     workspace_id: string;
     terminal_id: string;
@@ -138,50 +122,21 @@ export interface RealtimeOptions {
   createRequestId?: () => string;
 }
 
-export class FileTransferError extends Error {
-  readonly code: string;
-  constructor(message: string, code = "file_transfer_error") {
-    super(message);
-    this.name = "FileTransferError";
-    this.code = code;
-  }
-}
+/** List and find requests fail after this long without a reply. */
+const FILE_REQUEST_TIMEOUT_MS = 30_000;
 
 type AnyCallback = (data: unknown) => void;
 type PendingFile = {
   requestId: string;
   workspaceId: string;
   path: string;
-  requestedFilename?: string;
-  kind: "list" | "find" | "read" | "download" | "upload";
+  kind: "list" | "find";
   resolve: (data: any) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   releaseRoom?: () => void;
   removeAbortListener?: () => void;
 };
-
-// Runner file downloads are capped at 100 MiB raw (≈ 133.4 MiB base64).
-const MAX_FILE_RESULT_CHARS = 140 * 1024 * 1024;
-const MAX_FILE_RESULT_BYTES = 100 * 1024 * 1024;
-
-function validateFilePayload(
-  kind: "read" | "download",
-  data: FileContentResult | FileDownloadResult,
-  content: string,
-): void {
-  const rawSize = decodedBase64Size(stripBase64Whitespace(content));
-  const truncated =
-    kind === "read" && "truncated" in data && data.truncated === true;
-  if (
-    !Number.isSafeInteger(data.size) ||
-    data.size < 0 ||
-    rawSize > MAX_FILE_RESULT_BYTES ||
-    (truncated ? data.size <= rawSize : data.size !== rawSize)
-  ) {
-    throw new Error("Invalid file payload size");
-  }
-}
 
 function makeId(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -238,21 +193,10 @@ export class RealtimeClient {
   private pendingFiles = new Map<string, PendingFile>();
   private contextKey: string;
   private readonly timeoutMs: number;
-  private readonly chunks = createChunkedTransferStore({
-    maxChars: MAX_FILE_RESULT_CHARS,
-    maxEntries: 16,
-    maxChunks: MAX_READ_CHUNKS_PER_TRANSFER,
-    onTimeout: (id) =>
-      this.failPending(
-        id,
-        new FileTransferError("File transfer timed out", "timeout"),
-      ),
-  });
-
   constructor(private readonly options: RealtimeOptions) {
     this.timeoutMs = Math.max(
       1,
-      options.timeoutMs ?? CHUNK_TRANSFER_TIMEOUT_MS,
+      options.timeoutMs ?? FILE_REQUEST_TIMEOUT_MS,
     );
     this.contextKey = options.getContextKey();
   }
@@ -452,111 +396,6 @@ export class RealtimeClient {
     );
   }
 
-  readFile(
-    workspaceId: string,
-    path: string,
-    maxSize?: number,
-    signal?: AbortSignal,
-  ): Promise<FileContentResult> {
-    const wantedPath = normalizedPath(path);
-    return this.requestFile(
-      "read",
-      workspaceId,
-      wantedPath,
-      "files:content_result",
-      "frontend:files_read",
-      {
-        path: wantedPath,
-        ...(maxSize === undefined ? {} : { max_size: maxSize }),
-      },
-      signal,
-    );
-  }
-
-  downloadFile(
-    workspaceId: string,
-    path: string,
-    signal?: AbortSignal,
-  ): Promise<FileDownloadResult> {
-    const wantedPath = normalizedPath(path);
-    return this.requestFile(
-      "download",
-      workspaceId,
-      wantedPath,
-      "files:download_result",
-      "frontend:files_download",
-      {
-        path: wantedPath,
-      },
-      signal,
-    );
-  }
-
-  uploadFile(
-    workspaceId: string,
-    input: { directory: string; filename: string; base64: string },
-  ): Promise<FileUploadResult> {
-    const path = normalizedPath(input.directory);
-    if (
-      !input.filename ||
-      input.filename.includes("/") ||
-      input.filename.includes("\\")
-    ) {
-      return Promise.reject(
-        new FileTransferError("Invalid filename", "validation_error"),
-      );
-    }
-    if (!this.socket?.connected || !this.active) {
-      return Promise.reject(
-        new FileTransferError("Socket is not connected", "disconnected"),
-      );
-    }
-    const requestId = this.newRequestId();
-    if (!requestId || this.pendingFiles.has(requestId)) {
-      return Promise.reject(
-        new FileTransferError(
-          "Duplicate file request id",
-          "duplicate_request_id",
-        ),
-      );
-    }
-    let planned;
-    try {
-      planned = planFilesUpload(
-        workspaceId,
-        requestId,
-        path,
-        input.filename,
-        input.base64,
-      );
-    } catch (error) {
-      return Promise.reject(
-        new FileTransferError(
-          error instanceof Error ? error.message : "Invalid file upload",
-          error instanceof RangeError ? "size_limit" : "invalid_payload",
-        ),
-      );
-    }
-    const promise = this.registerFile("upload", workspaceId, path, requestId);
-    const pending = this.pendingFiles.get(requestId);
-    if (pending) pending.requestedFilename = input.filename;
-    // Never buffer a partial upload across disconnects.
-    for (const { event, payload } of planned) {
-      if (!this.socket?.connected || !this.active || this.disposed) {
-        this.failPending(
-          requestId,
-          new FileTransferError(
-            "Socket disconnected during upload",
-            "disconnected",
-          ),
-        );
-        break;
-      }
-      this.socket.emit(event, payload);
-    }
-    return promise;
-  }
-
   private bindSocket(socket: RealtimeSocket): void {
     socket.on("connect", () => {
       if (socket !== this.socket || this.disposed) return;
@@ -592,19 +431,7 @@ export class RealtimeClient {
         })
         .catch(() => undefined);
     });
-    socket.on("files:content_chunk", (event: FileChunkEvent) => {
-      if (socket === this.socket) this.onChunk(event, "read");
-    });
-    socket.on("files:download_chunk", (event: FileChunkEvent) => {
-      if (socket === this.socket) this.onChunk(event, "download");
-    });
-    for (const event of [
-      "files:list_result",
-      "files:find_result",
-      "files:content_result",
-      "files:upload_result",
-      "files:download_result",
-    ])
+    for (const event of ["files:list_result", "files:find_result"])
       socket.on(event, (data: any) => {
         if (socket === this.socket) this.onFileResult(event, data);
       });
@@ -781,66 +608,13 @@ export class RealtimeClient {
     });
   }
 
-  private onChunk(event: FileChunkEvent, kind: "read" | "download"): void {
-    if (!event || typeof event.request_id !== "string") return;
-    const pending = this.pendingFiles.get(event.request_id);
-    if (!pending || pending.kind !== kind) return;
-    if (
-      pending.workspaceId !== event.workspace_id ||
-      pending.path !== event.path
-    ) {
-      this.failPending(
-        event.request_id,
-        new FileTransferError(
-          "File chunk context mismatch",
-          "correlation_error",
-        ),
-      );
-      return;
-    }
-    if (
-      !Number.isInteger(event.total_chunks) ||
-      event.total_chunks < 1 ||
-      event.total_chunks > MAX_READ_CHUNKS_PER_TRANSFER
-    ) {
-      this.failPending(
-        event.request_id,
-        new FileTransferError("Invalid chunk count", "invalid_chunk"),
-      );
-      return;
-    }
-    try {
-      if (!this.chunks.has(event.request_id)) {
-        this.chunks.start(
-          event.request_id,
-          event.total_chunks,
-          { totalChunks: event.total_chunks },
-          event.path,
-        );
-      }
-      this.chunks.addChunk(event.request_id, event);
-    } catch (error) {
-      this.failPending(
-        event.request_id,
-        new FileTransferError(
-          error instanceof Error ? error.message : "Invalid file chunk",
-          "invalid_chunk",
-        ),
-      );
-    }
-  }
-
   private onFileResult(eventName: string, data: any): void {
     if (!data || typeof data.request_id !== "string") return;
     const pending = this.pendingFiles.get(data.request_id);
     if (!pending) return;
-    const uploadResultPathMatches =
-      pending.kind === "upload" && data.path === pending.path;
     if (
       pending.workspaceId !== data.workspace_id ||
-      (pending.kind !== "find" &&
-        pending.path !== data.path &&
-        !uploadResultPathMatches)
+      (pending.kind !== "find" && pending.path !== data.path)
     ) {
       this.failPending(
         data.request_id,
@@ -854,99 +628,12 @@ export class RealtimeClient {
     const expectedEvent: Record<PendingFile["kind"], string> = {
       list: "files:list_result",
       find: "files:find_result",
-      read: "files:content_result",
-      download: "files:download_result",
-      upload: "files:upload_result",
     };
     if (expectedEvent[pending.kind] !== eventName) return;
     const payloadError = errorFromPayload(data, "File request failed");
     if (payloadError) {
       this.failPending(data.request_id, payloadError);
       return;
-    }
-    if (pending.kind === "read" || pending.kind === "download") {
-      if (data.chunked) {
-        if (
-          !Number.isInteger(data.total_chunks) ||
-          data.total_chunks < 1 ||
-          data.total_chunks > MAX_READ_CHUNKS_PER_TRANSFER
-        ) {
-          this.failPending(
-            data.request_id,
-            new FileTransferError("Invalid chunk count", "invalid_chunk"),
-          );
-          return;
-        }
-        if (!this.chunks.has(data.request_id)) {
-          this.failPending(
-            data.request_id,
-            new FileTransferError(
-              "Chunked result arrived without chunks",
-              "incomplete_transfer",
-            ),
-          );
-          return;
-        }
-        try {
-          const complete = this.chunks.finish(
-            data.request_id,
-            data.total_chunks,
-          );
-          validateFilePayload(pending.kind, data, complete.content);
-          pending.resolve({ ...data, content: complete.content });
-          this.clearPending(data.request_id);
-        } catch (error) {
-          this.failPending(
-            data.request_id,
-            new FileTransferError(
-              error instanceof Error
-                ? error.message
-                : "Incomplete file transfer",
-              "incomplete_transfer",
-            ),
-          );
-        }
-        return;
-      }
-      if (this.chunks.has(data.request_id)) {
-        this.failPending(
-          data.request_id,
-          new FileTransferError(
-            "Unexpected partial file chunks",
-            "incomplete_transfer",
-          ),
-        );
-        return;
-      }
-      try {
-        validateFilePayload(pending.kind, data, data.content ?? "");
-      } catch {
-        this.failPending(
-          data.request_id,
-          new FileTransferError(
-            "Invalid base64 file payload or size mismatch",
-            "invalid_payload",
-          ),
-        );
-        return;
-      }
-    }
-    if (pending.kind === "upload" && data.status !== "success") {
-      this.failPending(
-        data.request_id,
-        new FileTransferError(data.error || "Upload failed", "upload_failed"),
-      );
-      return;
-    }
-    if (
-      pending.kind === "upload" &&
-      data.path === pending.path &&
-      pending.requestedFilename
-    ) {
-      data = {
-        ...data,
-        path: `${pending.path.replace(/\/$/, "")}/${pending.requestedFilename}`,
-      };
     }
     pending.resolve(data);
     this.clearPending(data.request_id);
@@ -959,7 +646,6 @@ export class RealtimeClient {
     pending.removeAbortListener?.();
     pending.releaseRoom?.();
     this.pendingFiles.delete(requestId);
-    this.chunks.cancel(requestId);
   }
 
   private failPending(requestId: string, error: Error): void {
@@ -972,7 +658,6 @@ export class RealtimeClient {
   private rejectAllFiles(error: Error): void {
     for (const requestId of [...this.pendingFiles.keys()])
       this.failPending(requestId, error);
-    this.chunks.clear();
   }
 
   private newRequestId(): string {

@@ -30,7 +30,7 @@ import {
 } from '@lucide/vue'
 import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
 import type { FileNode, Skill } from '@/types'
-import { sendFilesUpload, subscribeToWorkspace } from '@/services/socket'
+import { subscribeToWorkspace } from '@/services/socket'
 import {
   resolveCatalogModel,
   snapEffort,
@@ -55,20 +55,15 @@ import {
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
-import { fileToBase64, getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
+import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import {
   appendUploadMentions,
   CHAT_UPLOAD_DIR,
-  hasUploadMention,
-  nextChatUploadRequestId,
-  resolveUniqueFilename,
   sanitizeUploadFilename,
-  uploadTargetPath,
 } from '@opencuria/chat-core/chatUploads'
-import { UPLOAD_MAX_BYTES } from '@opencuria/chat-core/fileChunks'
+import { canTransferFile, fileTransferLimitMessage } from '@opencuria/chat-core/workspaceFiles'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { useWorkspaceFileEvents } from '@/composables/useWorkspaceFileEvents'
 import { useHarnessStore } from '@/stores/harness'
 import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notifications'
@@ -242,11 +237,8 @@ const isUploading = ref(false)
  * in-flight upload instead of sending the same files a second time.
  */
 let uploadQueue: Promise<void> = Promise.resolve()
-/** Target paths with an in-flight or recently finished chat upload. */
-const inFlightUploadPaths = new Set<string>()
-function uploadReservationKey(workspaceId: string, path: string): string {
-  return `${workspaceId}:${path}`
-}
+/** Files already uploaded or in flight, so a doubly handled drop uploads once. */
+const handledUploadFiles = new WeakSet<File>()
 const harness = useHarnessStore()
 const authStore = useAuthStore()
 let applyingDefaults = false
@@ -873,27 +865,23 @@ watch(
  * `@file:` mention token per uploaded file (exactly like a mention-picker
  * selection: space-separated, one trailing space).
  *
- * Uploads never overwrite: file names are sanitized (`[^a-zA-Z0-9._-] →
- * _`) and deduplicated against a fresh listing of the upload directory
- * (`_1`, `_2`, … suffix); a failed listing aborts the upload.
- * The runner `mkdir -p`s the upload directory on upload; the explorer tree
- * is refreshed afterwards so the files show up under Files and `@` search.
+ * Uploads never overwrite: names are sanitized (`[^a-zA-Z0-9._-] → _`) and
+ * the server keeps existing files by renaming the new one (`_1`, `_2`, …);
+ * the mention uses the path it returns. The explorer tree is refreshed
+ * afterwards so the files show up under Files and `@` search.
  *
  * Concurrent calls are serialized: a second drop that arrives while an
  * upload is in flight waits for the first batch instead of uploading the
- * same files twice.
+ * same files twice. Resetting or unmounting the composer cancels its uploads.
  */
 let uploadGeneration = 0
 let uploadDisposed = false
-let uploadDirectoryAbortController: AbortController | null = null
-const ownedPendingUploadIds = new Set<string>()
+let uploadAbortController: AbortController | null = null
 
 function invalidateUploads(): void {
   uploadGeneration += 1
-  uploadDirectoryAbortController?.abort()
-  uploadDirectoryAbortController = null
-  for (const requestId of ownedPendingUploadIds) fileExplorer.cancelUpload(requestId)
-  ownedPendingUploadIds.clear()
+  uploadAbortController?.abort()
+  uploadAbortController = null
   isUploading.value = false
   if (isScheduledTask.value && !uploadDisposed) emit('uploading', false)
 }
@@ -915,126 +903,35 @@ async function runChatUpload(
   workspaceId: string,
   generation: number,
 ): Promise<void> {
-  if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId) return
+  const current = () =>
+    !uploadDisposed && generation === uploadGeneration && workspaceId === props.workspaceId
+  if (!current()) return
+  const pending = files.filter((file) => !handledUploadFiles.has(file))
+  if (pending.length === 0) return
   isUploading.value = true
   if (isScheduledTask.value) emit('uploading', true)
   const notify = useNotificationStore()
-  const reserved: string[] = []
+  const abortController = new AbortController()
+  uploadAbortController = abortController
   try {
-    if (isScheduledTask.value && !releaseMentionSubscription)
-      releaseMentionSubscription = subscribeToWorkspace(workspaceId)
-    // List the upload directory itself: the shared explorer tree only holds
-    // it once `.opencuria` was expanded and may be stale, which would let a
-    // same-named upload silently overwrite an earlier chat attachment.
-    const abortController = new AbortController()
-    uploadDirectoryAbortController = abortController
-    const options = { signal: abortController.signal }
-    const root = await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace', options)
-    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
-      return
-    if (!root) {
-      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
-      return
-    }
-    const metadata = root.some((entry) => entry.name === '.opencuria' && entry.type === 'directory')
-      ? await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace/.opencuria', options)
-      : []
-    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
-      return
-    if (metadata === null) {
-      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
-      return
-    }
-    const uploadDirectoryExists = metadata.some(
-      (entry) => entry.name === 'user-uploaded' && entry.type === 'directory',
-    )
-    const directory = uploadDirectoryExists
-      ? await fileExplorer.fetchDirectoryEntries(workspaceId, CHAT_UPLOAD_DIR, options)
-      : []
-    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
-      return
-    if (directory === null) {
-      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
-      return
-    }
-    const taken = new Set(directory.map((entry) => entry.name))
-    // Per-file transfer outcome; resolves to the workspace path on success,
-    // null on failure (failures are toasted via the store already).
-    // Every reserved path is released below, on success and on failure.
-    const transfers: Array<Promise<string | null>> = []
-
-    for (const file of files) {
-      if (file.size > UPLOAD_MAX_BYTES) {
-        const message = `File "${file.name}" exceeds the 10 MB upload limit and was skipped.`
-        notify.error('Upload failed', message)
-        continue
+    const uploads = pending.map((file) => {
+      handledUploadFiles.add(file)
+      if (!canTransferFile(file.size)) {
+        notify.error('Upload failed', `"${file.name}" was skipped. ${fileTransferLimitMessage()}`)
+        return null
       }
-      // Skip files whose upload is already referenced or in flight: a
-      // drop handled by more than one drop zone (composer card + parent
-      // panel) runs the second batch after the first, and must not upload
-      // or reference the same file again.
-      const filename = resolveUniqueFilename(taken, sanitizeUploadFilename(file.name))
-      const targetPath = uploadTargetPath(filename)
-      const reservation = uploadReservationKey(workspaceId, targetPath)
-      if (inFlightUploadPaths.has(reservation) || hasUploadMention(prompt.value, targetPath)) {
-        continue
-      }
-      inFlightUploadPaths.add(reservation)
-      reserved.push(reservation)
-      let content: string
-      try {
-        content = await fileToBase64(file)
-      } catch {
-        notify.error('Upload failed', `File "${file.name}" could not be read.`)
-        continue
-      }
-      if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId) {
-        inFlightUploadPaths.delete(reservation)
-        continue
-      }
-      const requestId = nextChatUploadRequestId(filename)
-      // Register first so a synchronous sendFilesUpload throw (oversize
-      // cap) still resolves through the tracked promise instead of
-      // hanging the upload: fail the pending upload, then surface the
-      // error visibly.
-      const tracked = fileExplorer.trackAndUpload(
-        workspaceId,
-        requestId,
-        CHAT_UPLOAD_DIR,
-        filename,
-        content,
-        !isScheduledTask.value,
-      )
-      if (isScheduledTask.value) ownedPendingUploadIds.add(requestId)
-      transfers.push(
-        tracked.then(
-          () => {
-            ownedPendingUploadIds.delete(requestId)
-            return targetPath
-          },
-          () => {
-            ownedPendingUploadIds.delete(requestId)
-            return null
-          },
-        ),
-      )
-      try {
-        sendFilesUpload(workspaceId, requestId, CHAT_UPLOAD_DIR, filename, content, false)
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'The file could not be uploaded.'
-        fileExplorer.failUpload(requestId, message)
-      }
-    }
-
-    // Wait for all uploads to complete (success or error); failures are
-    // already consumed above so this never throws.
-    const uploaded = (await Promise.all(transfers)).filter((path): path is string => path !== null)
-    if (
-      uploaded.length > 0 &&
-      !uploadDisposed &&
-      generation === uploadGeneration &&
-      workspaceId === props.workspaceId
-    ) {
+      return fileExplorer.uploadFile(workspaceId, {
+        directory: CHAT_UPLOAD_DIR,
+        filename: sanitizeUploadFilename(file.name),
+        body: file,
+        conflict: 'rename',
+        // Scheduled tasks upload to their own workspace, not the open explorer.
+        refreshExplorer: !isScheduledTask.value,
+        signal: abortController.signal,
+      })
+    })
+    const uploaded = (await Promise.all(uploads)).flatMap((result) => (result ? [result.path] : []))
+    if (uploaded.length > 0 && current()) {
       prompt.value = appendUploadMentions(prompt.value, uploaded)
       if (isScheduledTask.value) emit('update:prompt', prompt.value)
       else saveToCache(prompt.value)
@@ -1043,8 +940,9 @@ async function runChatUpload(
       if (!isScheduledTask.value) fileExplorer.fetchDirectory(workspaceId, '/workspace')
     }
   } finally {
-    uploadDirectoryAbortController = null
-    for (const path of reserved) inFlightUploadPaths.delete(path)
+    // A cancelled file may be uploaded again later.
+    if (abortController.signal.aborted) for (const file of pending) handledUploadFiles.delete(file)
+    if (uploadAbortController === abortController) uploadAbortController = null
     if (generation === uploadGeneration) {
       isUploading.value = false
       if (isScheduledTask.value && !uploadDisposed) emit('uploading', false)
@@ -1121,7 +1019,6 @@ function setPrompt(
 }
 
 const fileExplorer = useFileExplorerStore()
-if (props.variant === 'scheduled-task') useWorkspaceFileEvents(() => props.workspaceId ?? '')
 
 const MENTION_FIND_DEBOUNCE_MS = 150
 

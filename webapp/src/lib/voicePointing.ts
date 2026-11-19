@@ -6,9 +6,7 @@
  * Desktop frames are captured lazily from the first pointer on the desktop.
  */
 import { shallowRef } from 'vue'
-import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { sendFilesUpload } from '@/services/socket'
-import { fileToBase64 } from '@/lib/chatUpload'
+import { workspaceFiles } from '@/services/workspaceFiles'
 import { isTrustedDesktopMessage } from '@/lib/desktopSurfaceRecovery'
 import { createSecureUuid } from '@/lib/secureUuid'
 import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from '@/lib/voiceLimits'
@@ -208,6 +206,8 @@ export function startPointing(
   const frames: PointingResult['frames'] = []
   const frameSizes = new Map<string, { width: number; height: number }>()
   const abort = new AbortController()
+  // Stopping keeps in-flight frame uploads; only cancelling aborts them.
+  const uploadAbort = new AbortController()
   let lastPoint: { x: number; y: number } | null = null
   let desktopPoint: { x: number; y: number; width: number; height: number } | null = null
   let observedViewer: HTMLIFrameElement | null = null
@@ -219,7 +219,6 @@ export function startPointing(
   let failure: Error | null = null
   let pendingCapture: Promise<void> | null = null
   const pendingUploads = new Set<Promise<void>>()
-  const uploadIds = new Set<string>()
   let totalBytes = 0
   let lastActivityMs = originMs
   let nextCaptureMs = -Infinity
@@ -503,40 +502,31 @@ export function startPointing(
       const directory = `/workspace/.opencuria/recordings/${recordingId}/frames`
       const index = frames.length
       const filename = `${String(index).padStart(6, '0')}.jpg`
-      const content = await fileToBase64(new File([frame.blob], filename, { type: 'image/jpeg' }))
-      if (stopped || cancelled) return
       const path = `${directory}/${filename}`
       frameSizes.set(path, { width: frame.width, height: frame.height })
       frames.push({ t_ms, path })
       previousFrameId = frame.frameId
       engage()
       observe(iframe, !failure)
-      const store = useFileExplorerStore()
-      const uploadId = `voice-frame-${recordingId}-${index}`
-      uploadIds.add(uploadId)
-      const tracked = store.trackAndUpload(
-        workspaceId,
-        uploadId,
-        directory,
-        filename,
-        content,
-        false,
-      )
-      const upload = tracked
-        .catch((error: unknown) => {
-          if (!cancelled)
-            fail(error instanceof Error ? error : new Error('Desktop recording upload failed.'))
+      const upload = workspaceFiles()
+        .upload(workspaceId, {
+          directory,
+          filename,
+          body: frame.blob,
+          conflict: 'replace',
+          signal: uploadAbort.signal,
         })
+        .then(
+          () => undefined,
+          (error: unknown) => {
+            if (!cancelled)
+              fail(error instanceof Error ? error : new Error('Desktop recording upload failed.'))
+          },
+        )
         .finally(() => {
-          uploadIds.delete(uploadId)
           pendingUploads.delete(upload)
         })
       pendingUploads.add(upload)
-      try {
-        sendFilesUpload(workspaceId, uploadId, directory, filename, content, false)
-      } catch {
-        store.failUpload(uploadId, 'The desktop frame could not be saved.')
-      }
     })()
       .catch((error: unknown) => {
         if (!cancelled && !stopped)
@@ -593,7 +583,7 @@ export function startPointing(
       cancelled = true
       cleanup()
       abort.abort()
-      for (const uploadId of uploadIds) useFileExplorerStore().cancelUpload(uploadId)
+      uploadAbort.abort()
     },
   }
 }
