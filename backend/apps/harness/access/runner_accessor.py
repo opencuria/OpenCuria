@@ -453,14 +453,98 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     # -- reply routing (called from Socket.IO handlers) -------------------
 
     def _deliver_result(self, data: dict[str, Any]) -> bool:
-        """Resolve the pending unary request future for *data*."""
+        """Resolve the pending unary request future for *data*.
+
+        Final results of chunked reads go through
+        :meth:`_accept_read_final`, which holds the future back until every
+        announced chunk is buffered.
+        """
         request_id = str(data.get("request_id", ""))
         future = self._pending.get(request_id)
         if future is None or future.done():
             log.warning("harness_result_no_pending", request_id=request_id)
             return False
+        state = self._file_chunks.get(request_id)
+        if state is not None:
+            self._schedule(self._accept_read_final, request_id, future, state, data)
+            return True
         self._schedule(_resolve_future, future, data)
         return True
+
+    def _accept_read_final(
+        self,
+        request_id: str,
+        future: asyncio.Future[dict[str, Any]],
+        state: dict[str, Any],
+        data: dict[str, Any],
+    ) -> None:
+        """Record the final ``harness:read_file_result`` of a read (on loop).
+
+        The runner emits all chunks before the final result, but the
+        backend does not preserve that order: Socket.IO handles every event
+        in its own task and the reply relay publishes concurrently over a
+        Redis connection pool. A chunked final therefore only pins and
+        validates the transfer metadata; the read completes once the last
+        chunk is buffered, whichever arrives last.
+        """
+        if data.get("error") or not data.get("chunked"):
+            # Runner failure or backward-compatible small inline payload.
+            _resolve_future(future, data)
+            return
+        try:
+            if state.get("final") is not None:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: duplicate final result"
+                )
+            try:
+                total = int(data.get("total_chunks", 0))
+            except (TypeError, ValueError) as exc:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: invalid total_chunks"
+                ) from exc
+            if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: invalid total_chunks"
+                )
+            # The final metadata must match the pinned chunk stream; when
+            # it overtook every chunk, it pins the total itself.
+            pinned = int(state.get("total_chunks", 0) or 0)
+            if pinned and pinned != total:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: chunk total mismatch"
+                )
+            if str(data.get("workspace_id", "")) != str(
+                state.get("workspace_id", "")
+            ):
+                raise RunnerAccessorError(
+                    "harness:read_file failed: workspace mismatch"
+                )
+            if str(data.get("path", "")) != str(state.get("path", "")):
+                raise RunnerAccessorError(
+                    "harness:read_file failed: path mismatch"
+                )
+        except RunnerAccessorError as exc:
+            self._file_chunks.pop(request_id, None)
+            _resolve_future_exception(future, exc)
+            return
+        state["total_chunks"] = total
+        state["final"] = data
+        self._complete_read_if_ready(future, state)
+
+    @staticmethod
+    def _complete_read_if_ready(
+        future: asyncio.Future[dict[str, Any]],
+        state: dict[str, Any],
+    ) -> None:
+        """Resolve a chunked read once its final and all chunks are in."""
+        final = state.get("final")
+        total = int(state.get("total_chunks", 0) or 0)
+        if final is None or not total:
+            return
+        # Chunk indices are validated in range and unique, so the count
+        # alone proves completeness.
+        if len(state["chunks"]) == total:
+            _resolve_future(future, final)
 
     def _deliver_file_chunk(self, data: dict[str, Any]) -> bool:
         """Buffer one ``harness:read_file_chunk`` slice for *data*.
@@ -540,6 +624,9 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             except Exception as exc:
                 self._file_chunks.pop(request_id, None)
                 _resolve_future_exception(future, exc)
+                return
+            # The final result may have overtaken this chunk.
+            self._complete_read_if_ready(future, state)
 
         self._schedule(_store)
         return True
@@ -760,10 +847,12 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     ) -> dict[str, Any]:
         """Emit ``harness:read_file`` and reassemble chunked replies.
 
-        Registers a bounded chunk buffer for *request_id*, waits for the
-        final ``harness:read_file_result``, then joins ``total_chunks``
-        slices in order (or uses the inline ``content`` when the runner
-        sent a small backward-compatible payload).
+        Registers a bounded chunk buffer for *request_id*, waits until the
+        final ``harness:read_file_result`` and every announced chunk have
+        arrived (in any order), then joins ``total_chunks`` slices in order
+        (or uses the inline ``content`` when the runner sent a small
+        backward-compatible payload). Chunks still missing when the read
+        times out after the final fail as an incomplete transfer.
         """
         timeout_s = self._resolve_timeout(timeout)
         future: asyncio.Future[dict[str, Any]] = (
@@ -793,50 +882,27 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             "workspace_id": str(payload.get("workspace_id", "")),
             "path": str(payload.get("path", "")),
             "max_chars": max_chars,
+            # Validated chunked final; set by _accept_read_final.
+            "final": None,
         }
+        state = self._file_chunks[request_id]
         completed = False
         try:
             await self._emit("harness:read_file", payload)
             result = await asyncio.wait_for(future, timeout_s)
             completed = True
-            state = self._file_chunks.get(request_id, {})
-            chunks: dict[int, str] = state.get("chunks", {})
             if result.get("error"):
                 return result
             if result.get("chunked"):
-                try:
-                    total = int(result.get("total_chunks", 0))
-                except (TypeError, ValueError) as exc:
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: invalid total_chunks"
-                    ) from exc
-                if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: invalid total_chunks"
-                    )
-                # The final metadata must match the pinned chunk stream.
-                pinned = int(state.get("total_chunks", 0) or 0)
-                if pinned and pinned != total:
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: chunk total mismatch"
-                    )
-                if not pinned:
-                    state["total_chunks"] = total
-                if str(result.get("workspace_id", "")) != str(
-                    state.get("workspace_id", "")
-                ):
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: workspace mismatch"
-                    )
-                if str(result.get("path", "")) != str(state.get("path", "")):
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: path mismatch"
-                    )
-                missing = [i for i in range(total) if i not in chunks]
-                if missing:
+                # _accept_read_final validated the metadata and the future
+                # resolved only with every chunk buffered; re-check anyway.
+                total = int(state.get("total_chunks", 0) or 0)
+                chunks: dict[int, str] = state["chunks"]
+                missing = self._missing_chunks(state)
+                if not total or missing:
                     raise RunnerAccessorError(
                         "harness:read_file failed: incomplete transfer "
-                        f"(missing {len(missing)} of {total} chunks)"
+                        f"(missing {missing} of {total} chunks)"
                     )
                 joined = "".join(chunks[i] for i in range(total))
                 merged = dict(result)
@@ -846,6 +912,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             # Backward-compatible small inline payload.
             return result
         except TimeoutError as exc:
+            if state.get("final") is not None:
+                # The runner finished, but chunks never reached us.
+                raise RunnerAccessorError(
+                    "harness:read_file failed: incomplete transfer "
+                    f"(missing {self._missing_chunks(state)} of "
+                    f"{state['total_chunks']} chunks)"
+                ) from exc
             raise TimeoutError(
                 "Harness request 'harness:read_file' timed out "
                 f"after {timeout_s:.1f}s"
@@ -855,6 +928,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             if not completed:
                 future.cancel()
                 await self._emit_cancel(request_id)
+
+    @staticmethod
+    def _missing_chunks(state: dict[str, Any]) -> int:
+        """Return how many announced chunks of a read are not buffered."""
+        total = int(state.get("total_chunks", 0) or 0)
+        chunks = state.get("chunks", {})
+        return sum(1 for i in range(total) if i not in chunks)
 
     @staticmethod
     def _chunk_b64_slices(payload_b64: str) -> list[str]:
