@@ -94,7 +94,7 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
-    "react-native-enriched-markdown": "1.0.1",
+    "react-native-enriched-markdown": "1.1.1",
     "react-native-gesture-handler": "~2.32.0",
     "react-native-keyboard-controller": "1.22.9",
     "react-native-maps": "1.27.2",
@@ -117,6 +117,9 @@
     "jest-expo": "~57.0.6",
     "react-test-renderer": "19.2.3",
     "typescript": "~6.0.3"
+  },
+  "enriched-markdown": {
+    "enableVideo": false
   },
   "expo": {
     "install": {

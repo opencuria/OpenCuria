@@ -44,6 +44,9 @@ Reanimated stays at 4.5.5, above SDK 57's 4.5.1, whose settled animations can sn
 back to stale values. The root `overrides` keep one copy and `expo.install.exclude`
 stops `expo install --fix` from downgrading it; drop both with the next SDK upgrade.
 
+`react-native-enriched-markdown` is configured in `package.json` (`enriched-markdown`),
+not as an Expo plugin. Its video player stays off: chat videos play through `expo-video`.
+
 `EXPO_PUBLIC_DEFAULT_SERVER_URL` only prefills the sign-in screen and is public; never
 put secrets in it. `10.0.2.2` reaches the host from the Android emulator; for a USB
 device use `adb reverse tcp:8000 tcp:8000` and `adb reverse tcp:8081 tcp:8081`

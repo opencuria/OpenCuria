@@ -139,7 +139,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         // accepts http:// for local-network hosts, public hosts need https://.
         { android: { usesCleartextTraffic: true } },
       ],
-      "react-native-enriched-markdown",
       [
         "react-native-maps",
         // Maps in published apps: Android needs a Google Maps key at build
