@@ -416,6 +416,51 @@ def test_assignment_all_generations_retired(runner, user):
     assert len(ImageDeletionRequest.objects.get(pk=plan["id"]).children) == 1
 
 
+def _failed_build(runner, user, build_status):
+    definition = ImageDefinition.objects.create(
+        organization=runner.organization, name="recipe"
+    )
+    job = ImageBuildJob.objects.create(runner=runner, image_definition=definition)
+    build = Task.objects.create(
+        id=uuid.uuid4(), runner=runner, type="build_image", status=build_status
+    )
+    failed = image(
+        runner, user, "failed", build_job=job, status="failed", creating_task=build
+    )
+    return job, failed
+
+
+def test_failed_build_without_artifact_is_removed_through_the_runner(runner, user):
+    """An issued build that failed never blocks deletion; the runner confirms."""
+    job, failed = _failed_build(runner, user, "failed")
+    observe(runner, [])
+    assert Repo.preview(runner.organization_id, "assignment", job.id)["blockers"] == []
+    plan = Repo.request(runner.organization_id, user, "assignment", job.id)
+
+    Repo.tick()
+
+    row = ImageDeletionRequest.objects.get(pk=plan["id"])
+    task_id = row.children["image:" + str(failed.id)]
+    command = LifecycleCommand.objects.get(task_id=task_id)
+    assert command.payload["image_artifact_id"] == failed.runner_ref
+    finish(RunnerService(sio_server=AsyncMock()), runner, task_id)
+    observe(runner, [])
+    Repo.tick()
+    failed.refresh_from_db()
+    assert failed.status == "deleted"
+    assert ImageDeletionRequest.objects.get(pk=row.id).phase == "completed"
+
+
+def test_missing_artifact_of_a_running_build_still_blocks(runner, user):
+    """While the build task may still publish, absence proves nothing."""
+    job, failed = _failed_build(runner, user, "in_progress")
+    observe(runner, [])
+
+    graph = Repo.preview(runner.organization_id, "assignment", job.id)
+
+    assert "missing_image:" + str(failed.id) in graph["blockers"]
+
+
 def test_retirement_blocks_clone_and_capture(runner, user):
     from apps.runners.repositories import ImageGenerationRepository
     from apps.runners.services.capture import CaptureService

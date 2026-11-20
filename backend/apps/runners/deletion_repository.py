@@ -179,21 +179,28 @@ class DeletionRepository:
                     if image.id in root_ids and not any(
                         r.image_id == image.id for r in resources
                     ):
-                        # A missing ref is not proof of no artifact. Only never-issued
-                        # failed placeholders can be logically removed without bytes.
-                        if not (
-                            not image.runner_ref
-                            and not image.creating_task_id
-                            and (
-                                image.status == "failed"
-                                or any(
-                                    p.previous.get("image:" + str(image.id)) == "failed"
-                                    for p in ImageDeletionRequest.objects.exclude(
-                                        phase__in=DONE
-                                    )
-                                )
+                        # A missing ref is not proof of no artifact. Never-issued
+                        # failed placeholders are removed without bytes; a failed
+                        # build whose task ended gets a runner delete command,
+                        # which rescans and confirms the artifact is absent.
+                        failed = image.status == "failed" or any(
+                            p.previous.get("image:" + str(image.id)) == "failed"
+                            for p in ImageDeletionRequest.objects.exclude(
+                                phase__in=DONE
                             )
-                        ):
+                        )
+                        placeholder = (
+                            not image.runner_ref and not image.creating_task_id
+                        )
+                        build_ended = bool(
+                            image.runner_ref
+                            and image.creating_task_id
+                            and not Task.objects.filter(
+                                pk=image.creating_task_id,
+                                status__in=["pending", "in_progress"],
+                            ).exists()
+                        )
+                        if not (failed and (placeholder or build_ended)):
                             result["blockers"].append("missing_image:" + str(image.id))
                 while True:
                     extra = {source for source, target in edges if target in chosen}
