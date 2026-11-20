@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="OpenCuria">
+  <defs>
+    <style>
+      .oc-tile { fill: #F7F7F8; stroke: #1E2130; stroke-opacity: .12 }
+      .oc-tl { fill: #1E2130; fill-opacity: .7 }
+      .oc-tr { fill: #1E2130; fill-opacity: .92 }
+      .oc-l { fill: #1E2130; fill-opacity: .5 }
+      .oc-bl { fill: #1E2130; fill-opacity: .32 }
+      .oc-r { fill: #534AB7 }
+      .oc-br { fill: #433A93 }
+      .oc-seam { stroke: #F7F7F8; stroke-opacity: .9 }
+      @media (prefers-color-scheme: dark) {
+        .oc-tile { fill: url(#oc-bg); stroke: #FFFFFF; stroke-opacity: .1 }
+        .oc-tl { fill: #D6D2F2; fill-opacity: 1 }
+        .oc-tr { fill: #FFFFFF; fill-opacity: 1 }
+        .oc-l { fill: #9B95C9; fill-opacity: 1 }
+        .oc-bl { fill: #6A6399; fill-opacity: 1 }
+        .oc-r { fill: url(#oc-r) }
+        .oc-br { fill: url(#oc-br) }
+        .oc-seam { stroke: #14112A; stroke-opacity: .55 }
+      }
+    </style>
+    <linearGradient id="oc-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A2456"/>
+      <stop offset="1" stop-color="#0B0A14"/>
+    </linearGradient>
+    <linearGradient id="oc-r" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9A8DFF"/>
+      <stop offset="1" stop-color="#7464F2"/>
+    </linearGradient>
+    <linearGradient id="oc-br" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6A5BE8"/>
+      <stop offset="1" stop-color="#4C3FC4"/>
+    </linearGradient>
+    <clipPath id="oc-hex"><polygon points="18,23 32,15 46,23 46,41 32,49 18,41"/></clipPath>
+  </defs>
+  <rect class="oc-tile" x="0.5" y="0.5" width="63" height="63" rx="14.5"/>
+  <g transform="translate(32 32) scale(1.45) translate(-32 -32)">
+    <polygon class="oc-tl" points="18,23 32,15 32,32"/>
+    <polygon class="oc-tr" points="32,15 46,23 32,32"/>
+    <polygon class="oc-r" points="46,23 32,32 46,41"/>
+    <polygon class="oc-br" points="32,32 32,49 46,41"/>
+    <polygon class="oc-l" points="18,23 32,32 18,41"/>
+    <polygon class="oc-bl" points="32,32 32,49 18,41"/>
+    <g class="oc-seam" clip-path="url(#oc-hex)" stroke-width="0.45">
+      <line x1="32" y1="32" x2="18" y2="23"/>
+      <line x1="32" y1="32" x2="32" y2="15"/>
+      <line x1="32" y1="32" x2="46" y2="23"/>
+      <line x1="32" y1="32" x2="46" y2="41"/>
+      <line x1="32" y1="32" x2="32" y2="49"/>
+      <line x1="32" y1="32" x2="18" y2="41"/>
+    </g>
+  </g>
+</svg>

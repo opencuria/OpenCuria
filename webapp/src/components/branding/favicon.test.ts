@@ -5,30 +5,44 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const webappRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const html = readFileSync(resolve(webappRoot, 'index.html'), 'utf8')
 
-function readPublic(name: string): string {
-  return readFileSync(resolve(webappRoot, 'public', name), 'utf8')
+/** Hrefs of the `<link>` tags with the given rel. */
+function linkHrefs(rel: string): string[] {
+  return [...html.matchAll(/<link\b[^>]*>/g)]
+    .map(([tag]) => tag)
+    .filter((tag) => tag.includes(`rel="${rel}"`))
+    .map((tag) => /href="([^"]+)"/.exec(tag)?.[1] ?? '')
 }
 
 describe('favicon assets', () => {
-  it('fills the canvas so Safari does not pad a tiny mark onto white', () => {
-    const svg = readPublic('favicon.svg')
+  it('draws the logo facets on a tile that follows the light and dark color scheme', () => {
+    const svg = readFileSync(resolve(webappRoot, 'src/assets/brand/favicon.svg'), 'utf8')
+    const [lightCss = '', darkCss = ''] = svg.split('@media (prefers-color-scheme: dark)')
 
     expect(svg).toContain('viewBox="0 0 64 64"')
-    expect(svg).toContain('<rect width="64" height="64" fill="#0A0A0A"/>')
-    expect(svg).toContain('scale(1.7)')
-    expect(svg).not.toMatch(/<rect[^>]*rx=/)
+    expect(svg).toMatch(/<rect class="oc-tile"[^>]*rx="[\d.]+"\/>/)
+    expect(lightCss).toContain('.oc-tile { fill: #F7F7F8;')
+    expect(darkCss).toContain('.oc-tile { fill: url(#oc-bg);')
+    for (const facet of ['18,23 32,15 32,32', '46,23 32,32 46,41', '32,32 32,49 18,41']) {
+      expect(svg).toContain(`points="${facet}"`)
+    }
   })
 
-  it('exposes PNG and Safari fallbacks from index.html', () => {
-    const html = readFileSync(resolve(webappRoot, 'index.html'), 'utf8')
+  it('links content-hashed icons so the immutable nginx cache never serves stale ones', () => {
+    const svgIcon = linkHrefs('icon').find((href) => href.endsWith('.svg'))
+    const [touchIcon] = linkHrefs('apple-touch-icon')
 
-    expect(html).toContain('href="/favicon.svg"')
-    expect(html).toContain('href="/favicon-32.png"')
-    expect(html).toContain('href="/apple-touch-icon.png"')
-    expect(html).toContain('href="/safari-pinned-tab.svg"')
-    expect(existsSync(resolve(webappRoot, 'public/favicon-32.png'))).toBe(true)
-    expect(existsSync(resolve(webappRoot, 'public/apple-touch-icon.png'))).toBe(true)
+    expect(svgIcon).toBe('/src/assets/brand/favicon.svg')
+    expect(touchIcon).toBe('/src/assets/brand/apple-touch-icon.png')
+    for (const href of [svgIcon, touchIcon]) {
+      expect(existsSync(resolve(webappRoot, `.${href}`))).toBe(true)
+    }
+  })
+
+  it('keeps a 32px favicon.ico at the root for browsers without SVG favicons', () => {
+    expect(html).toContain('<link rel="icon" href="/favicon.ico" sizes="32x32">')
     expect(existsSync(resolve(webappRoot, 'public/favicon.ico'))).toBe(true)
+    expect(html).not.toContain('rel="mask-icon"')
   })
 })
