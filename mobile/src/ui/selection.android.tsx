@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   Box,
   Checkbox,
+  Column,
   DropdownMenuItem,
   ExposedDropdownMenu,
   ExposedDropdownMenuBox,
@@ -9,7 +10,6 @@ import {
   useNativeState,
   Host,
   Icon,
-  ListItem,
   RadioButton,
   Row,
   Text,
@@ -22,6 +22,7 @@ import {
   fillMaxHeight,
   height,
   menuAnchor,
+  padding,
   paddingAll,
   selectable,
   selectableGroup,
@@ -42,8 +43,19 @@ import type {
   NativeOptionProps,
   NativePickerProps,
   NativeSegmentedPickerProps,
+  OptionRowMetrics,
 } from "./selection.types";
 import { useTheme } from "./theme";
+
+/** A 24dp radio or checkbox beside a bodyLarge label, as in a Material list. */
+export const OPTION_ROW: OptionRowMetrics = {
+  inset: 16,
+  indicator: 24,
+  gap: 16,
+  minHeight: 48,
+  fontSize: 16,
+  lineHeight: 24,
+};
 
 const SEGMENT_SHAPE = Shapes.RoundedCorner(9);
 const TRANSPARENT = "#00000000";
@@ -234,8 +246,14 @@ export function NativePicker(props: NativePickerProps): React.JSX.Element {
   );
 }
 
+/**
+ * A choice row with a leading radio (one choice) or checkbox (any number).
+ * Its height follows the label and description, unlike a Material list item
+ * with its fixed two- and three-line heights; the whole row is the target.
+ */
 export function NativeOption(props: NativeOptionProps): React.JSX.Element {
   const { theme } = useTheme();
+  const vertical = (OPTION_ROW.minHeight - OPTION_ROW.lineHeight) / 2;
   return (
     <Host
       matchContents={{ vertical: true }}
@@ -243,13 +261,9 @@ export function NativeOption(props: NativeOptionProps): React.JSX.Element {
       seedColor={theme.seed}
       ignoreSafeAreaKeyboardInsets
     >
-      <ListItem
-        colors={{
-          containerColor: TRANSPARENT,
-          contentColor: props.disabled ? theme.subtleText : theme.text,
-          supportingContentColor: theme.mutedText,
-          leadingContentColor: theme.text,
-        }}
+      <Row
+        verticalAlignment="top"
+        horizontalArrangement={{ spacedBy: OPTION_ROW.gap }}
         modifiers={[
           fillMaxWidth(),
           semantics({
@@ -266,43 +280,56 @@ export function NativeOption(props: NativeOptionProps): React.JSX.Element {
                   : selectable(props.selected, props.onPress, "radioButton"),
               ]
             : []),
+          padding(OPTION_ROW.inset, vertical, OPTION_ROW.inset, vertical),
         ]}
       >
-        <ListItem.LeadingContent>
-          {props.multiple ? (
-            <Checkbox
-              value={props.selected}
-              enabled={!props.disabled}
-              colors={{
-                checkedColor: theme.primary,
-                checkmarkColor: theme.primaryForeground,
-                uncheckedColor: theme.mutedText,
-                disabledCheckedColor: theme.subtleText,
-                disabledUncheckedColor: theme.subtleText,
-              }}
-            />
-          ) : (
-            <RadioButton
-              selected={props.selected}
-              enabled={!props.disabled}
-              colors={{
-                selectedColor: theme.primary,
-                unselectedColor: theme.mutedText,
-                disabledSelectedColor: theme.subtleText,
-                disabledUnselectedColor: theme.subtleText,
-              }}
-            />
-          )}
-        </ListItem.LeadingContent>
-        <ListItem.HeadlineContent>
-          <Text>{props.label}</Text>
-        </ListItem.HeadlineContent>
-        {props.description ? (
-          <ListItem.SupportingContent>
-            <Text>{props.description}</Text>
-          </ListItem.SupportingContent>
-        ) : null}
-      </ListItem>
+        {props.multiple ? (
+          <Checkbox
+            value={props.selected}
+            enabled={!props.disabled}
+            colors={{
+              checkedColor: theme.primary,
+              checkmarkColor: theme.primaryForeground,
+              uncheckedColor: theme.mutedText,
+              disabledCheckedColor: theme.subtleText,
+              disabledUncheckedColor: theme.subtleText,
+            }}
+          />
+        ) : (
+          <RadioButton
+            selected={props.selected}
+            enabled={!props.disabled}
+            colors={{
+              selectedColor: theme.primary,
+              unselectedColor: theme.mutedText,
+              disabledSelectedColor: theme.subtleText,
+              disabledUnselectedColor: theme.subtleText,
+            }}
+          />
+        )}
+        <Column
+          verticalArrangement={{ spacedBy: 2 }}
+          modifiers={[weight(1)]}
+        >
+          <Text
+            color={props.disabled ? theme.subtleText : theme.text}
+            style={{
+              fontSize: OPTION_ROW.fontSize,
+              lineHeight: OPTION_ROW.lineHeight,
+            }}
+          >
+            {props.label}
+          </Text>
+          {props.description ? (
+            <Text
+              color={theme.mutedText}
+              style={{ fontSize: 14, lineHeight: 20 }}
+            >
+              {props.description}
+            </Text>
+          ) : null}
+        </Column>
+      </Row>
     </Host>
   );
 }

@@ -76,6 +76,8 @@ exports.MediaViewerFrame = ({
   )
 exports.ComposerSurface = ({ children }) => h(View, null, children)
 exports.ComposerSheetSurface = ({ children, style }) => h(View, { style }, children)
+exports.ComposerSheetPeek = ({ style }) => h(View, { style })
+exports.composerSheetsFloat = false
 exports.NativeTextField = React.forwardRef(({ label, ...props }, ref) =>
   h(TextInput, {
     ...props,
@@ -133,6 +135,14 @@ exports.NativeSegmentedPicker = ({ label, value, options, onChange, testID }) =>
       ),
     ),
   )
+exports.OPTION_ROW = {
+  inset: 14,
+  indicator: 22,
+  gap: 12,
+  minHeight: 48,
+  fontSize: 17,
+  lineHeight: 22,
+}
 exports.NativeOption = ({
   label,
   description,

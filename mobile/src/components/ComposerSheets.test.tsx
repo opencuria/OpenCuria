@@ -117,6 +117,7 @@ describe("ComposerSheetStack", () => {
     const onSubmitQuestion = jest.fn().mockResolvedValue(undefined);
     renderComposer(gates({ questions: [question], onSubmitQuestion }));
 
+    expect(screen.getByText("Select all that apply")).toBeTruthy();
     fireEvent.press(screen.getByRole("checkbox", { name: "Text" }));
     fireEvent.press(screen.getByRole("checkbox", { name: "Images" }));
     fireEvent.changeText(
@@ -130,6 +131,64 @@ describe("ComposerSheetStack", () => {
         `Text${NUL}Images${NUL}Audio`,
       ]),
     );
+  });
+
+  it("continues only with an answer; own text replaces a single choice", async () => {
+    const onSubmitQuestion = jest.fn().mockResolvedValue(undefined);
+    const single: HarnessQuestionRequest = {
+      ...question,
+      questions: [
+        {
+          header: "Next step",
+          question: "What next?",
+          options: [
+            { label: "Change code", description: "Fix a bug." },
+            { label: "Explain code" },
+          ],
+        },
+      ],
+    };
+    renderComposer(gates({ questions: [single], onSubmitQuestion }));
+
+    expect(screen.getByText("Next step")).toBeTruthy();
+    // Radio circles say "one"; only multi-select spells out its rule.
+    expect(screen.queryByText(/Select/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+
+    fireEvent.press(screen.getByRole("radio", { name: "Explain code" }));
+    expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+
+    fireEvent.changeText(
+      screen.getByLabelText("Your answer for What next?"),
+      "Write tests",
+    );
+    expect(
+      screen.getByRole("radio", { name: "Explain code" }).props
+        .accessibilityState,
+    ).toMatchObject({ checked: false });
+    fireEvent.press(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() =>
+      expect(onSubmitQuestion).toHaveBeenCalledWith("question-1", [
+        "Write tests",
+      ]),
+    );
+  });
+
+  it("asks open questions with the answer field alone", () => {
+    const open: HarnessQuestionRequest = {
+      ...question,
+      questions: [{ question: "Which branch?" }],
+    };
+    renderComposer(gates({ questions: [open] }));
+
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(screen.getByPlaceholderText("Your answer…")).toBeTruthy();
+    fireEvent.changeText(
+      screen.getByLabelText("Your answer for Which branch?"),
+      "  ",
+    );
+    expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
   });
 
   it("keeps answers while mention suggestions cover the question", () => {

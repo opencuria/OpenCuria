@@ -5,6 +5,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   type LayoutChangeEvent,
 } from "react-native";
@@ -21,6 +22,7 @@ import {
   Ellipsis,
   FileText,
   MessageCircleQuestion,
+  PenLine,
   Plus,
   ShieldAlert,
   Sparkles,
@@ -39,17 +41,21 @@ import type { MentionCandidate } from "@opencuria/chat-core/harnessMentions";
 import {
   collectQuestionAnswers,
   emptyQuestionDraft,
+  isQuestionCustomActive,
   selectedQuestionOptions,
   setQuestionCustomAnswer,
   toggleQuestionOption,
   type QuestionDraft,
 } from "@opencuria/chat-core/harnessQuestion";
 import { gateSourceLabel } from "@opencuria/chat-core/harnessSubtaskActivity";
-import { ComposerSheetSurface } from "../ui/ComposerSurface";
+import {
+  ComposerSheetPeek,
+  ComposerSheetSurface,
+  composerSheetsFloat,
+} from "../ui/ComposerSurface";
 import { NativeMenu } from "../ui/NativeMenu";
-import { NativeTextField } from "../ui/NativeTextField";
 import { Button, IconButton, NativeAction } from "../ui/primitives";
-import { NativeOption } from "../ui/selection";
+import { NativeOption, OPTION_ROW } from "../ui/selection";
 import { useTheme } from "../ui/theme";
 import { useChatLayout } from "./ChatLayout";
 
@@ -101,22 +107,32 @@ export interface ComposerSheetStackProps {
 }
 
 /**
- * The sheet runs into the composer as in the webapp: its square lower edge
- * reaches under the composer (6pt core padding plus 8pt behind its curve).
+ * An opaque sheet runs into the composer as in the webapp: its square lower
+ * edge reaches under the composer (6pt core padding plus 8pt behind its
+ * curve). A floating glass card keeps a gap instead (a negative overlap).
  */
-const OVERLAP = 14;
+const OVERLAP = composerSheetsFloat ? -8 : 14;
 /** Visible edge of each sheet waiting beneath the top one. */
 const PEEK = 7;
 const MAX_PEEKS = 2;
+const PEEK_HEIGHT = PEEK * (MAX_PEEKS + 1) + 22;
+/**
+ * Horizontal inset of a peek per level. Peeks above a translucent glass card
+ * are clipped to their own edge, so they clear the card's rounded corners.
+ */
+function peekInset(depth: number): number {
+  return composerSheetsFloat ? 10 + depth * 12 : depth * 9;
+}
 const NO_QUESTIONS: HarnessQuestionRequest[] = [];
 const MONOSPACE = Platform.select({ ios: "Menlo", default: "monospace" });
 
 /**
- * Sheet stack tucked behind the top of the composer, as in the webapp: the
- * top sheet is interactive, lower ones peek out above it. The stack reports
- * its height to the chat layout, so the transcript stays scrollable above it,
- * and it shrinks with the keyboard. Question and permission sheets fold into
- * their header to free the transcript; a new request unfolds them.
+ * Sheet stack above the composer: tucked behind its top as in the webapp, or
+ * a floating glass card where the composer is liquid glass. The top sheet is
+ * interactive, lower ones peek out above it. The stack reports its height to
+ * the chat layout, so the transcript stays scrollable above it, and it
+ * shrinks with the keyboard. Question and permission sheets fold into their
+ * header to free the transcript; a new request unfolds them.
  */
 export function ComposerSheetStack({
   sheets,
@@ -126,7 +142,6 @@ export function ComposerSheetStack({
   onSelectCandidate,
   testID = "composer-sheet-stack",
 }: ComposerSheetStackProps): React.JSX.Element {
-  const { theme } = useTheme();
   const { onSheetsHeight, sheetMaxHeight } = useChatLayout();
   const top = sheets[0];
   const peeks = Math.max(0, Math.min(sheets.length - 1, MAX_PEEKS));
@@ -213,16 +228,18 @@ export function ComposerSheetStack({
                 pointerEvents="none"
                 testID="composer-sheet-peek"
                 style={[
-                  styles.peek,
+                  styles.peekSlot,
                   {
                     top: (peeks - depth) * PEEK,
-                    left: depth * 9,
-                    right: depth * 9,
-                    backgroundColor: theme.surfaceMuted,
-                    borderColor: theme.border,
+                    left: peekInset(depth),
+                    right: peekInset(depth),
+                    // Glass shows what lies beneath it: only the edge stays.
+                    height: composerSheetsFloat ? PEEK : PEEK_HEIGHT,
                   },
                 ]}
-              />
+              >
+                <ComposerSheetPeek style={styles.peek} />
+              </View>
             ))}
           <Reanimated.View style={[styles.top, sizeStyle]}>
             <ComposerSheetSurface style={styles.shrink}>
@@ -420,12 +437,14 @@ function QuestionSheet({
 }): React.JSX.Element | null {
   const { theme } = useTheme();
   const [page, setPage] = usePage(requests[0]?.request_id, requests.length);
-  const scroll = useRef<ScrollView>(null);
-  const offsets = useRef<number[]>([]);
+  const inView = useAnswerInView();
   const request = requests[page];
   if (!request) return null;
   const draft = drafts.get(request);
   const numbered = request.questions.length > 1;
+  const answers = collectQuestionAnswers(request, draft);
+  // Nothing to send yet: Skip is the way out.
+  const answered = answers.some((answer) => answer.trim().length > 0);
 
   const run = (action: () => void | Promise<void>) => {
     if (!submitting) void settle(action);
@@ -448,9 +467,10 @@ function QuestionSheet({
       {collapsed ? null : (
         <>
           <ScrollView
-            ref={scroll}
+            ref={inView.scroll}
+            onLayout={inView.onViewportLayout}
             style={styles.shrink}
-            contentContainerStyle={styles.body}
+            contentContainerStyle={styles.questions}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
             scrollsToTop={false}
@@ -458,46 +478,47 @@ function QuestionSheet({
             {request.questions.map((question, index) => {
               const selected = selectedQuestionOptions(draft, index);
               const hasOptions = Boolean(question.options?.length);
+              const caption = [
+                question.header,
+                hasOptions && question.multiple ? "Select all that apply" : "",
+              ]
+                .filter(Boolean)
+                .join(" · ");
               return (
                 <View
                   key={`${request.request_id}-${index}`}
-                  onLayout={(event) => {
-                    offsets.current[index] = event.nativeEvent.layout.y;
-                  }}
+                  onLayout={(event) => inView.onQuestionLayout(index, event)}
                   style={styles.question}
                 >
-                  {question.header ? (
-                    <Text style={[styles.label, { color: theme.subtleText }]}>
-                      {question.header}
-                    </Text>
-                  ) : null}
-                  <Text style={[styles.questionText, { color: theme.text }]}>
-                    {numbered ? (
-                      <Text style={{ color: theme.subtleText }}>
-                        {index + 1}.{" "}
+                  <View style={styles.prompt}>
+                    {caption ? (
+                      <Text
+                        style={[styles.caption, { color: theme.mutedText }]}
+                      >
+                        {caption}
                       </Text>
                     ) : null}
-                    {question.question}
-                  </Text>
-                  {hasOptions ? (
-                    <>
-                      <Text style={[styles.hint, { color: theme.mutedText }]}>
-                        {question.multiple
-                          ? "Select all that apply"
-                          : "Select one"}
-                      </Text>
-                      <View
-                        style={[
-                          styles.options,
-                          { backgroundColor: theme.surfaceMuted },
-                        ]}
-                      >
-                        {question.options?.map((option) => (
+                    <Text
+                      accessibilityRole="header"
+                      style={[styles.questionText, { color: theme.text }]}
+                    >
+                      {numbered ? (
+                        <Text style={{ color: theme.subtleText }}>
+                          {index + 1}.{" "}
+                        </Text>
+                      ) : null}
+                      {question.question}
+                    </Text>
+                  </View>
+                  <View style={styles.choices}>
+                    {question.options?.map((option) => {
+                      const picked = selected.includes(option.label);
+                      return (
+                        <ChoiceCard key={option.label} active={picked}>
                           <NativeOption
-                            key={option.label}
                             label={option.label}
                             description={option.description}
-                            selected={selected.includes(option.label)}
+                            selected={picked}
                             multiple={question.multiple}
                             disabled={submitting}
                             onPress={() =>
@@ -511,34 +532,29 @@ function QuestionSheet({
                               )
                             }
                           />
-                        ))}
-                      </View>
-                    </>
-                  ) : null}
-                  <NativeTextField
-                    label="Your answer"
-                    accessibilityLabel={`Your answer for ${question.question}`}
-                    placeholder={hasOptions ? "Own answer…" : "Your answer…"}
-                    value={draft.custom[index] ?? ""}
-                    prose
-                    onChangeText={(value) =>
-                      drafts.update(request, (current) =>
-                        setQuestionCustomAnswer(current, request, index, value),
-                      )
-                    }
-                    // The sheet shrinks above the keyboard; keep the field in view.
-                    onFocus={() =>
-                      setTimeout(
-                        () =>
-                          scroll.current?.scrollTo({
-                            y: offsets.current[index] ?? 0,
-                            animated: true,
-                          }),
-                        300,
-                      )
-                    }
-                    testID="composer-question-custom"
-                  />
+                        </ChoiceCard>
+                      );
+                    })}
+                    <CustomAnswer
+                      question={question.question}
+                      hasOptions={hasOptions}
+                      value={draft.custom[index] ?? ""}
+                      active={isQuestionCustomActive(draft, request, index)}
+                      disabled={submitting}
+                      onChangeText={(value) =>
+                        drafts.update(request, (current) =>
+                          setQuestionCustomAnswer(
+                            current,
+                            request,
+                            index,
+                            value,
+                          ),
+                        )
+                      }
+                      onFocus={() => inView.onFocus(index)}
+                      onBlur={inView.onBlur}
+                    />
+                  </View>
                 </View>
               );
             })}
@@ -546,7 +562,8 @@ function QuestionSheet({
           <View style={styles.actions}>
             <Button
               title="Skip"
-              variant="ghost"
+              variant="secondary"
+              shape="capsule"
               disabled={submitting}
               onPress={() => {
                 run(() => onSkip(request.request_id));
@@ -557,14 +574,11 @@ function QuestionSheet({
             <Button
               title="Continue"
               variant="primary"
+              shape="capsule"
               busy={submitting}
+              disabled={!answered}
               onPress={() => {
-                run(() =>
-                  onSubmit(
-                    request.request_id,
-                    collectQuestionAnswers(request, drafts.get(request)),
-                  ),
-                );
+                run(() => onSubmit(request.request_id, answers));
               }}
               style={styles.action}
               testID="composer-question-submit"
@@ -573,6 +587,125 @@ function QuestionSheet({
         </>
       )}
     </View>
+  );
+}
+
+/**
+ * Keeps a focused free-text answer in view while the sheet shrinks above the
+ * keyboard. The answer row ends its question, so the question's lower edge
+ * stays at the bottom of the visible area, also as the sheet keeps resizing.
+ */
+function useAnswerInView() {
+  const scroll = useRef<ScrollView>(null);
+  const questions = useRef<{ y: number; height: number }[]>([]);
+  const viewport = useRef(0);
+  const focused = useRef<number | null>(null);
+  const reveal = useCallback((animated: boolean) => {
+    const frame =
+      focused.current === null ? undefined : questions.current[focused.current];
+    if (!frame) return;
+    scroll.current?.scrollTo({
+      y: Math.max(0, frame.y + frame.height - viewport.current),
+      animated,
+    });
+  }, []);
+  return {
+    scroll,
+    onViewportLayout: (event: LayoutChangeEvent) => {
+      viewport.current = event.nativeEvent.layout.height;
+      reveal(false);
+    },
+    onQuestionLayout: (index: number, event: LayoutChangeEvent) => {
+      questions.current[index] = event.nativeEvent.layout;
+    },
+    onFocus: (index: number) => {
+      focused.current = index;
+      // After the keyboard, which shrinks the sheet, has come up.
+      setTimeout(() => reveal(true), 300);
+    },
+    onBlur: () => {
+      focused.current = null;
+    },
+  };
+}
+
+/** Rounded tile of one choice; a picked choice is outlined in the ink. */
+function ChoiceCard({
+  active,
+  children,
+}: React.PropsWithChildren<{ active: boolean }>): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <View
+      style={[
+        styles.choice,
+        {
+          backgroundColor: theme.controlFill,
+          borderColor: active ? theme.primary : "transparent",
+        },
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
+
+/**
+ * Free-text answer, the last choice beneath the options: its pencil lines up
+ * with their indicators. Typing replaces a single choice (chat-core rules).
+ */
+function CustomAnswer({
+  question,
+  hasOptions,
+  value,
+  active,
+  disabled,
+  onChangeText,
+  onFocus,
+  onBlur,
+}: {
+  question: string;
+  hasOptions: boolean;
+  value: string;
+  active: boolean;
+  disabled: boolean;
+  onChangeText: (value: string) => void;
+  onFocus: () => void;
+  onBlur: () => void;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <ChoiceCard active={active}>
+      <View testID="composer-question-custom-row" style={styles.custom}>
+        <View style={styles.customIcon}>
+          <PenLine
+            size={18}
+            strokeWidth={2}
+            color={active ? theme.text : theme.subtleText}
+          />
+        </View>
+        <TextInput
+          accessibilityLabel={`Your answer for ${question}`}
+          placeholder={hasOptions ? "Something else…" : "Your answer…"}
+          placeholderTextColor={theme.subtleText}
+          value={value}
+          editable={!disabled}
+          multiline
+          autoCorrect
+          spellCheck
+          autoCapitalize="sentences"
+          submitBehavior="blurAndSubmit"
+          returnKeyType="done"
+          textAlignVertical="top"
+          selectionColor={theme.primary}
+          onChangeText={onChangeText}
+          onFocus={onFocus}
+          onBlur={onBlur}
+          style={[styles.customInput, { color: theme.text }]}
+          testID="composer-question-custom"
+        />
+      </View>
+    </ChoiceCard>
   );
 }
 
@@ -660,6 +793,7 @@ function PermissionSheet({
           <View style={styles.actions}>
             <Button
               title="Reject"
+              shape="capsule"
               variant="outline"
               disabled={resolving}
               onPress={() => {
@@ -669,6 +803,7 @@ function PermissionSheet({
             />
             <Button
               title="Approve once"
+              shape="capsule"
               variant="secondary"
               disabled={resolving}
               onPress={() => {
@@ -680,6 +815,7 @@ function PermissionSheet({
           <View style={styles.actions}>
             <Button
               title="Always allow"
+              shape="capsule"
               variant="primary"
               busy={resolving}
               onPress={() => {
@@ -920,20 +1056,17 @@ function MentionSheet({
 }
 
 const styles = StyleSheet.create({
-  // Narrower than the composer, whose top edge overlaps the sheet.
-  stack: { marginHorizontal: 10, marginBottom: -OVERLAP },
-  peek: {
-    position: "absolute",
-    height: PEEK * (MAX_PEEKS + 1) + 22,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    borderCurve: "continuous",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: 0,
+  // A tucked sheet is narrower than the composer, whose top edge overlaps
+  // it; a floating card is as wide as the composer.
+  stack: {
+    marginHorizontal: composerSheetsFloat ? 0 : 10,
+    marginBottom: -OVERLAP,
   },
+  peekSlot: { position: "absolute", overflow: "hidden" },
+  peek: { height: PEEK_HEIGHT },
   top: { minHeight: 0 },
   shrink: { flexShrink: 1, minHeight: 0 },
-  content: { paddingTop: 4, paddingBottom: OVERLAP + 8 },
+  content: { paddingTop: 4, paddingBottom: Math.max(OVERLAP, 0) + 12 },
   header: {
     minHeight: 44,
     flexDirection: "row",
@@ -955,28 +1088,48 @@ const styles = StyleSheet.create({
   spacer: { flex: 1 },
   pageLabel: { fontSize: 13, fontVariant: ["tabular-nums"] },
   body: { gap: 18, paddingHorizontal: 16, paddingTop: 2, paddingBottom: 10 },
-  question: { gap: 8 },
-  label: {
-    fontSize: 11,
-    lineHeight: 15,
-    letterSpacing: 0.7,
-    fontWeight: "600",
-    textTransform: "uppercase",
-  },
-  questionText: { fontSize: 16, lineHeight: 22, fontWeight: "600" },
+  questions: { gap: 24, paddingHorizontal: 12, paddingTop: 2, paddingBottom: 4 },
+  question: { gap: 12 },
+  prompt: { gap: 3, paddingHorizontal: 4 },
+  caption: { fontSize: 13, lineHeight: 18, fontWeight: "500" },
+  questionText: { fontSize: 17, lineHeight: 22, fontWeight: "600" },
   hint: { fontSize: 13, lineHeight: 18 },
-  options: {
-    borderRadius: 14,
+  choices: { gap: 8 },
+  choice: {
+    borderRadius: 16,
     borderCurve: "continuous",
+    borderWidth: 1.5,
     overflow: "hidden",
-    paddingHorizontal: Platform.OS === "ios" ? 14 : 0,
+  },
+  // As tall as a one-line option row, its text in the label's size.
+  custom: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: OPTION_ROW.gap,
+    paddingHorizontal: OPTION_ROW.inset,
+    paddingVertical: (OPTION_ROW.minHeight - OPTION_ROW.lineHeight) / 2,
+  },
+  customIcon: {
+    width: OPTION_ROW.indicator,
+    height: OPTION_ROW.lineHeight,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  customInput: {
+    flex: 1,
+    minHeight: OPTION_ROW.lineHeight,
+    maxHeight: OPTION_ROW.lineHeight * 5,
+    padding: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
+    fontSize: OPTION_ROW.fontSize,
+    lineHeight: OPTION_ROW.lineHeight,
   },
   actions: {
     flexDirection: "row",
-    gap: 8,
+    gap: 10,
     paddingHorizontal: 12,
-    paddingTop: 4,
-    paddingBottom: 4,
+    paddingTop: 12,
   },
   action: { flex: 1 },
   permissionTitle: { flexDirection: "row", alignItems: "center", gap: 8 },

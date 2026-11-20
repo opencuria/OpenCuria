@@ -39,6 +39,9 @@ export function ComposerSurface({
   );
 }
 
+/** Material sheets run under the composer's top edge. */
+export const composerSheetsFloat = false;
+
 const SHEET_RADIUS = 22;
 
 /** Material surface of the composer sheet stack; its square lower edge runs into the composer. */
@@ -80,3 +83,30 @@ export function ComposerSheetSurface({
     </View>
   );
 }
+
+/** Top edge of a sheet waiting beneath the top one; the stack positions it. */
+export function ComposerSheetPeek({
+  style,
+}: {
+  style?: StyleProp<ViewStyle>;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <View
+      style={[
+        styles.peek,
+        { backgroundColor: theme.surfaceMuted, borderColor: theme.border },
+        style,
+      ]}
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  peek: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 0,
+  },
+});

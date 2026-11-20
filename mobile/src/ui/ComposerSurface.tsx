@@ -1,1 +1,6 @@
-export { ComposerSheetSurface, ComposerSurface } from "./ComposerSurface.ios";
+export {
+  ComposerSheetPeek,
+  ComposerSheetSurface,
+  ComposerSurface,
+  composerSheetsFloat,
+} from "./ComposerSurface.ios";
