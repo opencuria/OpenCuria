@@ -186,14 +186,23 @@ function posixNormalize(path: string): string {
 }
 
 /**
- * Resolve a markdown image/link dest to a sandboxed `/workspace/...` path.
+ * Resolve a raw markdown image/link dest (`<…>`, title) to a sandboxed
+ * `/workspace/...` path, decoding percent-escapes once like any URL.
  * Remote URLs and sandbox escapes return null.
  */
 export function resolveWorkspaceMediaPath(rawDest: string): string | null {
-  return resolveWorkspacePath(parseMarkdownLinkDest(rawDest));
+  return resolveWorkspaceLinkPath(parseMarkdownLinkDest(rawDest));
 }
 
-/** Resolve a sanitized href relative to a workspace directory, decoding once. */
+/**
+ * Validate a literal file path (never percent-decoded, unlike URLs) and
+ * return it normalized under `/workspace`, or null.
+ */
+export function resolveWorkspaceFilePath(path: string): string | null {
+  return resolveWorkspacePath(path);
+}
+
+/** Resolve a parsed URL (href/src) relative to a workspace directory, decoding once. */
 export function resolveWorkspaceLinkPath(
   href: string,
   baseDirectory = WORKSPACE_ROOT,

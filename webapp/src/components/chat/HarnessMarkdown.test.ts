@@ -153,6 +153,21 @@ describe('HarnessMarkdown', () => {
     expect(relative.get('img').attributes('alt')).toBe('pic')
   })
 
+  it('requests images with spaces in their name by their decoded file path', async () => {
+    mountMarkdown('![a](/workspace/shots/my%20shot.png)')
+    mountMarkdown('![b](<shots/my shot.png>)')
+    mountMarkdown('<img src="/workspace/shots/my shot.png" alt="c">')
+    mountMarkdown('![d](/workspace/shots/100%25%20done%231.png)')
+    await flushPromises()
+
+    expect(files.link.mock.calls.map((call) => call[1])).toEqual([
+      '/workspace/shots/my shot.png',
+      '/workspace/shots/my shot.png',
+      '/workspace/shots/my shot.png',
+      '/workspace/shots/100% done#1.png',
+    ])
+  })
+
   it('shows a tap-to-load preview for large media', async () => {
     files.link.mockImplementation(async (_workspaceId: string, path: string) =>
       makeFileLink(path, { size: 20 * 1024 * 1024 }),

@@ -73,12 +73,12 @@ afterEach(() => {
 describe("workspace path validation", () => {
   it.each([
     "/workspace/../private.png",
-    "/workspace/%2e%2e/private.png",
+    "/workspace/./private.png",
     "https://attacker.test/a.png",
     "//attacker.test/a.png",
     "/etc/passwd",
     "/workspace/a\\..\\b.png",
-    "/workspace/a%00.png",
+    "/workspace/a\u0000.png",
   ])("rejects unsafe path %s", async (path) => {
     const { client, link } = filesClient(3);
     const media = new MediaCache(client, "workspace-secret", "scope-secret");
@@ -86,6 +86,20 @@ describe("workspace path validation", () => {
       NativeMediaError,
     );
     expect(link).not.toHaveBeenCalled();
+    await media.dispose();
+  });
+
+  it("requests file paths literally, without decoding them again", async () => {
+    const { client, link } = filesClient(3);
+    const media = new MediaCache(client, "workspace-secret", "scope-secret");
+    for (const path of [
+      "/workspace/shots/my shot.png",
+      "/workspace/shots/100% #1?.png",
+      "/workspace/shots/a%20b.png",
+    ]) {
+      await media.describe(path);
+      expect(link).toHaveBeenLastCalledWith("workspace-secret", path);
+    }
     await media.dispose();
   });
 });

@@ -8,7 +8,7 @@ import { parseToolArguments, stringArg, truncatePreview } from '@opencuria/chat-
 import HarnessMentionImages from '../HarnessMentionImages.vue'
 import ImageLightbox from '../ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { resolveWorkspaceMediaPath } from '@opencuria/chat-core/workspaceFileRefs'
+import { resolveWorkspaceFilePath } from '@opencuria/chat-core/workspaceFileRefs'
 
 const props = defineProps<{
   part: HarnessPart
@@ -34,7 +34,7 @@ const savedPath = computed(() => {
 })
 const pointingPath = computed(() =>
   savedPath.value.startsWith('/workspace/') &&
-  resolveWorkspaceMediaPath(savedPath.value) === savedPath.value
+  resolveWorkspaceFilePath(savedPath.value) === savedPath.value
     ? savedPath.value
     : undefined,
 )

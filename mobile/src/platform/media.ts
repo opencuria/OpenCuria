@@ -4,7 +4,7 @@ import { attachmentByteSize } from "@opencuria/chat-core/harnessAttachments";
 import {
   classifyWorkspaceFile,
   getWorkspaceFileExtension,
-  resolveWorkspaceLinkPath,
+  resolveWorkspaceFilePath,
   type WorkspaceFileKind,
 } from "@opencuria/chat-core/workspaceFileRefs";
 import {
@@ -637,33 +637,27 @@ export class MediaCache {
   }
 }
 
+/**
+ * Validate a literal file path. Markdown URLs are decoded once where they are
+ * parsed, so `%`, `#` and `?` here are part of the file name.
+ */
 export function validateWorkspaceMediaPath(path: string): string {
   if (typeof path !== "string" || !path.trim()) {
     throw new NativeMediaError("Invalid workspace file path.", "invalid_path");
   }
-  const input = path.trim().replace(/[?#].*$/, "");
-  if (/[\\\p{Cc}]/u.test(input)) {
+  if (/[\\\p{Cc}]/u.test(path)) {
     throw new NativeMediaError(
       "Workspace file paths cannot contain control characters.",
       "invalid_path",
     );
   }
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(input);
-  } catch {
-    throw new NativeMediaError("Invalid workspace file path.", "invalid_path");
-  }
-  if (
-    /[\\\p{Cc}]/u.test(decoded) ||
-    decoded.split("/").some((segment) => segment === "." || segment === "..")
-  ) {
+  if (path.split("/").some((segment) => segment === "." || segment === "..")) {
     throw new NativeMediaError(
       "Workspace file paths cannot traverse directories.",
       "invalid_path",
     );
   }
-  const safe = resolveWorkspaceLinkPath(path);
+  const safe = resolveWorkspaceFilePath(path);
   if (!safe || safe === "/workspace") {
     throw new NativeMediaError(
       "Only files inside the workspace can be opened.",

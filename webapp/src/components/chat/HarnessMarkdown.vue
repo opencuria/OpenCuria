@@ -19,7 +19,6 @@ import WorkspaceMedia from './WorkspaceMedia.vue'
 import {
   classifyWorkspaceFile,
   resolveWorkspaceLinkPath,
-  resolveWorkspaceMediaPath,
 } from '@opencuria/chat-core/workspaceFileRefs'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
@@ -102,15 +101,9 @@ const rootClass = computed(() => {
 const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const workspaceId = computed(() => workspaceIdRef.value)
 
+/** `href`/`src` are URLs already parsed by marked or the HTML parser: decode once. */
 function localLinkPath(href: string): string | null {
   return resolveWorkspaceLinkPath(href, props.baseDirectory)
-}
-
-function localMediaPath(src: string): string | null {
-  // Document URLs are already parsed by marked/the HTML parser, including spaces.
-  return props.baseDirectory === undefined
-    ? resolveWorkspaceMediaPath(src)
-    : localLinkPath(src)
 }
 
 type MarkdownSegment = {
@@ -207,7 +200,7 @@ function renderMarkdownNode(node: Node, isStreaming: boolean): VNodeChild {
   }
 
   if (tag === 'img' && !element.closest('button')) {
-    const path = localMediaPath(element.getAttribute('src') ?? '')
+    const path = localLinkPath(element.getAttribute('src') ?? '')
     if (path) {
       const kind = classifyWorkspaceFile(path)
       if (kind === 'image' || kind === 'video') {
