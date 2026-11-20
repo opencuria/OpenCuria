@@ -398,6 +398,56 @@ describe("REST request deadlines", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("gives transcription minutes instead of the default deadline", async () => {
+    vi.useFakeTimers();
+    const answered = deferred<Response>();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ available: true, max_duration_ms: 1000 }),
+      )
+      .mockImplementationOnce(() => answered.promise);
+    const client = clientOptions().create(fetch);
+    await expect(client.voice.config("ws/1")).resolves.toMatchObject({
+      available: true,
+    });
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "https://api.example/api/v1/workspaces/ws%2F1/voice/config/",
+    );
+    const transcript = client.voice.transcribe("ws-1", {
+      audio_base64: "AAAA",
+      mime_type: "audio/mp4",
+      duration_ms: 1200,
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    const signal = fetch.mock.calls[1]?.[1]?.signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    expect(JSON.parse(fetch.mock.calls[1]?.[1]?.body as string)).toEqual({
+      audio_base64: "AAAA",
+      mime_type: "audio/mp4",
+      duration_ms: 1200,
+    });
+    answered.resolve(jsonResponse({ text: "Hi.", segments: [], timing: "approximate" }));
+    await expect(transcript).resolves.toMatchObject({ text: "Hi." });
+  });
+
+  it("reports a refused transcription with the server's reason", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(
+        { detail: "Select a connected speech provider", code: "voice_provider_missing" },
+        409,
+      ),
+    );
+    const client = clientOptions().create(fetch);
+    await expect(
+      client.voice.transcribe("ws-1", {
+        audio_base64: "AAAA",
+        mime_type: "audio/mp4",
+        duration_ms: 1200,
+      }),
+    ).rejects.toMatchObject({ status: 409, code: "voice_provider_missing" });
+  });
+
   it.each(["headers", "body"])(
     "bounds a stalled response's %s and allows a fresh retry",
     async (phase) => {

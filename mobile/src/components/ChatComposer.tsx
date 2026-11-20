@@ -10,6 +10,7 @@ import { Image } from "expo-image";
 import {
   ArrowUp,
   FileText,
+  Mic,
   Pencil,
   Plus,
   Sparkles,
@@ -38,6 +39,7 @@ import {
 import { buildComposerSheets } from "@opencuria/chat-core/composerSheets";
 import type { HarnessScheduledMessage } from "@opencuria/chat-core/harness";
 import { sendLaterOptions } from "@opencuria/chat-core/sendLater";
+import { appendDictation } from "@opencuria/chat-core/voiceInput";
 import { Banner, IconButton, NativeAction } from "../ui/primitives";
 import { NativeContextMenu } from "../ui/ContextMenu";
 import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
@@ -59,6 +61,11 @@ import {
   type ComposerQueue,
 } from "./ComposerSheets";
 import { SendLaterSheet } from "./SendLaterSheet";
+import {
+  VoiceClipRows,
+  VoiceRecordingBar,
+  type ComposerVoice,
+} from "./ComposerVoice";
 import {
   COMPOSER_INPUT_NATIVE_ID,
   ComposerDismissArea,
@@ -170,6 +177,11 @@ export interface ChatComposerProps {
    * it, and `onSend` receives the edit.
    */
   editing?: ComposerEditing;
+  /**
+   * Dictation: a microphone takes the send button's place while the draft is
+   * empty. Transcripts of this chat arrive at the end of the draft.
+   */
+  voice?: ComposerVoice;
   testID?: string;
 }
 
@@ -222,6 +234,7 @@ export function ChatComposer({
   gates,
   queue,
   editing,
+  voice,
   testID = "chat-composer",
 }: ChatComposerProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -706,6 +719,31 @@ export function ChatComposer({
     );
   }, [isEditing, onSend, steering, submit]);
 
+  // Dictation arrives at the end of the draft; "Stop and send" sends it.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+  const receiveVoice = voice?.receive;
+  useEffect(() => {
+    if (!receiveVoice) return;
+    return receiveVoice((text, sendNow) => {
+      const next = appendDictation(draftRef.current, text);
+      const end = { start: next.length, end: next.length };
+      nativeSelectionRef.current = false;
+      nativeEditTextRef.current = null;
+      draftRef.current = next;
+      selectionRef.current = end;
+      setError(null);
+      onDraftChangeRef.current(next, end);
+      // After the draft reached the host and the field shows it.
+      if (sendNow)
+        requestAnimationFrame(() => {
+          if (mounted.current) void sendRef.current();
+        });
+    });
+  }, [receiveVoice]);
+
   const schedule = useCallback(
     (sendAt: Date) => {
       if (!onSchedule) return;
@@ -860,8 +898,21 @@ export function ChatComposer({
       testID="chat-composer-send"
     />
   );
+  const canDictate = Boolean(voice) && !disabled;
+  const voiceButton = (primary: boolean) => (
+    <ComposerAction
+      label="Dictate a message"
+      icon={Mic}
+      primary={primary}
+      iconSize={primary ? 20 : 19}
+      onPress={() => voice?.start()}
+      testID="chat-composer-voice"
+    />
+  );
   const sendButton = primaryIsStop ? (
     stopButton
+  ) : canDictate && !hasDraft ? (
+    voiceButton(true)
   ) : canSchedule ? (
     <NativeContextMenu
       label="Send later"
@@ -897,6 +948,17 @@ export function ChatComposer({
           message={error}
           onDismiss={() => setError(null)}
           testID="chat-composer-error"
+          style={{ marginBottom: 8 }}
+        />
+      ) : null}
+      {voice?.notice ? (
+        <Banner
+          tone={voice.notice.tone === "error" ? "error" : "neutral"}
+          message={voice.notice.message}
+          actionLabel={voice.notice.action?.label}
+          onAction={voice.notice.action?.onPress}
+          onDismiss={voice.dismissNotice}
+          testID="chat-composer-voice-notice"
           style={{ marginBottom: 8 }}
         />
       ) : null}
@@ -1031,6 +1093,13 @@ export function ChatComposer({
                 ))}
               </ScrollView>
             ) : null}
+            {voice?.clips.length ? (
+              <VoiceClipRows
+                clips={voice.clips}
+                onRetry={voice.retry}
+                onDiscard={voice.discard}
+              />
+            ) : null}
             <ComposerEditor
               key={`message-input-${editorKey}`}
               ref={inputRef}
@@ -1074,12 +1143,24 @@ export function ChatComposer({
                 ),
               )}
             </ComposerEditor>
-            <View style={styles.toolbar}>
-              {attachmentButton}
-              <View style={styles.settings}>{settingsButton}</View>
-              {busy && !primaryIsStop ? stopButton : null}
-              {sendButton}
-            </View>
+            {voice?.recording ? (
+              <VoiceRecordingBar
+                recording={voice.recording}
+                onCancel={voice.cancel}
+                onFinish={voice.finish}
+              />
+            ) : (
+              <View style={styles.toolbar}>
+                {attachmentButton}
+                <View style={styles.settings}>{settingsButton}</View>
+                {busy && !primaryIsStop ? stopButton : null}
+                {/* While the agent works, a steer can be dictated beside Stop. */}
+                {primaryIsStop && steering && canDictate
+                  ? voiceButton(false)
+                  : null}
+                {sendButton}
+              </View>
+            )}
           </ComposerSurface>
         </View>
       </ComposerDismissArea>

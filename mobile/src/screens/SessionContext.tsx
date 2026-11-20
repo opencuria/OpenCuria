@@ -13,6 +13,7 @@ import type { AuthUser, Organization, TokenPair } from "@opencuria/client";
 import { appScope } from "../apps/appPresentation";
 import { isUnreachable, watchNetwork } from "../offline/connectivity";
 import { offlineStore } from "../offline/offlineStore";
+import { clearVoiceClips } from "../voice/voiceClipStore";
 import {
   NativeSessionStorage,
   type NativeAuthSession,
@@ -178,6 +179,7 @@ export function SessionProvider({
     void offlineStore()
       .clear()
       .catch(() => undefined);
+    clearVoiceClips();
     try {
       await storage.clear();
     } catch (cause) {
@@ -682,10 +684,12 @@ export function SessionProvider({
     setOffline(false);
     setError(null);
     setBooting(false);
-    // Chats saved for offline use leave the device with the sign-in.
+    // Chats saved for offline use and waiting recordings leave the device
+    // with the sign-in.
     void offlineStore()
       .clear()
       .catch(() => undefined);
+    clearVoiceClips();
     try {
       await storage.clear();
     } catch (cause) {

@@ -19,6 +19,7 @@ import { createWorkspaceFilesApi, type WorkspaceFilesApi } from "./files";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
 import { createAppsApi } from "./apps";
 import { createDesktopApi } from "./desktop";
+import { createVoiceApi } from "./voice";
 import { buildDesktopViewerUrl } from "@opencuria/chat-core/desktopSurface";
 import type { DesktopViewerIntent } from "@opencuria/chat-core/desktopViewer";
 import {
@@ -161,6 +162,8 @@ export interface OpenCuriaClient {
   terminal: ReturnType<typeof createTerminalApi>;
   /** Personal and organization skills. */
   skills: ReturnType<typeof createSkillsApi>;
+  /** Dictation: workspace voice settings and transcription. */
+  voice: ReturnType<typeof createVoiceApi>;
   realtime: RealtimeClient;
   /**
    * Workspace files: signed HTTP links (stream, download, blurred preview),
@@ -331,6 +334,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     })(),
     terminal: createTerminalApi(() => api, realtime),
     skills: createSkillsApi(() => api),
+    voice: createVoiceApi(() => api),
     realtime,
     files: {
       listFiles: realtime.listFiles.bind(realtime),

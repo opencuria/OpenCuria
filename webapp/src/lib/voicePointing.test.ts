@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from './voiceLimits'
+import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from '@opencuria/chat-core/voiceInput'
 import {
   activePointingWorkspace,
   captureDesktopFrame,

@@ -24,7 +24,7 @@ const voice = useVoiceInput((text, path) => {
   sendOnResult = false
   emit('result', text, path, send)
 })
-const { state, error, warning, pointingFailed, audioLevels } = voice
+const { state, error, warning, pointingFailed, audioLevels, waiting } = voice
 const busy = computed(() => voice.busy.value || loading.value)
 const notice = computed(() => error.value || configError.value || warning.value)
 let configGeneration = 0
@@ -102,7 +102,7 @@ watch(
     if (value) dismiss()
   },
 )
-watch([busy, state, audioLevels], () => {
+watch([busy, state, audioLevels, waiting], () => {
   emit('busy', busy.value)
   if (busy.value)
     voiceCaptureControls.value = {
@@ -112,6 +112,7 @@ watch([busy, state, audioLevels], () => {
         ? (state.value as 'requesting' | 'recording' | 'processing' | 'error')
         : 'requesting',
       levels: audioLevels.value,
+      waiting: waiting.value,
       stop: () => finish(false),
       send: () => finish(true),
       cancel: dismiss,

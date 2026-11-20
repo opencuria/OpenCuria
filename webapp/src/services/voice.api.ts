@@ -1,50 +1,30 @@
 /** Workspace-scoped voice input; credentials and model calls stay server-side. */
 import { createAgentSettingsApi } from '@opencuria/client/settings'
-import { get, getApiClient, post } from './api'
-import type { PointingResult } from '@/lib/voicePointing'
+import { createVoiceApi } from '@opencuria/client/voice'
+import type { VoiceRecordingInput, VoiceSettings, VoiceTranscript } from '@opencuria/client'
+import { getApiClient } from './api'
 
-export interface VoiceConfig {
-  available: boolean
-  reason?: string
-  models: { id: string; name: string }[]
-  default_model: string
-  cleanup_model: string
-  max_duration_ms: number
-  max_audio_bytes: number
-}
-export interface VoiceSegment {
-  start_ms: number
-  end_ms: number
-  text: string
-  raw_text?: string
-}
-export interface VoiceTranscript {
-  text: string
-  raw_text?: string
-  segments: VoiceSegment[]
-  timing: 'provider' | 'approximate'
-  segments_kind?: 'source'
-  cleanup_warning?: string
-  speech_model?: string
-  cleanup_model?: string
-}
+export type { VoiceSegment, VoiceTranscript } from '@opencuria/client'
+export type VoiceConfig = VoiceSettings
+
 /** Organization voice capabilities for provider settings, without a workspace. */
 export const { getVoiceSettings } = createAgentSettingsApi(getApiClient)
+const voice = createVoiceApi(getApiClient)
 
 export function getVoiceConfig(workspaceId: string, signal?: AbortSignal): Promise<VoiceConfig> {
-  return get(`/workspaces/${workspaceId}/voice/config/`, signal)
+  return voice.config(workspaceId, signal)
 }
 export function transcribeVoice(
   workspaceId: string,
   payload: { audio_base64: string; mime_type: string; model: string; duration_ms: number },
   signal?: AbortSignal,
 ): Promise<VoiceTranscript> {
-  return post(`/workspaces/${workspaceId}/voice/transcribe/`, payload, signal)
+  return voice.transcribe(workspaceId, payload, signal)
 }
 export function saveVoiceRecording(
   workspaceId: string,
-  payload: VoiceTranscript & PointingResult & { recording_id: string; duration_ms: number },
+  payload: VoiceRecordingInput,
   signal?: AbortSignal,
 ): Promise<{ path: string }> {
-  return post(`/workspaces/${workspaceId}/voice/recordings/`, payload, signal)
+  return voice.saveRecording(workspaceId, payload, signal)
 }

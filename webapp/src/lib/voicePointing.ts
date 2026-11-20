@@ -9,7 +9,7 @@ import { shallowRef } from 'vue'
 import { workspaceFiles } from '@/services/workspaceFiles'
 import { isTrustedDesktopMessage } from '@/lib/desktopSurfaceRecovery'
 import { createSecureUuid } from '@/lib/secureUuid'
-import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from '@/lib/voiceLimits'
+import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from '@opencuria/chat-core/voiceInput'
 
 export interface PointerTarget {
   kind: 'image' | 'desktop'

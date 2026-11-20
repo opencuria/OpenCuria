@@ -129,7 +129,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
             "Choose photos to share with your OpenCuria agent or an app you open in OpenCuria.",
           cameraPermission:
             "Take photos for your OpenCuria conversation or an app you open in OpenCuria.",
-          microphonePermission: "Record audio in apps you open in OpenCuria.",
+          microphonePermission:
+            "Dictate messages to your OpenCuria agent and record audio in apps you open in OpenCuria.",
         },
       ],
       [

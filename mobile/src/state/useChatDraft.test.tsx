@@ -142,3 +142,38 @@ it("keeps nothing without a chat", () => {
   view.rerender({ current: newChat });
   expect(view.result.current.draft).toBe("");
 });
+
+it("adds to the draft of a chat that is not on screen without hiding its saved text", async () => {
+  const device = account([
+    {
+      key: "chat-input-w1-s1",
+      text: "Saved reply",
+      editedAt: new Date().toISOString(),
+    },
+  ]);
+  const view = renderDraft(device, newChat);
+  let edited!: Promise<void>;
+  act(() => {
+    edited = view.result.current.editDraft(
+      chat,
+      (text) => `${text}\nDictated.`,
+    );
+  });
+  device.release();
+  await act(() => edited);
+  expect(view.result.current.draft).toBe("");
+  expect(device.saveDrafts).toHaveBeenLastCalledWith([
+    expect.objectContaining({
+      key: "chat-input-w1-s1",
+      text: "Saved reply\nDictated.",
+    }),
+  ]);
+  view.rerender({ current: chat });
+  expect(view.result.current.draft).toBe("Saved reply\nDictated.");
+
+  // The chat on screen changes as if typed.
+  await act(() =>
+    view.result.current.editDraft(chat, (text) => `${text} More.`),
+  );
+  expect(view.result.current.draft).toBe("Saved reply\nDictated. More.");
+});

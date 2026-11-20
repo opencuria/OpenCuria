@@ -908,7 +908,7 @@ export interface ComputerUseConfig {
   screenshot_max_dimension: number;
 }
 
-/** Organization voice capabilities, without a workspace. */
+/** Voice capabilities of the organization, also per workspace. */
 export interface VoiceSettings {
   available: boolean;
   reason?: string;
@@ -917,6 +917,60 @@ export interface VoiceSettings {
   cleanup_model: string;
   max_duration_ms: number;
   max_audio_bytes: number;
+}
+
+/** A phrase and its interval relative to the recording's start. */
+export interface VoiceSegment {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  raw_text?: string;
+}
+
+/** Edited dictation with the speech model's timed source phrases. */
+export interface VoiceTranscript {
+  text: string;
+  raw_text?: string;
+  segments: VoiceSegment[];
+  timing: "provider" | "approximate";
+  segments_kind?: "source";
+  cleanup_warning?: string;
+  speech_model?: string;
+  cleanup_model?: string;
+}
+
+/** One complete, independently decodable recording. */
+export interface VoiceTranscribeInput {
+  audio_base64: string;
+  /** E.g. `audio/webm` from browsers, `audio/mp4` from the app. */
+  mime_type: string;
+  /** Ignored by current servers, which use the saved speech model. */
+  model?: string;
+  duration_ms: number;
+}
+
+/** Original image pixels or a stored desktop frame a pointer refers to. */
+export interface VoicePointerTarget {
+  kind: "image" | "desktop";
+  path: string;
+  width: number;
+  height: number;
+}
+
+export interface VoicePointer {
+  t_ms: number;
+  event: "move" | "down" | "up" | "leave";
+  x: number | null;
+  y: number | null;
+  target: VoicePointerTarget | null;
+}
+
+/** Manifest of a pointing recording; frames were uploaded beforehand. */
+export interface VoiceRecordingInput extends VoiceTranscript {
+  recording_id: string;
+  duration_ms: number;
+  pointers: VoicePointer[];
+  frames: Array<{ t_ms: number; path: string }>;
 }
 
 export interface RecentModelUsage {

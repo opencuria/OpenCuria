@@ -69,8 +69,17 @@ jest.mock("../offline/offlineStore", () => ({
 jest.mock("../offline/useSavedChatCleanup", () => ({
   useSavedChatCleanup: jest.fn(),
 }));
+/** Dictation as the composer gets it; `useVoiceDictation` has its own tests. */
+const mockVoice = { recording: null, clips: [], notice: null };
+const mockUseVoiceDictation = jest.fn((_options: unknown) => mockVoice);
+jest.mock("../voice/useVoiceDictation", () => ({
+  useVoiceDictation: (options: unknown) => mockUseVoiceDictation(options),
+}));
 /** The composer's last draft handler, to type any text. */
-const mockComposer: { onDraftChange?: (value: string) => void } = {};
+const mockComposer: {
+  onDraftChange?: (value: string) => void;
+  voice?: unknown;
+} = {};
 /** The props the transcript got last, to call its handlers directly. */
 const mockTranscript: {
   props?: {
@@ -189,9 +198,11 @@ jest.mock("../components", () => {
       steering?: boolean;
       queue?: { onEdit: (id: string) => Promise<void> };
       editing?: { id: string; onCancel: () => void };
+      voice?: unknown;
     }) {
       const [menuOpen, setMenuOpen] = ReactRuntime.useState(false);
       mockComposer.onDraftChange = props.onDraftChange;
+      mockComposer.voice = props.voice;
       return ReactRuntime.createElement(
         View,
         null,
@@ -1204,6 +1215,38 @@ describe("drafts", () => {
 
   const shownDraft = () => screen.getByTestId("composer-draft");
   const type = (text: string) => act(() => mockComposer.onDraftChange!(text));
+
+  it("gives dictation the chat on screen and puts late text into its saved draft", async () => {
+    await renderWithChats();
+    await openChat(claudeChat.id);
+    expect(mockComposer.voice).toBe(mockVoice);
+    const options = mockUseVoiceDictation.mock.lastCall?.[0] as {
+      scope: unknown;
+      offline: boolean;
+      editDraft: (
+        scope: unknown,
+        update: (text: string) => string,
+      ) => Promise<void>;
+    };
+    expect(options).toMatchObject({
+      offline: false,
+      scope: {
+        workspaceId: runningWorkspace.id,
+        sessionId: claudeChat.id,
+        harnessId: "claude",
+      },
+    });
+    // A recording made in another chat finishes while this one is open.
+    await act(() =>
+      options.editDraft(
+        { workspaceId: runningWorkspace.id, sessionId: idleChat.id },
+        () => "Dictated",
+      ),
+    );
+    expect(shownDraft()).toHaveTextContent("");
+    await openChat(idleChat.id);
+    await waitFor(() => expect(shownDraft()).toHaveTextContent("Dictated"));
+  });
 
   it("keeps a draft per chat and brings it back, as in the webapp", async () => {
     const tree = await renderWithChats();

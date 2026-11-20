@@ -39,6 +39,16 @@ export function useChatDraft(
    * rule; `null` withdraws any rule.
    */
   followNext: (rule: DraftFollowRule | null) => () => void;
+  /**
+   * Change the draft of any chat, on screen or not, e.g. when dictation for
+   * it finishes later. Resolves once the drafts are saved on the device.
+   */
+  editDraft: (
+    scope: ChatInputScope,
+    update: (current: string) => string,
+  ) => Promise<void>;
+  /** Save edits now instead of after the typing pause. */
+  flush: () => Promise<void>;
 } {
   const store = useMemo(() => new ChatDraftStore(account), [account]);
   const cache = useMemo(() => createChatInputCache(() => store), [store]);
@@ -50,6 +60,8 @@ export function useChatDraft(
   const shown = useRef({ key, scope, text: draft });
   const cacheRef = useRef(cache);
   cacheRef.current = cache;
+  const storeRef = useRef(store);
+  storeRef.current = store;
   const followRule = useRef<DraftFollowRule | null>(null);
 
   const show = useCallback((text: string) => {
@@ -101,6 +113,21 @@ export function useChatDraft(
     [show],
   );
 
+  const flush = useCallback(() => storeRef.current.flush(), []);
+
+  const editDraft = useCallback(
+    async (target: ChatInputScope, update: (current: string) => string) => {
+      const current = storeRef.current;
+      // Before the saved drafts are loaded, an edit would hide them.
+      await current.ready;
+      if (current !== storeRef.current) return;
+      if (shown.current.key === chatInputCacheKey(target)) setDraft(update);
+      else cacheRef.current.save(target, update(cacheRef.current.load(target)));
+      await current.flush();
+    },
+    [setDraft],
+  );
+
   const followNext = useCallback((rule: DraftFollowRule | null) => {
     followRule.current = rule;
     return () => {
@@ -108,5 +135,5 @@ export function useChatDraft(
     };
   }, []);
 
-  return { draft, setDraft, followNext };
+  return { draft, setDraft, followNext, editDraft, flush };
 }

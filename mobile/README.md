@@ -16,6 +16,10 @@ on Android (`@expo/ui`, native menus, native navigation and text editing).
   [`modules/opencuria-app-runtime`](modules/opencuria-app-runtime/README.md).
 - Scheduled tasks, push notifications, iOS Live Activities and every webapp setting.
   MCP OAuth connections finish in the browser.
+- Dictation as in the webapp: the microphone takes Send's place while the draft
+  is empty. Recordings are saved on the device first (`src/voice/`), wait there
+  through lost connections and restarts, and their text goes to the draft of
+  the chat they were recorded in. Sign out deletes them.
 - Offline mode: opened chats and their pictures are cached per account
   (`src/offline/`) and shown read-only when the server is unreachable. Composer
   drafts (one per chat and engine, as in the webapp) are kept there too, never in
@@ -58,6 +62,8 @@ hosts; public hosts need `https://`.
 - `src/settings/`: settings sheet and pages.
 - `src/apps/`: installing and opening published apps. After adding or upgrading a
   native dependency run `node mobile/scripts/sync-app-runtime.mjs`.
+- `src/voice/`: dictation (expo-audio capture, saved recordings, transcription
+  queue from `@opencuria/chat-core/voiceTranscriptions`).
 - `src/scheduledTasks/`, `src/notifications/`, `src/widgets/`, `src/offline/`,
   `src/platform/` (secure storage, pickers, uploads, media cache).
 - `modules/`: local Expo modules (app runtime, terminal, highlighter, PDF, toolbar).

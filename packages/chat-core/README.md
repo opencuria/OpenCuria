@@ -20,6 +20,15 @@ immutable snapshots; adapters never implement a second cache policy.
   Every snapshot keeps it until the server's copy arrives, which inherits its
   `client_key`; lists key rows by `messageRenderKey`, so the bubble stays.
 
+## Dictation
+
+`voiceInput.ts` holds the rules both composers share (limits, waveform levels,
+checks before upload, failure kinds, where the text goes in the draft).
+`runVoiceTranscription` retries lost connections until they return and a busy
+service a few times; `VoiceTranscriptionQueue` keeps recordings in client
+storage until their text was delivered or the user discarded them, so nothing
+has to be recorded twice.
+
 ## Desktop viewer
 
 `createDesktopViewerCoordinator` (`desktopViewer.ts`) owns a client's KasmVNC viewer

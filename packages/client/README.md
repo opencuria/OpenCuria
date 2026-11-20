@@ -22,7 +22,7 @@ const release = client.realtime.subscribeWorkspace(workspaces[0].id)
 ```
 
 - Groups: `api`, `auth`, `workspaces`, `conversations`, `harness`, `skills`, `files`,
-  `desktop`; exact signatures in `src/index.ts`. The webapp builds its chat bindings
+  `desktop`, `voice`; exact signatures in `src/index.ts`. The webapp builds its chat bindings
   with `createHarnessApi` from `@opencuria/client/harness`.
 - Errors are `ApiRequestError` (`status`, `code`, `data`). A 401 refreshes once and
   retries; only a failed refresh expires the session.

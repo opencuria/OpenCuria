@@ -68,6 +68,7 @@ import {
   type ChatControllerSnapshot,
 } from "../state/chatController";
 import { useChatDraft } from "../state/useChatDraft";
+import { useVoiceDictation } from "../voice/useVoiceDictation";
 import {
   MediaCache,
   clearPickedPhotoCache,
@@ -264,22 +265,46 @@ export function MainScreen(): React.JSX.Element {
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   // Each chat, new chat and engine keeps its own draft, as in the webapp.
+  const draftScope = useMemo(
+    () =>
+      chat.workspaceId
+        ? {
+            workspaceId: chat.workspaceId,
+            sessionId: chat.activeSessionId,
+            harnessId: chat.activeSessionId
+              ? (chat.activeSession?.harness_id ?? "native")
+              : harness,
+          }
+        : null,
+    [
+      chat.workspaceId,
+      chat.activeSessionId,
+      chat.activeSession?.harness_id,
+      harness,
+    ],
+  );
   const {
     draft,
     setDraft,
     followNext: followDraft,
-  } = useChatDraft(
-    saved,
-    chat.workspaceId
-      ? {
-          workspaceId: chat.workspaceId,
-          sessionId: chat.activeSessionId,
-          harnessId: chat.activeSessionId
-            ? (chat.activeSession?.harness_id ?? "native")
-            : harness,
-        }
-      : null,
-  );
+    editDraft,
+    flush: flushDrafts,
+  } = useChatDraft(saved, draftScope);
+  /** Settings opens on this page next, e.g. to set up voice input. */
+  const [settingsPath, setSettingsPath] = useState<string[]>([]);
+  // Dictation's text goes to the draft of the chat it was recorded in.
+  const voice = useVoiceDictation({
+    client,
+    account: hasUser ? accountScope : null,
+    offline,
+    scope: draftScope,
+    editDraft,
+    flushDrafts,
+    onOpenSettings: () => {
+      setSettingsPath(["providers"]);
+      setSheet("profile");
+    },
+  });
   const [error, setError] = useState<string | null>(null);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1880,6 +1905,7 @@ export function MainScreen(): React.JSX.Element {
               onChoosePhotos={async () => pickPhoto("library")}
               onChooseFiles={async () => pickDocuments()}
               contextKey={contextKey}
+              voice={voice}
               gates={{
                 questions: navigationReady ? chat.questions : EMPTY.questions,
                 permissions: navigationReady
@@ -2096,9 +2122,11 @@ export function MainScreen(): React.JSX.Element {
 
       <SettingsScreen
         visible={sheet === "profile"}
-        onClose={() =>
-          setSheet((current) => (current === "profile" ? null : current))
-        }
+        initialPath={settingsPath}
+        onClose={() => {
+          setSettingsPath([]);
+          setSheet((current) => (current === "profile" ? null : current));
+        }}
         client={client}
         user={user}
         organizations={organizations}

@@ -15,6 +15,7 @@ import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
 import HarnessMentionImages from '@/components/chat/HarnessMentionImages.vue'
 import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
 import SendLaterMenu from '@/components/chat/SendLaterMenu.vue'
+import { appendDictation } from '@opencuria/chat-core/voiceInput'
 import { imageMentionTokens, removeComposerToken } from '@opencuria/chat-core/composerTokens'
 import {
   BookText,
@@ -184,8 +185,7 @@ const prompt = ref(props.prompt ?? '')
 /** Voice capture replaces the toolbar and blocks sending until it settles. */
 const voiceBusy = ref(false)
 function insertDictation(text: string, path?: string, send = false): void {
-  const addition = path ? `${text}\n\nPointing recording (transcript, pointer timeline and desktop frames): @file:${path}` : text
-  prompt.value = [prompt.value.trimEnd(), addition].filter(Boolean).join('\n')
+  prompt.value = appendDictation(prompt.value, text, path)
   saveToCache(prompt.value)
   // The busy flag clears in the same flush; sending earlier would be rejected.
   void nextTick(() => {

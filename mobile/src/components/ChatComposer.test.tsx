@@ -725,3 +725,182 @@ describe("ChatComposer steering and send later", () => {
     expect([sendAt.getHours(), sendAt.getMinutes()]).toEqual([10, 30]);
   });
 });
+
+describe("ChatComposer dictation", () => {
+  function voice(
+    overrides: Partial<
+      NonNullable<React.ComponentProps<typeof ChatComposer>["voice"]>
+    > = {},
+  ) {
+    const receivers: Array<(text: string, send: boolean) => void> = [];
+    const value = {
+      recording: null,
+      clips: [],
+      notice: null,
+      start: jest.fn(),
+      finish: jest.fn(),
+      cancel: jest.fn(),
+      retry: jest.fn(),
+      discard: jest.fn(),
+      dismissNotice: jest.fn(),
+      receive: jest.fn((receiver: (text: string, send: boolean) => void) => {
+        receivers.push(receiver);
+        return () => receivers.splice(receivers.indexOf(receiver), 1);
+      }),
+      ...overrides,
+    };
+    return { value, receivers };
+  }
+
+  it("offers the microphone where Send is until something is written", () => {
+    const { value } = voice();
+    renderComposer({ voice: value, canSend: false });
+    // Offline the message cannot be sent, but it can be dictated.
+    expect(screen.queryByTestId("chat-composer-send")).toBeNull();
+    fireEvent.press(screen.getByTestId("chat-composer-voice"));
+    expect(value.start).toHaveBeenCalledTimes(1);
+
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Hi");
+    expect(screen.queryByTestId("chat-composer-voice")).toBeNull();
+    expect(screen.getByTestId("chat-composer-send")).toBeTruthy();
+  });
+
+  it("dictates a steer beside Stop while the agent works", () => {
+    const { value } = voice();
+    renderComposer({
+      voice: value,
+      busy: true,
+      steering: true,
+      onStop: jest.fn(),
+    });
+    expect(screen.getByTestId("chat-composer-stop")).toBeTruthy();
+    expect(screen.getByTestId("chat-composer-voice")).toBeTruthy();
+  });
+
+  it("replaces the toolbar with discard, time, waveform, stop and send while recording", () => {
+    const { value } = voice({
+      recording: { phase: "recording", elapsedMs: 65_000, levels: [0.2, 1] },
+    });
+    renderComposer({ voice: value });
+    expect(screen.queryByTestId("chat-composer-voice")).toBeNull();
+    expect(screen.queryByTestId("chat-composer-settings")).toBeNull();
+    expect(screen.getByTestId("voice-elapsed")).toHaveTextContent("1:05");
+    expect(
+      screen.getByTestId("voice-waveform", { includeHiddenElements: true }),
+    ).toBeTruthy();
+    fireEvent.press(screen.getByTestId("voice-stop"));
+    fireEvent.press(screen.getByTestId("voice-send"));
+    fireEvent.press(screen.getByTestId("voice-cancel"));
+    expect(value.finish.mock.calls).toEqual([[false], [true]]);
+    expect(value.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the microphone before stop and send work", () => {
+    const { value } = voice({
+      recording: { phase: "starting", elapsedMs: 0, levels: [] },
+    });
+    renderComposer({ voice: value });
+    fireEvent.press(screen.getByTestId("voice-send"));
+    expect(value.finish).not.toHaveBeenCalled();
+    fireEvent.press(screen.getByTestId("voice-cancel"));
+    expect(value.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds transcripts to the end of the draft and sends when asked", async () => {
+    const { value, receivers } = voice();
+    const { onDraftChange, onSend } = renderComposer({
+      voice: value,
+      draft: "Look at this:",
+    });
+    expect(receivers).toHaveLength(1);
+    act(() => receivers[0]!("The login fails.", false));
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "Look at this:\nThe login fails.",
+      { start: 30, end: 30 },
+    );
+    expect(onSend).not.toHaveBeenCalled();
+
+    act(() => receivers[0]!("Please fix it.", true));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "Look at this:\nThe login fails.\nPlease fix it.",
+        }),
+      ),
+    );
+  });
+
+  it("shows saved recordings with their state and lets them be retried", () => {
+    const { value } = voice({
+      clips: [
+        {
+          id: "a",
+          durationMs: 42_000,
+          status: {
+            kind: "waiting",
+            failure: { kind: "offline", message: "No connection." },
+            retryAt: null,
+          },
+        },
+        {
+          id: "b",
+          durationMs: 3_000,
+          status: {
+            kind: "failed",
+            failure: { kind: "rejected", message: "Select a speech provider" },
+          },
+        },
+      ],
+    });
+    renderComposer({ voice: value });
+    expect(screen.getByTestId("voice-clip-a")).toHaveTextContent(
+      /Recording · 0:42/,
+    );
+    expect(screen.getByTestId("voice-clip-status-a")).toHaveTextContent(
+      "Saved. Transcribes when online.",
+    );
+    expect(screen.getByTestId("voice-clip-status-b")).toHaveTextContent(
+      "Select a speech provider",
+    );
+    fireEvent.press(screen.getByTestId("voice-clip-retry-b"));
+    expect(value.retry).toHaveBeenCalledWith("b");
+  });
+
+  it("asks before discarding a saved recording", () => {
+    const { Alert } = require("react-native");
+    const alert = jest
+      .spyOn(Alert, "alert")
+      .mockImplementation(() => undefined);
+    const { value } = voice({
+      clips: [{ id: "a", durationMs: 1_000, status: { kind: "transcribing" } }],
+    });
+    renderComposer({ voice: value });
+    expect(screen.queryByTestId("voice-clip-retry-a")).toBeNull();
+    fireEvent.press(screen.getByTestId("voice-clip-discard-a"));
+    const buttons = alert.mock.calls[0]![2] as Array<{
+      text: string;
+      onPress?: () => void;
+    }>;
+    expect(value.discard).not.toHaveBeenCalled();
+    buttons.find((button) => button.text === "Discard")!.onPress!();
+    expect(value.discard).toHaveBeenCalledWith("a");
+    alert.mockRestore();
+  });
+
+  it("shows dictation notices with their action", () => {
+    const onPress = jest.fn();
+    const { value } = voice({
+      notice: {
+        tone: "error",
+        message: "Microphone access was denied.",
+        action: { label: "Open Settings", onPress },
+      },
+    });
+    renderComposer({ voice: value });
+    expect(screen.getByTestId("chat-composer-voice-notice")).toHaveTextContent(
+      /Microphone access was denied/,
+    );
+    fireEvent.press(screen.getByText("Open Settings"));
+    expect(onPress).toHaveBeenCalledTimes(1);
+  });
+});
