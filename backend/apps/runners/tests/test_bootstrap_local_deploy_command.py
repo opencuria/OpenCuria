@@ -113,6 +113,33 @@ def test_bootstrap_is_idempotent(db) -> None:
     _assert_no_images()
 
 
+def test_bootstrap_without_runner_creates_admin_and_org_only(db) -> None:
+    """``--no-runner`` prepares a control plane whose runners register later."""
+    out = StringIO()
+    call_command(
+        "bootstrap_local_deploy",
+        "--admin-email",
+        "server-admin@example.com",
+        "--admin-password",
+        "admin",
+        "--organization-name",
+        "Server Org",
+        "--no-runner",
+        stdout=out,
+    )
+
+    user = get_user_model().objects.get(email="server-admin@example.com")
+    org = Organization.objects.get(slug="server-org")
+
+    assert user.check_password("admin")
+    assert Membership.objects.get(user=user, organization=org).role == (
+        MembershipRole.ADMIN
+    )
+    assert Runner.objects.count() == 0
+    assert "runner=-" in out.getvalue()
+    _assert_no_images()
+
+
 def test_bootstrap_requires_runner_token(db) -> None:
     """A blank runner token fails before any record is written."""
     with pytest.raises(CommandError, match="--runner-token is required"):

@@ -127,10 +127,33 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+  proxy:
+    image: caddy:2-alpine
+    container_name: opencuria_proxy
+    restart: unless-stopped
+    profiles:
+    - proxy
+    depends_on:
+    - backend
+    - webapp
+    environment:
+      SITE_ADDRESS: ${OPENCURIA_DOMAIN:-:80}
+    ports:
+    - 80:80
+    - 443:443
+    - 443:443/udp
+    volumes:
+    - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    - caddy-data:/data
+    - caddy-config:/config
+    networks:
+    - opencuria-net
 volumes:
   backend-runtime: null
   pgdata: null
   redisdata: null
+  caddy-data: null
+  caddy-config: null
 networks:
   opencuria-net:
     driver: bridge

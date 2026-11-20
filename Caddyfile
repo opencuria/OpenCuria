@@ -1,0 +1,8 @@
+# Bundled reverse proxy for compose.server.yml (profile "proxy").
+# SITE_ADDRESS is a domain (automatic Let's Encrypt HTTPS) or ":80" (plain HTTP).
+# Caddy streams request bodies and upgrades WebSockets without extra settings.
+{$SITE_ADDRESS}
+
+@backend path /api/* /ws/*
+reverse_proxy @backend backend:8000
+reverse_proxy webapp:80

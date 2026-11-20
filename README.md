@@ -23,7 +23,31 @@ app-server. Workspaces provide a desktop, terminal, Git and files; plugins add
 skills, MCP servers and credentials. A built-in OpenCuria MCP server lets agents
 manage workspaces, chats, scheduled tasks and publish Expo apps to the mobile app.
 
-## Quick start (local)
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/opencuria/OpenCuria/main/install.sh | sudo bash
+```
+
+The installer asks what the host should run:
+
+- **Everything**: the control plane in Docker Compose (backend, web app, PostgreSQL,
+  Redis, Caddy with automatic HTTPS) plus a runner as a systemd service, registered
+  with the control plane.
+- **Control plane only**: add runners later under **Settings → Runners → Register
+  Runner**; the dialog shows the install command for the runner host.
+- **Runner only**: asks for the control plane URL and a runner token.
+
+Runners need an x86_64 host with KVM running Debian 12+ or Ubuntu 22.04+. For HTTPS,
+point a domain at the server and open ports 80 and 443; without a domain the web
+app is served over plain HTTP on the server IP. Files live in `/opt/opencuria`;
+back up its `.env`, which holds the database password and encryption key. Run the
+command again to update. Unattended: `… | sudo bash -s -- runner --url URL --token
+TOKEN` (`--help` lists all options).
+
+## Manual setup
+
+### Local evaluation
 
 ```bash
 cp .env.example .env
@@ -36,8 +60,6 @@ docker compose up -d
 Compose bootstraps the admin, organization and runner record. Then set up a native
 runner as below, using `LOCAL_RUNNER_API_TOKEN` as its token.
 
-## Distributed setup
-
 ### Central server
 
 ```bash
@@ -46,10 +68,12 @@ docker compose -f compose.server.yml up -d
 ```
 
 This starts PostgreSQL, Redis, the backend (API, execution and lifecycle recovery
-workers) and the webapp. A reverse proxy must route `/api` and `/ws` to the backend
-(with WebSocket upgrades, unbuffered) and everything else to the webapp. Workspace
-files stream through `/api/v1/workspace-files/`: allow request bodies of 500 MB
-there (nginx: `client_max_body_size 500m;`, `proxy_request_buffering off;`).
+workers), the webapp and Caddy, which serves `OPENCURIA_DOMAIN` with HTTPS. To use
+your own reverse proxy instead, drop `COMPOSE_PROFILES=proxy`, publish the ports and
+route `/api` and `/ws` to the backend (with WebSocket upgrades, unbuffered) and
+everything else to the webapp. Workspace files stream through
+`/api/v1/workspace-files/`: allow request bodies of 500 MB there (nginx:
+`client_max_body_size 500m;`, `proxy_request_buffering off;`).
 
 ### QEMU runner
 

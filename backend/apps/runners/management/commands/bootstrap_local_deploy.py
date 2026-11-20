@@ -1,4 +1,4 @@
-"""Bootstrap a local all-in-one deployment."""
+"""Bootstrap the first admin, organization and runner of a deployment."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from common.utils import hash_token
 
 
 class Command(BaseCommand):
-    """Create the minimum data required for a local docker compose stack."""
+    """Create the minimum data a fresh deployment needs to be usable."""
 
     help = (
-        "Ensure that a local admin user, organization and runner exist for the "
-        "all-in-one compose stack."
+        "Ensure that an admin user, organization and (unless --no-runner) a "
+        "runner exist. Used by compose.yml and install.sh."
     )
 
     def add_arguments(self, parser) -> None:
@@ -48,12 +48,17 @@ class Command(BaseCommand):
         parser.add_argument(
             "--runner-token",
             default=os.getenv("LOCAL_RUNNER_API_TOKEN", ""),
-            help="Plaintext runner token used by the local runner container.",
+            help="Plaintext runner token used by the local runner.",
+        )
+        parser.add_argument(
+            "--no-runner",
+            action="store_true",
+            help="Create only the admin and organization; runners register later.",
         )
 
     def handle(self, *args, **options) -> None:
         runner_token = options["runner_token"].strip()
-        if not runner_token:
+        if not options["no_runner"] and not runner_token:
             raise CommandError("--runner-token is required")
 
         user = self._ensure_user(
@@ -64,16 +69,18 @@ class Command(BaseCommand):
             name=options["organization_name"].strip(),
             user=user,
         )
-        runner = self._ensure_runner(
-            organization=org,
-            name=options["runner_name"].strip(),
-            runner_token=runner_token,
-        )
+        runner_name = "-"
+        if not options["no_runner"]:
+            runner_name = self._ensure_runner(
+                organization=org,
+                name=options["runner_name"].strip(),
+                runner_token=runner_token,
+            ).name
 
         self.stdout.write(
             self.style.SUCCESS(
                 "Local deployment bootstrap complete: "
-                f"admin={user.email}, org={org.slug}, runner={runner.name}"
+                f"admin={user.email}, org={org.slug}, runner={runner_name}"
             )
         )
 
