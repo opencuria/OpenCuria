@@ -1,129 +1,121 @@
-name: opencuria-local
+# Control plane. install.sh copies this file to /opt/opencuria and writes its .env;
+# required variables fail with a message below.
+name: opencuria
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: opencuria_db
+    restart: unless-stopped
+    volumes:
+    - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${DB_NAME:-opencuria}
+      POSTGRES_USER: ${DB_USER:-opencuria}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    networks:
+    - opencuria-net
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U ${DB_USER:-opencuria}
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  redis:
+    image: redis:7-alpine
+    container_name: opencuria_redis
+    restart: unless-stopped
+    volumes:
+    - redisdata:/data
+    networks:
+    - opencuria-net
+    healthcheck:
+      test:
+      - CMD
+      - redis-cli
+      - ping
+      interval: 5s
+      timeout: 5s
+      retries: 12
   backend:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
-    build: &backend_build
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: opencuria_local_backend
+    container_name: opencuria_backend
     restart: unless-stopped
-    environment: &id002
-      DJANGO_ENV: development
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: &backend_environment
+      DJANGO_ENV: production
+      EXECUTION_PROCESS_LOCK_PATH: /var/lib/opencuria/backend/process.lock
+      MEDIA_ROOT: /var/lib/opencuria/backend/media
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
       APNS_PRIVATE_KEY_FILE: ${APNS_PRIVATE_KEY_FILE:-}
       FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
-      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
-      SQLITE_PATH: /data/db.sqlite3
-      MEDIA_ROOT: /data/media
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_HOST: db
+      DB_PORT: '5432'
+      REDIS_URL: redis://redis:6379/0
+      # Web app and API share one origin (PUBLIC_URL) behind the proxy.
+      CSRF_TRUSTED_ORIGINS: ${PUBLIC_URL:?PUBLIC_URL is required}
+      CORS_ALLOWED_ORIGINS: ${PUBLIC_URL}
+      SIO_CORS_ALLOWED_ORIGINS: ${PUBLIC_URL}
+      MCP_OAUTH_CALLBACK_URL: ${PUBLIC_URL}/api/v1/mcp-oauth/callback/
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${PUBLIC_URL}/?settings=credentials
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY
         is required}
-      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-http://127.0.0.1:8000/api/v1/mcp-oauth/callback/}
-      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:-http://127.0.0.1:8080/?settings=credentials}
-      DJANGO_SUPERUSER_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
-      DJANGO_SUPERUSER_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
-      REDIS_URL: redis://redis:6379/0
-    volumes: &id003
-    - backend-data:/data
+    volumes: &backend_volumes
+    - backend-runtime:/var/lib/opencuria/backend
     - ./secrets/push:/run/secrets:ro
     ports:
-    - 127.0.0.1:${BACKEND_PORT:-8000}:8000
-    networks: &id004
-    - opencuria-local
+    - ${BACKEND_PORT:-127.0.0.1:8000}:8000
+    networks: &id002
+    - opencuria-net
     healthcheck:
       test:
       - CMD-SHELL
       - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')"
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
   execution:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
-    build: *backend_build
-    container_name: opencuria_local_execution
+    container_name: opencuria_execution
     restart: unless-stopped
     entrypoint: [python, manage.py, execute_harness]
-    environment: *id002
-    volumes: *id003
-    networks: *id004
+    environment: *backend_environment
+    volumes: *backend_volumes
+    networks: *id002
     depends_on:
       backend:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
   webapp:
     image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
-    build:
-      context: .
-      dockerfile: webapp/Dockerfile
-    container_name: opencuria_local_webapp
+    container_name: opencuria_webapp
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
-    environment:
-      VITE_API_BASE_URL: http://127.0.0.1:${BACKEND_PORT:-8000}/api/v1
-      VITE_WS_BASE_URL: http://127.0.0.1:${BACKEND_PORT:-8000}
     ports:
-    - 127.0.0.1:${WEBAPP_PORT:-8080}:80
+    - ${WEBAPP_PORT:-127.0.0.1:8080}:80
     networks:
-    - opencuria-local
-  bootstrap:
-    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: opencuria_local_bootstrap
-    restart: 'no'
-    depends_on:
-      backend:
-        condition: service_healthy
-    entrypoint:
-    - python
-    - manage.py
-    - bootstrap_local_deploy
-    - --admin-email
-    - ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
-    - --admin-password
-    - ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
-    - --organization-name
-    - ${LOCAL_ORGANIZATION_NAME:-Local}
-    - --runner-name
-    - ${LOCAL_RUNNER_NAME:-local-qemu}
-    - --runner-token
-    - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-    environment:
-      DJANGO_ENV: development
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
-      SQLITE_PATH: /data/db.sqlite3
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY
-        is required}
-      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-http://127.0.0.1:8000/api/v1/mcp-oauth/callback/}
-      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:-http://127.0.0.1:8080/?settings=credentials}
-      LOCAL_ADMIN_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
-      LOCAL_ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
-      LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:-Local}
-      LOCAL_RUNNER_NAME: ${LOCAL_RUNNER_NAME:-local-qemu}
-      LOCAL_RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-    volumes:
-    - backend-data:/data
-    networks:
-    - opencuria-local
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    networks:
-    - opencuria-local
+    - opencuria-net
   recovery:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
-    build: *backend_build
     restart: unless-stopped
-    environment: *id002
-    volumes: *id003
-    networks: *id004
-    container_name: opencuria_local_recovery
+    environment: *backend_environment
+    volumes: *backend_volumes
+    networks: *id002
+    container_name: opencuria_recovery
     entrypoint:
     - python
     - manage.py
@@ -131,8 +123,33 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+  proxy:
+    image: caddy:2-alpine
+    container_name: opencuria_proxy
+    restart: unless-stopped
+    profiles:
+    - proxy
+    depends_on:
+    - backend
+    - webapp
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL}
+    ports:
+    - 80:80
+    - 443:443
+    - 443:443/udp
+    volumes:
+    - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    - caddy-data:/data
+    - caddy-config:/config
+    networks:
+    - opencuria-net
 volumes:
-  backend-data: null
+  backend-runtime: null
+  pgdata: null
+  redisdata: null
+  caddy-data: null
+  caddy-config: null
 networks:
-  opencuria-local:
-    name: opencuria-local
+  opencuria-net:
+    driver: bridge

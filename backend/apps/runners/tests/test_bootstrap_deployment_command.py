@@ -1,4 +1,4 @@
-"""Tests for the local deployment bootstrap management command."""
+"""Tests for the deployment bootstrap management command."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from common.utils import hash_token
 
 def _bootstrap(*, email: str, org: str, runner: str, token: str, **kwargs) -> None:
     call_command(
-        "bootstrap_local_deploy",
+        "bootstrap_deployment",
         "--admin-email",
         email,
         "--admin-password",
@@ -79,7 +79,7 @@ def test_bootstrap_creates_admin_org_and_runner_without_images(db) -> None:
         organization=org, credential_service__slug="github"
     ).exists()
     _assert_no_images()
-    assert "Local deployment bootstrap complete" in out.getvalue()
+    assert "Deployment bootstrap complete" in out.getvalue()
 
 
 def test_bootstrap_is_idempotent(db) -> None:
@@ -117,7 +117,7 @@ def test_bootstrap_without_runner_creates_admin_and_org_only(db) -> None:
     """``--no-runner`` prepares a control plane whose runners register later."""
     out = StringIO()
     call_command(
-        "bootstrap_local_deploy",
+        "bootstrap_deployment",
         "--admin-email",
         "server-admin@example.com",
         "--admin-password",
@@ -150,3 +150,35 @@ def test_bootstrap_requires_runner_token(db) -> None:
             token="  ",
         )
     assert Runner.objects.count() == 0
+
+
+def test_bootstrap_reads_secrets_from_environment(db, monkeypatch) -> None:
+    """install.sh passes secrets as variables so they never appear in ``ps``."""
+    monkeypatch.setenv("OPENCURIA_ADMIN_PASSWORD", "env-password")
+    monkeypatch.setenv("OPENCURIA_RUNNER_TOKEN", "env-runner-token")
+
+    call_command("bootstrap_deployment", "--admin-email", "env@example.com")
+
+    user = get_user_model().objects.get(email="env@example.com")
+    assert user.check_password("env-password")
+    assert Runner.objects.get(name="local").api_token_hash == hash_token(
+        "env-runner-token"
+    )
+
+
+def test_bootstrap_requires_password_for_new_admin_only(db, monkeypatch) -> None:
+    """A new admin never gets a blank password; reruns keep the existing one."""
+    monkeypatch.delenv("OPENCURIA_ADMIN_PASSWORD", raising=False)
+    with pytest.raises(CommandError, match="--admin-password is required"):
+        call_command(
+            "bootstrap_deployment", "--admin-email", "new@example.com", "--no-runner"
+        )
+    assert not get_user_model().objects.filter(email="new@example.com").exists()
+
+    _bootstrap(email="kept@example.com", org="Kept", runner="r", token="runner-secret")
+    call_command(
+        "bootstrap_deployment", "--admin-email", "kept@example.com", "--no-runner"
+    )
+    assert (
+        get_user_model().objects.get(email="kept@example.com").check_password("admin")
+    )

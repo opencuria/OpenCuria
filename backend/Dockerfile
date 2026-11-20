@@ -41,13 +41,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY . .
 
-# Copy and set entrypoint
+# Copy and set entrypoint (it migrates and collects static files at startup)
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-# Collect static files (with dummy secret key for collectstatic)
-RUN DJANGO_SECRET_KEY=build-placeholder DJANGO_ENV=production \
-    python manage.py collectstatic --noinput 2>/dev/null || true
 
 EXPOSE 8000
 

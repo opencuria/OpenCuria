@@ -2,7 +2,7 @@
 
 Executes QEMU/KVM workspaces and exposes lifecycle, exec, files, terminal, desktop
 and Git over Socket.IO. It has no agent, plugin or capacity policy; the backend
-decides and the runner executes. Installation: [distributed setup](../README.md#qemu-runner).
+decides and the runner executes. Installation: [install](../README.md#install).
 
 ## Requirements
 

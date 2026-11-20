@@ -13,7 +13,6 @@ REPO="opencuria/OpenCuria"
 INSTALL_URL="https://raw.githubusercontent.com/${REPO}/main/install.sh"
 RUNNER_SERVICE="opencuria-runner"
 LOCAL_BACKEND_URL="http://127.0.0.1:8000"
-ORGANIZATION_NAME="Default"
 
 MODE=""
 DOMAIN=""
@@ -180,6 +179,7 @@ parse_args() {
   done
   [[ "${VERSION}" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid --version: ${VERSION}"
   INSTALL_DIR="${INSTALL_DIR%/}"
+  [[ "${INSTALL_DIR}" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "Invalid --dir: ${INSTALL_DIR}"
 }
 
 detect_state() {
@@ -330,15 +330,6 @@ public_url_for() {
 # -- source --------------------------------------------------------------------
 
 fetch_source() {
-  local here=""
-  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  fi
-  if [[ -n "${here}" && -f "${here}/compose.server.yml" && -d "${here}/runner/src" ]]; then
-    SRC_DIR="${here}"
-    info "Using the local checkout ${SRC_DIR}"
-    return
-  fi
   local ref="${VERSION}"
   [[ "${ref}" != "latest" ]] || ref="main"
   local url="${OPENCURIA_SOURCE_URL:-https://github.com/${REPO}/archive/${ref}.tar.gz}"
@@ -365,23 +356,15 @@ ensure_docker() {
 }
 
 write_server_env() {
-  local url env_file="${INSTALL_DIR}/.env" proxy_domain=""
-  url="$(public_url_for "${DOMAIN}")"
-  [[ "${url}" == https://* ]] && proxy_domain="${DOMAIN}"
+  local env_file="${INSTALL_DIR}/.env"
   install -m 600 /dev/null "${env_file}"
   cat >"${env_file}" <<EOF
-# Written by install.sh; options are documented in compose.yml. Keep this file
+# Written by install.sh; compose.yml shows how each value is used. Keep this file
 # secret and backed up: it holds the database password and the encryption key.
 OPENCURIA_TAG=${VERSION}
 COMPOSE_PROFILES=proxy
-OPENCURIA_DOMAIN=${proxy_domain}
-WEBAPP_PUBLIC_URL=${url}
-BACKEND_PUBLIC_URL=${url}
-MCP_OAUTH_CALLBACK_URL=${url}/api/v1/mcp-oauth/callback/
-MCP_OAUTH_FRONTEND_RETURN_URL=${url}/?settings=credentials
+PUBLIC_URL=$(public_url_for "${DOMAIN}")
 DJANGO_ALLOWED_HOSTS=${DOMAIN},127.0.0.1
-WEBAPP_PORT=127.0.0.1:8080
-BACKEND_PORT=127.0.0.1:8000
 DJANGO_SECRET_KEY=$(random_string 64)
 DB_PASSWORD=$(random_string 32)
 CREDENTIAL_ENCRYPTION_KEY=$(fernet_key)
@@ -392,7 +375,7 @@ install_control_plane() {
   step "Setting up the control plane in ${INSTALL_DIR}"
   install -d -m 755 "${INSTALL_DIR}"
   install -d -m 700 "${INSTALL_DIR}/secrets" "${INSTALL_DIR}/secrets/push"
-  install -m 644 "${SRC_DIR}/compose.server.yml" "${INSTALL_DIR}/compose.yml"
+  install -m 644 "${SRC_DIR}/compose.yml" "${INSTALL_DIR}/compose.yml"
   install -m 644 "${SRC_DIR}/Caddyfile" "${INSTALL_DIR}/Caddyfile"
   if [[ "${SERVER_EXISTS}" -eq 0 ]]; then
     write_server_env
@@ -409,21 +392,21 @@ install_control_plane() {
   if [[ "${SERVER_READY}" -eq 0 ]]; then
     bootstrap_control_plane
   fi
-  PUBLIC_URL="$(env_value "${INSTALL_DIR}/.env" WEBAPP_PUBLIC_URL)"
+  PUBLIC_URL="$(env_value "${INSTALL_DIR}/.env" PUBLIC_URL)"
 }
 
 bootstrap_control_plane() {
   step "Creating the admin account"
-  local args=(--admin-email "${ADMIN_EMAIL}" --organization-name "${ORGANIZATION_NAME}")
+  local args=(--admin-email "${ADMIN_EMAIL}")
   if [[ "${MODE}" == "full" ]]; then
     args+=(--runner-name "$(hostname -s)")
   else
     args+=(--no-runner)
   fi
   # Secrets travel as environment variables, never as visible arguments.
-  LOCAL_ADMIN_PASSWORD="${ADMIN_PASSWORD}" LOCAL_RUNNER_API_TOKEN="${RUNNER_TOKEN}" \
-    compose exec -T -e LOCAL_ADMIN_PASSWORD -e LOCAL_RUNNER_API_TOKEN backend \
-    python manage.py bootstrap_local_deploy "${args[@]}" ||
+  OPENCURIA_ADMIN_PASSWORD="${ADMIN_PASSWORD}" OPENCURIA_RUNNER_TOKEN="${RUNNER_TOKEN}" \
+    compose exec -T -e OPENCURIA_ADMIN_PASSWORD -e OPENCURIA_RUNNER_TOKEN backend \
+    python manage.py bootstrap_deployment "${args[@]}" ||
     die "Creating the admin account failed; re-run the installer to retry."
 
   printf '{"email":"%s","password":"%s"}' "$(json_escape "${ADMIN_EMAIL}")" \
@@ -490,7 +473,9 @@ install_runner() {
     set_env_value "${dir}/.env" RUNNER_API_TOKEN "${RUNNER_TOKEN}"
   fi
 
-  bash "${dir}/systemd/install-runner-service.sh" >/dev/null
+  sed "s|__RUNNER_DIR__|${dir}|g" "${dir}/systemd/${RUNNER_SERVICE}.service" \
+    >"/etc/systemd/system/${RUNNER_SERVICE}.service"
+  systemctl daemon-reload
   systemctl enable --quiet "${RUNNER_SERVICE}"
 
   step "Starting the runner"

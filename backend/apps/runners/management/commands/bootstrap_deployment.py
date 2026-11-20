@@ -18,37 +18,30 @@ class Command(BaseCommand):
 
     help = (
         "Ensure that an admin user, organization and (unless --no-runner) a "
-        "runner exist. Used by compose.yml and install.sh."
+        "runner exist. install.sh passes secrets as OPENCURIA_* variables."
     )
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(
-            "--admin-email",
-            default=os.getenv("LOCAL_ADMIN_EMAIL", "admin@localhost.test"),
-            help="Email address of the local admin user.",
+            "--admin-email", default="", help="Email address of the admin user."
         )
         parser.add_argument(
             "--admin-password",
-            default=os.getenv(
-                "LOCAL_ADMIN_PASSWORD",
-                "CHANGE_ME_local_admin_password",
-            ),
-            help="Password for the local admin user.",
+            default=os.getenv("OPENCURIA_ADMIN_PASSWORD", ""),
+            help="Password for a new admin (default: $OPENCURIA_ADMIN_PASSWORD).",
         )
         parser.add_argument(
             "--organization-name",
-            default=os.getenv("LOCAL_ORGANIZATION_NAME", "Local"),
-            help="Name of the local default organization.",
+            default="Default",
+            help="Name of the admin's organization.",
         )
         parser.add_argument(
-            "--runner-name",
-            default=os.getenv("LOCAL_RUNNER_NAME", "local-qemu"),
-            help="Name of the local runner record.",
+            "--runner-name", default="local", help="Name of the runner record."
         )
         parser.add_argument(
             "--runner-token",
-            default=os.getenv("LOCAL_RUNNER_API_TOKEN", ""),
-            help="Plaintext runner token used by the local runner.",
+            default=os.getenv("OPENCURIA_RUNNER_TOKEN", ""),
+            help="Plaintext runner token (default: $OPENCURIA_RUNNER_TOKEN).",
         )
         parser.add_argument(
             "--no-runner",
@@ -57,14 +50,17 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
+        email = options["admin_email"].strip()
         runner_token = options["runner_token"].strip()
+        if not email:
+            raise CommandError("--admin-email is required")
         if not options["no_runner"] and not runner_token:
             raise CommandError("--runner-token is required")
+        user_exists = get_user_model().objects.filter(email=email).exists()
+        if not options["admin_password"] and not user_exists:
+            raise CommandError("--admin-password is required for a new admin")
 
-        user = self._ensure_user(
-            email=options["admin_email"].strip(),
-            password=options["admin_password"],
-        )
+        user = self._ensure_user(email=email, password=options["admin_password"])
         org = self._ensure_organization(
             name=options["organization_name"].strip(),
             user=user,
@@ -79,7 +75,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                "Local deployment bootstrap complete: "
+                "Deployment bootstrap complete: "
                 f"admin={user.email}, org={org.slug}, runner={runner_name}"
             )
         )

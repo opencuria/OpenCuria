@@ -40,62 +40,21 @@ The installer asks what the host should run:
 
 Runners need an x86_64 host with KVM running Debian 12+ or Ubuntu 22.04+. For HTTPS,
 point a domain at the server and open ports 80 and 443; without a domain the web
-app is served over plain HTTP on the server IP. Files live in `/opt/opencuria`;
-back up its `.env`, which holds the database password and encryption key. Run the
-command again to update. Unattended: `… | sudo bash -s -- runner --url URL --token
-TOKEN` (`--help` lists all options).
+app is served over plain HTTP on the server IP. Run the command again to update.
+Unattended: `… | sudo bash -s -- runner --url URL --token TOKEN` (`--help` lists
+all options).
 
-## Manual setup
+The control plane lives in `/opt/opencuria` (`compose.yml`, `.env`; back up the
+`.env`, it holds the database password and encryption key), the runner in
+`/opt/opencuria/runner` (settings in its `.env`, see [runner/README.md](runner/README.md);
+Windows 11 images need a Windows 11 ISO in `RUNNER_WINDOWS_ISO`).
 
-### Local evaluation
-
-```bash
-cp .env.example .env
-docker compose up -d
-```
-
-- Web app: `http://127.0.0.1:8080` (login: `LOCAL_ADMIN_EMAIL` / `LOCAL_ADMIN_PASSWORD`)
-- API docs: `http://127.0.0.1:8000/api/v1/docs`
-
-Compose bootstraps the admin, organization and runner record. Then set up a native
-runner as below, using `LOCAL_RUNNER_API_TOKEN` as its token.
-
-### Central server
-
-```bash
-cp .env.server.example .env
-docker compose -f compose.server.yml up -d
-```
-
-This starts PostgreSQL, Redis, the backend (API, execution and lifecycle recovery
-workers), the webapp and Caddy, which serves `OPENCURIA_DOMAIN` with HTTPS. To use
-your own reverse proxy instead, drop `COMPOSE_PROFILES=proxy`, publish the ports and
-route `/api` and `/ws` to the backend (with WebSocket upgrades, unbuffered) and
-everything else to the webapp. Workspace files stream through
-`/api/v1/workspace-files/`: allow request bodies of 500 MB there (nginx:
-`client_max_body_size 500m;`, `proxy_request_buffering off;`).
-
-### QEMU runner
-
-The runner needs a Linux host with KVM. Create a runner API token in the backend
-first, then on the runner host:
-
-```bash
-sudo apt-get install -y qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients \
-  genisoimage build-essential python3-dev pkg-config libvirt-dev
-cd runner
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env   # set RUNNER_API_TOKEN and RUNNER_BACKEND_URL
-sudo install -d -m 755 /var/lib/opencuria/{images,base-images,disks,snapshots}
-cd .. && sudo ./runner/systemd/install-runner-service.sh
-sudo systemctl enable --now opencuria-runner
-sudo journalctl -u opencuria-runner -f
-```
-
-The runner should then show up online in the backend.
-
-Windows 11 workspaces additionally need `sudo apt-get install -y ovmf swtpm-tools`
-and a Windows 11 ISO in `RUNNER_WINDOWS_ISO` (see [runner/README.md](runner/README.md)).
+To use your own reverse proxy instead of the bundled Caddy, remove
+`COMPOSE_PROFILES=proxy` from `.env`, publish the ports (`WEBAPP_PORT=8080`,
+`BACKEND_PORT=8000`) and route `/api` and `/ws` to the backend (with WebSocket
+upgrades, unbuffered) and everything else to the web app on the same origin. Workspace
+files stream through `/api/v1/workspace-files/`: allow request bodies of 500 MB there
+(nginx: `client_max_body_size 500m;`, `proxy_request_buffering off;`).
 
 ## First workspace
 
@@ -138,13 +97,14 @@ For a local runner, point `RUNNER_BACKEND_URL` at this backend and run
   reconcile, retry and acknowledge are under `/api/v1/runners/operations/{id}/`.
 - **Shared storage:** API and execution worker must share `MEDIA_ROOT`. Multi-host
   PostgreSQL deployments must set `EXECUTION_PROCESS_LOCK_PATH` on shared storage.
-- **Upgrades:** run migrations first and deploy matching backend and runner versions.
-  Keep the runner's `RUNNER_STATE_DIR` with its disks and snapshots; never share or
-  delete it.
-- **Push notifications:** set `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY_FILE`
-  and/or `FCM_SERVICE_ACCOUNT_FILE`; Compose mounts `./secrets/push/` at `/run/secrets/`.
-- **MCP OAuth:** set `MCP_OAUTH_CALLBACK_URL` (public HTTPS) and
-  `MCP_OAUTH_FRONTEND_RETURN_URL` on the same hostname as the frontend.
+- **Upgrades:** deploy matching backend and runner versions (the installer does);
+  the backend migrates on start. Keep the runner's `RUNNER_STATE_DIR` with its disks
+  and snapshots; never share or delete it.
+- **Push notifications:** put `apns.p8` and/or `firebase.json` into
+  `/opt/opencuria/secrets/push/` (mounted at `/run/secrets/`) and set `APNS_TEAM_ID`,
+  `APNS_KEY_ID`, `APNS_PRIVATE_KEY_FILE=/run/secrets/apns.p8` and/or
+  `FCM_SERVICE_ACCOUNT_FILE=/run/secrets/firebase.json` in `.env`.
+- **MCP OAuth** needs an `https://` `PUBLIC_URL`.
 
 CI publishes multi-arch images `ghcr.io/opencuria/backend` and
 `ghcr.io/opencuria/webapp` from `main`.
