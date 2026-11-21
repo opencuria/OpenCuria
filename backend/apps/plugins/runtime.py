@@ -19,8 +19,8 @@ from collections import defaultdict
 from dataclasses import replace
 
 from apps.credentials.services import CredentialSvc
-from apps.runners.guest_os import WINDOWS
 from common.exceptions import ConflictError
+from common.guest_os import WINDOWS
 from common.utils import decrypt_value
 
 from .bundled import computer_use

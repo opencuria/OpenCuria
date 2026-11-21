@@ -372,10 +372,11 @@ describe("ChatComposer", () => {
 
   it("edits a sent prompt in the field below a banner that cancels it", async () => {
     const { TextInput } = require("react-native");
-    const focus = jest
-      .spyOn(TextInput.prototype, "focus")
-      .mockImplementation(() => undefined);
+    // Both are shared mocks: an earlier test's frame may already have called
+    // them, so clear them and wait for the caret this edit places.
+    const focus = TextInput.prototype.focus as jest.Mock;
     const setSelection = TextInput.prototype.setSelection as jest.Mock;
+    focus.mockClear();
     setSelection.mockClear();
     const onCancel = jest.fn();
     const onSend = jest.fn().mockResolvedValue(undefined);
@@ -389,8 +390,8 @@ describe("ChatComposer", () => {
       "Editing message",
     );
     // The keyboard opens with the caret after the prompt.
-    await waitFor(() => expect(focus).toHaveBeenCalled());
-    expect(setSelection).toHaveBeenLastCalledWith(15, 15);
+    await waitFor(() => expect(setSelection).toHaveBeenLastCalledWith(15, 15));
+    expect(focus).toHaveBeenCalled();
 
     fireEvent.changeText(
       screen.getByTestId("chat-composer-input"),
@@ -407,7 +408,6 @@ describe("ChatComposer", () => {
 
     fireEvent.press(screen.getByRole("button", { name: "Cancel editing" }));
     expect(onCancel).toHaveBeenCalledTimes(1);
-    focus.mockRestore();
   });
 
   it("shows no editing banner for a new message", () => {

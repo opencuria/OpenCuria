@@ -938,9 +938,12 @@ async def test_parent_stop_cancels_real_child_and_releases_both_owners(runtime):
     session = new_session(data)
     assistant, task = await start(data, session)
     await asyncio.wait_for(data.provider.blocked.wait(), 20)
-    # Child inference may start before its queued notification reaches the host.
+    # Child inference may start before its queued notification reaches the host,
+    # and the host creates the child session before the child's assistant message.
     async with asyncio.timeout(10):
-        while not HarnessSession.objects.filter(parent=session).exists():
+        while not HarnessMessage.objects.filter(
+            session__parent=session, role="assistant"
+        ).exists():
             if task.done():
                 await task
                 pytest.fail("Native child ended before its timeline was created")
