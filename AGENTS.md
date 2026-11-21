@@ -74,6 +74,7 @@ cd backend && .venv/bin/pytest -q
 cd runner && .venv/bin/pytest -q
 npm run type-check
 npm run test
+sudo scripts/test-install.sh   # install.sh, against stubs in a private namespace
 ```
 
 Install npm dependencies with `npm ci` at the repository root only. Fresh clone:
