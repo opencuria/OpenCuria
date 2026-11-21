@@ -51,6 +51,17 @@ jest.mock("@expo/ui/swift-ui", () => {
       <View testID="rn-host-view">{children}</View>
     ),
     Section: Container,
+    Group: ({
+      children,
+      modifiers,
+    }: React.PropsWithChildren<{ modifiers: unknown[] }>) => (
+      <View
+        testID="preview-shape"
+        accessibilityHint={JSON.stringify(modifiers)}
+      >
+        {children}
+      </View>
+    ),
     ContextMenu,
     Button: ({
       label,
@@ -74,6 +85,13 @@ jest.mock("@expo/ui/swift-ui", () => {
 });
 jest.mock("@expo/ui/swift-ui/modifiers", () => ({
   disabled: (value: boolean) => ({ disabled: value }),
+  contentShape: (shape: object, kind: string) => ({ ...shape, kind }),
+  shapes: {
+    roundedRectangle: (options: object) => ({
+      shape: "roundedRectangle",
+      ...options,
+    }),
+  },
 }));
 
 function setup(actionsDisabled = false) {
@@ -174,4 +192,29 @@ it("keeps history tappable and read actions enabled during workspace operations"
   expect(onSelect).not.toHaveBeenCalled();
   await userEvent.press(screen.getByRole("button", { name: "Mark as read" }));
   expect(onSelect).toHaveBeenCalledWith("read");
+});
+
+it("shapes the lifted preview like rounded content", () => {
+  const menu = (previewRadius?: number) => (
+    <ThemeProvider>
+      <NativeContextMenu
+        label="Today, 7:20"
+        actions={[]}
+        onSelect={jest.fn()}
+        fitContent
+        previewRadius={previewRadius}
+      >
+        {() => <Text>Prompt</Text>}
+      </NativeContextMenu>
+    </ThemeProvider>
+  );
+  const tree = render(menu());
+  expect(screen.queryByTestId("preview-shape")).toBeNull();
+  tree.rerender(menu(24));
+  expect(
+    JSON.parse(screen.getByTestId("preview-shape").props.accessibilityHint),
+  ).toEqual([
+    { shape: "roundedRectangle", cornerRadius: 24, kind: "contextMenuPreview" },
+  ]);
+  expect(screen.getByText("Prompt")).toBeTruthy();
 });

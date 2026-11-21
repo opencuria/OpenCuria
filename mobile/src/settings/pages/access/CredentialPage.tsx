@@ -7,6 +7,7 @@ import type {
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { useForegroundReload } from "../../useForegroundReload";
@@ -58,11 +59,13 @@ export function CredentialPage({
         title="Credential"
         sections={[]}
         loading={!credentials.data && !credentials.error}
-        empty={{
-          title: "Credential unavailable",
-          description: credentials.error ?? "This credential no longer exists.",
-          symbol: "exclamationmark.triangle.fill",
-        }}
+        empty={
+          loadFailure("credential", credentials) ?? {
+            title: "Credential unavailable",
+            description: "This credential no longer exists.",
+            symbol: "exclamationmark.triangle",
+          }
+        }
         testID="settings-credential"
       />
     );
@@ -199,7 +202,7 @@ export function CredentialPage({
           }
       : null;
 
-  const sections: NativeFormSection[] = [
+  const allSections: NativeFormSection[] = [
     { id: "details", rows: details },
     ...(manageable
       ? [
@@ -255,6 +258,12 @@ export function CredentialPage({
               },
             ]
           : []),
+      ],
+    },
+    // Destructive actions stand alone, last.
+    {
+      id: "danger",
+      rows: [
         ...(manageable && canDisconnect(credential)
           ? [
               {
@@ -311,6 +320,9 @@ export function CredentialPage({
       ],
     },
   ];
+  const sections = allSections.filter(
+    (section) => section.rows.length || section.footer,
+  );
 
   return (
     <SettingsPage

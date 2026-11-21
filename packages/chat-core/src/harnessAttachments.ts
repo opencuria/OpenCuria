@@ -10,7 +10,7 @@
  */
 
 import type { HarnessPart } from "./harness";
-import { resolveWorkspaceMediaPath } from "./workspaceFileRefs";
+import { resolveWorkspaceFilePath } from "./workspaceFileRefs";
 
 /** File attachment persisted in `HarnessPart.meta.attachments`. */
 export interface ToolAttachment {
@@ -54,7 +54,7 @@ function sanitizeAttachmentEntry(
   const path = entry["path"];
   const url = entry["url"];
   let clean: ToolAttachment;
-  if (typeof path === "string" && resolveWorkspaceMediaPath(path) === path) {
+  if (typeof path === "string" && resolveWorkspaceFilePath(path) === path) {
     clean = { type: "file", mime: mime.trim(), path };
   } else if (typeof url === "string" && url.startsWith("data:")) {
     clean = { type: "file", mime: mime.trim(), url };

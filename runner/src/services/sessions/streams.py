@@ -32,8 +32,8 @@ logger = structlog.get_logger(__name__)
 #: (the backend keeps those to at most 10 per workspace).
 STREAM_MAX_PER_WORKSPACE = 16
 
-#: Max raw bytes per stream chunk in either direction.
-STREAM_CHUNK_SIZE = 64 * 1024
+#: Most raw bytes per stream read or write (one ACKed backend round trip).
+STREAM_CHUNK_SIZE = 1024 * 1024
 
 # Persistent guest root; close tombstones must survive runner/guest restart.
 STREAM_SETTLE_TIMEOUT = 5.0
@@ -626,7 +626,7 @@ class StreamManager:
         if not isinstance(data, (bytes, bytearray)) or not data:
             raise ValueError("data must be non-empty bytes")
         if len(data) > STREAM_CHUNK_SIZE:
-            raise ValueError("stream write exceeds 64KiB chunk limit")
+            raise ValueError("stream write exceeds the chunk limit")
         session = self.get_stream(connection_id)
         async with session.write_lock:
             await session.runtime.process_write(session.handle, bytes(data))

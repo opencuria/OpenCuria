@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onUnmounted, provide, ref } from 'vue'
-import { AlertTriangle, Code, Eye } from '@lucide/vue'
+import { AlertTriangle, Code, Download, Eye } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -18,6 +18,7 @@ import { useGitStore } from '@/stores/git'
 import type { MonacoChangeRange } from '@/lib/monacoChanges'
 import { getWorkspaceFileExtension } from '@opencuria/chat-core/workspaceFileRefs'
 import { formatAttachmentSize } from '@opencuria/chat-core/harnessAttachments'
+import { canTransferFile, fileTransferLimitMessage } from '@opencuria/chat-core/workspaceFiles'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 
 const MonacoEditor = defineAsyncComponent(() => import('./MonacoEditor.vue'))
@@ -148,24 +149,27 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
         class="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-muted/20 p-4"
         data-testid="editor-image"
       >
-        <img
-          :src="`data:${tab.mimeType};base64,${tab.rawBase64}`"
-          :alt="tab.path"
-          class="max-h-full max-w-full object-contain"
-        />
+        <img :src="tab.contentUrl" :alt="tab.path" class="max-h-full max-w-full object-contain" />
       </div>
       <iframe
         v-else-if="tab.mediaType === 'pdf'"
-        :src="`data:application/pdf;base64,${tab.rawBase64}`"
+        :src="tab.contentUrl"
         title="PDF preview"
         class="min-h-0 w-full flex-1 border-0"
       />
       <div
         v-else-if="tab.mediaType === 'binary'"
-        class="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground"
+        class="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-muted-foreground"
         data-testid="editor-binary"
       >
-        Binary file — download to view
+        <template v-if="canTransferFile(tab.size)">
+          <p>Binary file · {{ formatAttachmentSize(tab.size) }}</p>
+          <Button variant="outline" size="sm" @click="download">
+            <Download />
+            Download
+          </Button>
+        </template>
+        <p v-else>{{ fileTransferLimitMessage() }}</p>
       </div>
       <div
         v-else-if="tab.truncated"

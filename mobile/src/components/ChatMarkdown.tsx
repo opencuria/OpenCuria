@@ -27,26 +27,28 @@ import {
   splitMarkdownMedia,
   type MarkdownMedia,
 } from "./markdownMedia";
+import { MediaPlaceholder } from "./MediaPlaceholder";
 import { MediaGalleryContext, MediaViewer } from "./MediaViewer";
 import {
+  placeholderState,
   useWorkspaceMedia,
-  type ResolvedChatMedia,
+  type ChatMediaResolver,
   type WorkspaceMediaState,
 } from "./useWorkspaceMedia";
-
-export type { ResolvedChatMedia } from "./useWorkspaceMedia";
 
 export interface ChatMarkdownProps {
   markdown: string;
   streaming?: boolean;
   /** `quiet` is smaller, muted text for expanded tool and reasoning details. */
   variant?: "body" | "prompt" | "quiet";
-  resolveMedia?: (workspacePath: string) => Promise<ResolvedChatMedia>;
+  resolveMedia?: ChatMediaResolver;
   /** Changes with the host media-cache scope (workspace/account/server). */
   mediaScopeKey?: string | number;
   /** Parent list viewability gate; offscreen rows do not fetch workspace media. */
   mediaVisible?: boolean;
   onOpenFile?: (workspacePath: string) => void;
+  /** Native text selection; off where holding the text opens a menu. */
+  selectable?: boolean;
   testID?: string;
 }
 
@@ -59,6 +61,7 @@ export function ChatMarkdown({
   mediaScopeKey = "",
   mediaVisible = true,
   onOpenFile,
+  selectable = true,
   testID,
 }: ChatMarkdownProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -98,7 +101,7 @@ export function ChatMarkdown({
     [pieces],
   );
   const scope = String(mediaScopeKey);
-  const { media, retry, reportDisplayError } = useWorkspaceMedia({
+  const { media, retry, request, reportDisplayError } = useWorkspaceMedia({
     paths,
     resolve: resolveMedia,
     scope,
@@ -265,7 +268,7 @@ export function ChatMarkdown({
             markdownStyle={markdownStyle}
             onLinkPress={onLinkPress}
             enableTaskListItemToggle={false}
-            selectable
+            selectable={selectable}
           />
         ) : (
           <InlineMedia
@@ -280,6 +283,7 @@ export function ChatMarkdown({
             active={mediaVisible}
             onOpen={() => openImage(piece.media)}
             onRetry={() => piece.media.path && retry(piece.media.path)}
+            onRequest={() => piece.media.path && request(piece.media.path)}
             onDisplayError={() =>
               piece.media.path && reportDisplayError(piece.media.path)
             }
@@ -309,6 +313,7 @@ function InlineMedia({
   active,
   onOpen,
   onRetry,
+  onRequest,
   onDisplayError,
 }: {
   media: MarkdownMedia;
@@ -318,6 +323,8 @@ function InlineMedia({
   active: boolean;
   onOpen: () => void;
   onRetry: () => void;
+  /** Load media that waits for a tap. */
+  onRequest: () => void;
   onDisplayError: () => void;
 }): React.JSX.Element {
   const { theme } = useTheme();
@@ -352,6 +359,20 @@ function InlineMedia({
     );
   if (media.path && !resolvable)
     return <View style={styles.inlineImageButton}>{label}</View>;
+  const placeholder = placeholderState(state);
+  if (placeholder)
+    return (
+      <View style={video ? styles.inlineVideoCard : styles.inlineImageButton}>
+        <MediaPlaceholder
+          state={placeholder}
+          kind={video ? "video" : "image"}
+          label={media.label}
+          onLoad={onRequest}
+          style={video ? styles.inlineVideo : styles.inlineImage}
+        />
+        {label}
+      </View>
+    );
   const frame = [
     video ? styles.inlineVideo : styles.inlineImage,
     styles.placeholder,

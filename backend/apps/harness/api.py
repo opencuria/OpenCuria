@@ -49,6 +49,9 @@ from .schemas import (
     HarnessPermissionResolveIn,
     HarnessQuestionOut,
     HarnessQuestionResolveIn,
+    HarnessScheduledMessageIn,
+    HarnessScheduledMessageOut,
+    HarnessScheduledMessagePatchIn,
     HarnessSessionCreateIn,
     HarnessSessionOut,
     HarnessSessionPatchIn,
@@ -84,6 +87,13 @@ def _resolve_harness_service():  # type: ignore[no-untyped-def]
     from apps.harness.harness_service import get_harness_service
 
     return get_harness_service()
+
+
+def _scheduled_messages():  # type: ignore[no-untyped-def]
+    """Resolve the scheduled-message service (tests inject fakes)."""
+    from .scheduled_messages import ScheduledMessageService
+
+    return ScheduledMessageService()
 
 
 def _non_empty(value: str) -> str | None:
@@ -397,6 +407,185 @@ async def withdraw_harness_steer(
         return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
+
+
+async def _scheduling_session(request: HttpRequest, session_id: uuid.UUID):  # type: ignore[no-untyped-def]
+    """Return an owned session whose scheduled messages the caller may manage."""
+    from asgiref.sync import sync_to_async
+
+    org_id = get_organization_id(request)
+    await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
+    session = await sync_to_async(ConversationService().get_session)(session_id)
+    await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+    SessionAccessService.require_external_owner(
+        engine_id=getattr(session, "harness_id", "native"),
+        owner_id=getattr(session, "created_by_id", None),
+        user_id=request.user.id,
+    )
+    return session
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/scheduled-messages",
+    response={
+        201: HarnessScheduledMessageOut,
+        400: dict,
+        403: dict,
+        404: dict,
+        409: dict,
+    },
+    summary="Schedule a message to be sent into a harness session later",
+)
+async def schedule_harness_message(
+    request: HttpRequest, session_id: uuid.UUID, payload: HarnessScheduledMessageIn
+):
+    """Store a message the server sends at ``send_at``.
+
+    At that time it starts a turn like ``/message``, or steers the running turn
+    like ``/steer`` while the agent is working.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    from .scheduled_messages import scheduled_message_payload
+
+    try:
+        session = await _scheduling_session(request, session_id)
+        service = _scheduled_messages()
+        row = await sync_to_async(service.create)(
+            session,
+            user_id=request.user.id,
+            prompt=payload.prompt,
+            send_at=payload.send_at,
+            mode=payload.mode,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
+            skill_ids=payload.skill_ids,
+        )
+        await service.publish(session.id)
+        return 201, scheduled_message_payload(row)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.patch(
+    "/harness/sessions/{session_id}/scheduled-messages/{message_id}",
+    response={
+        200: HarnessScheduledMessageOut,
+        400: dict,
+        403: dict,
+        404: dict,
+        409: dict,
+    },
+    summary="Move a scheduled message to another time",
+)
+async def reschedule_harness_message(
+    request: HttpRequest,
+    session_id: uuid.UUID,
+    message_id: uuid.UUID,
+    payload: HarnessScheduledMessagePatchIn,
+):
+    """Change ``send_at``; a failed message becomes pending again."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    from .scheduled_messages import scheduled_message_payload
+
+    try:
+        session = await _scheduling_session(request, session_id)
+        service = _scheduled_messages()
+        row = await sync_to_async(service.reschedule)(
+            session, message_id, send_at=payload.send_at
+        )
+        await service.publish(session.id)
+        return 200, scheduled_message_payload(row)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.delete(
+    "/harness/sessions/{session_id}/scheduled-messages/{message_id}",
+    response={200: HarnessScheduledMessageOut, 403: dict, 404: dict, 409: dict},
+    summary="Withdraw a scheduled message before it is sent",
+)
+async def withdraw_harness_scheduled_message(
+    request: HttpRequest, session_id: uuid.UUID, message_id: uuid.UUID
+):
+    """Delete the message and return it, e.g. to edit it in the composer."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    from .scheduled_messages import scheduled_message_payload
+
+    try:
+        session = await _scheduling_session(request, session_id)
+        service = _scheduled_messages()
+        row = await sync_to_async(service.withdraw)(session, message_id)
+        await service.publish(session.id)
+        return 200, scheduled_message_payload(row)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/scheduled-messages/{message_id}/send",
+    response={
+        202: HarnessSessionOut,
+        400: dict,
+        403: dict,
+        404: dict,
+        409: dict,
+    },
+    summary="Send a scheduled message now",
+)
+async def send_harness_scheduled_message(
+    request: HttpRequest, session_id: uuid.UUID, message_id: uuid.UUID
+):
+    """Deliver the message immediately, exactly as at its scheduled time.
+
+    A failed delivery keeps the message with its reason and answers with the
+    error, so the client can show it next to the message.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    try:
+        session = await _scheduling_session(request, session_id)
+        await _scheduled_messages().send_now(
+            session, message_id, harness=_resolve_harness_service()
+        )
+        fresh = await sync_to_async(ConversationService().get_session)(session.id)
+        return 202, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), fresh
+        )
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
 
 
 @harness_router.post(
@@ -748,6 +937,7 @@ def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
             session,
             interactions=service.interactions,
             pending_steers=service.list_pending_steers,
+            scheduled_messages=_scheduled_messages().snapshot,
         )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

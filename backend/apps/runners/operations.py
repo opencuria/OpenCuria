@@ -41,6 +41,12 @@ OPERATIONS = {
     "inject_credentials": "synchronizing_credentials",
 }
 INSPECTION_PHASES = {"intervention", "attention_required"}
+#: Resolved credential material of a delivery.
+CREDENTIAL_PAYLOAD_KEYS = ("env_vars", "files", "ssh_keys")
+#: Windows activation input (product key or KMS host) of a delivery.
+WINDOWS_ACTIVATION_KEY = "windows_activation"
+#: Secret delivery inputs: never persisted, resolved again for every delivery.
+SECRET_PAYLOAD_KEYS = (*CREDENTIAL_PAYLOAD_KEYS, WINDOWS_ACTIVATION_KEY)
 
 
 class OperationRepository:
@@ -104,17 +110,12 @@ class OperationRepository:
             clean = {
                 k: v
                 for k, v in payload.items()
-                if k
-                not in {
-                    "env_vars",
-                    "files",
-                    "ssh_keys",
-                    "init_script",
-                }
+                if k not in {*SECRET_PAYLOAD_KEYS, "init_script"}
             }
             # Recipes are rendered from catalog input, not credential material.
+            # Windows activation is always re-resolved from the workspace license.
             if task.workspace_id and any(
-                payload.get(k) for k in ("env_vars", "files", "ssh_keys")
+                payload.get(k) for k in CREDENTIAL_PAYLOAD_KEYS
             ):
                 attached = task.workspace.credentials.exists()
                 if not attached:

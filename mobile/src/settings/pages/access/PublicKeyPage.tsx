@@ -20,7 +20,7 @@ export function PublicKeyPage({
       title="Public key"
       label="Public key"
       text={key.data?.public_key}
-      loading={key.loading}
+      loading={key.data === undefined && !key.error}
       error={key.error}
       onRetry={() => void key.reload()}
       emptyText="No public key available."

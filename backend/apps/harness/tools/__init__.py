@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..access.guest import LINUX_GUEST, GuestPlatform
 from .base import ToolRegistry
 from .files import EditTool, ReadTool, WriteTool
 from .process import (
@@ -19,8 +20,11 @@ from .todos import TodoWriteTool
 from .webfetch import WebfetchTool
 
 
-def default_tool_registry() -> ToolRegistry:
-    """Build a registry with all nine standard tools plus webfetch."""
+def default_tool_registry(guest: GuestPlatform = LINUX_GUEST) -> ToolRegistry:
+    """Build a registry with all nine standard tools plus webfetch.
+
+    Tool descriptions match the guest OS of the workspace the run uses.
+    """
     registry = ToolRegistry()
     for tool in (
         ReadTool(),
@@ -37,7 +41,7 @@ def default_tool_registry() -> ToolRegistry:
         ProcessStartTool(),
         ProcessListTool(),
         ProcessGetTool(),
-        ProcessStopTool(),
+        ProcessStopTool(guest),
         ProcessRestartTool(),
         ProcessDeleteTool(),
     ):

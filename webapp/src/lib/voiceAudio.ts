@@ -1,4 +1,6 @@
 /** Observe microphone energy without changing or trimming the recorded waveform. */
+import { voiceLevelFromRms, voiceRmsHasSignal } from '@opencuria/chat-core/voiceInput'
+
 export interface VoiceAudioMonitor {
   sample(): number
   hasSignal(): boolean | null
@@ -31,8 +33,8 @@ export function monitorVoiceAudio(stream: MediaStream): VoiceAudioMonitor | null
         )
         // Only reject near-digital silence. This is not a speech classifier and
         // must not drop quiet speech or change alignment with desktop events.
-        if (rms >= 0.00001) signal = true
-        return Math.min(1, rms * 12)
+        if (voiceRmsHasSignal(rms)) signal = true
+        return voiceLevelFromRms(rms)
       },
       hasSignal: () => (measured ? signal : null),
       close() {

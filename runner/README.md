@@ -2,7 +2,7 @@
 
 Executes QEMU/KVM workspaces and exposes lifecycle, exec, files, terminal, desktop
 and Git over Socket.IO. It has no agent, plugin or capacity policy; the backend
-decides and the runner executes. Installation: [distributed setup](../README.md#qemu-runner).
+decides and the runner executes. Installation: [install](../README.md#install).
 
 ## Requirements
 
@@ -11,6 +11,13 @@ decides and the runner executes. Installation: [distributed setup](../README.md#
 - Image definitions use an `ubuntu:<version>` base; the cloud image is downloaded
   into `RUNNER_QEMU_IMAGE_CACHE_DIR` on first use.
 - Custom workspace images need Git 2.31+.
+- Windows 11 images (`windows:11[-edition]`) additionally need OVMF Secure Boot
+  firmware and swtpm (`apt install ovmf swtpm-tools`) and a Windows 11 ISO set in
+  `RUNNER_WINDOWS_ISO`. Microsoft offers no cloud image: the runner installs each
+  edition once, unattended, with pinned virtio-win, OpenSSH and MSYS2 components
+  (`src/runtime/windows_media.py`), and caches the installed base under
+  `RUNNER_QEMU_IMAGE_CACHE_DIR/windows/`. A base install takes 30–60 minutes and
+  needs internet access; later builds reuse it.
 
 ## Configuration
 
@@ -24,6 +31,8 @@ in `src/config.py`.
 | `RUNNER_QEMU_IMAGE_CACHE_DIR`, `_DISK_DIR`, `_SNAPSHOT_DIR` | Storage; built images go to `/var/lib/opencuria/base-images` |
 | `RUNNER_QEMU_VCPUS`, `_MEMORY_MB`, `_DISK_SIZE_GB` | Default workspace resources |
 | `RUNNER_QEMU_BUILD_*` | Image build guests: resources, concurrency, queue and script timeouts |
+| `RUNNER_WINDOWS_ISO`, `_ISO_SHA256` | Windows 11 installation ISO (local path or http(s) URL) and optional checksum |
+| `RUNNER_QEMU_WINDOWS_INSTALL_TIMEOUT`, `RUNNER_QEMU_GENERALIZE_TIMEOUT` | Windows base installation and sysprep limits |
 | `RUNNER_TERMINAL_*` | Terminal lease, idle timeout and per-workspace limit |
 
 ## Operations

@@ -16,17 +16,11 @@ import { resetAgentConfigsCache } from '@/lib/agentConfigs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useAuthStore } from '@/stores/auth'
-import { sendFilesUpload } from '@/services/socket'
+import { resetWorkspaceFiles, workspaceFiles } from '@/services/workspaceFiles.fixtures'
 import { CHAT_UPLOAD_DIR } from '@opencuria/chat-core/chatUploads'
-import type { FileEntryRaw } from '@/types'
+import { FileTransferError } from '@opencuria/client/files'
 
-vi.mock('@/services/socket', async () => {
-  const actual = await vi.importActual<typeof import('@/services/socket')>('@/services/socket')
-  return {
-    ...actual,
-    sendFilesUpload: vi.fn(),
-  }
-})
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
 
 vi.mock('vue-sonner', () => ({
   toast: {
@@ -1706,6 +1700,132 @@ describe('HarnessChatInput', () => {
       expect(editorText(remounted)).toBe('half-typed steer')
     })
   })
+
+  describe('send later (split send button)', () => {
+    beforeEach(() => {
+      sessionStorage.clear()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      // Wednesday, 18 Nov 2026, 14:20 local time.
+      vi.setSystemTime(new Date(2026, 10, 18, 14, 20))
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const linear = {
+      id: 'skill-1',
+      name: 'Linear',
+      body: '',
+      scope: 'personal' as const,
+      created_by_email: null,
+      created_at: '',
+      updated_at: '',
+    }
+
+    it('joins send and send later in one pill that is disabled without text', async () => {
+      const wrapper = mountInput()
+      await flushPromises()
+
+      const group = wrapper.get('[data-testid="composer-send-group"]')
+      const send = group.get('[data-testid="composer-send"]')
+      const later = group.get('[data-testid="composer-send-later"]')
+      expect(group.classes()).toContain('rounded-full')
+      expect(later.attributes('aria-label')).toBe('Send later')
+      expect(send.attributes('disabled')).toBeDefined()
+      expect(later.attributes('disabled')).toBeDefined()
+      expect(later.classes()).toContain('bg-muted')
+
+      await setEditorText(wrapper, 'Ship it')
+      expect(send.attributes('disabled')).toBeUndefined()
+      expect(later.attributes('disabled')).toBeUndefined()
+      for (const half of [send, later]) expect(half.classes()).toContain('bg-primary')
+      wrapper.unmount()
+    })
+
+    it('opens the send later menu from the chevron', async () => {
+      const wrapper = mount(HarnessChatInput, {
+        props: { workspaceId: 'ws-1' },
+        attachTo: document.body,
+      })
+      await flushPromises()
+      await setEditorText(wrapper, 'Ship it')
+
+      await wrapper.get('[data-testid="composer-send-later"]').trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+
+      const menu = document.querySelector('[data-testid="send-later-menu"]')
+      expect(menu?.textContent).toContain('Tomorrow')
+      expect(menu?.textContent).toContain('Choose date & time…')
+      wrapper.unmount()
+    })
+
+    it('schedules the draft with its run options and clears the composer', async () => {
+      const wrapper = mountInput({ sessionId: 'session-1', skillOptions: [linear] })
+      await flushPromises()
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { skillIds?: string[] }): void
+      }
+      vm.setPrompt('Ship it', { skillIds: ['skill-1'] })
+      await flushPromises()
+
+      await wrapper.get('[data-testid="send-later-tomorrow"]').trigger('click')
+
+      expect(wrapper.emitted('schedule')).toEqual([
+        [
+          'Ship it',
+          'build',
+          'openrouter/model-big',
+          ['skill-1'],
+          'high',
+          'native',
+          new Date(2026, 10, 19, 9, 0),
+        ],
+      ])
+      expect(wrapper.emitted('send')).toBeUndefined()
+      expect(editorText(wrapper)).toBe('')
+      expect(wrapper.find('[data-testid="composer-skill-chip-skill-1"]').exists()).toBe(false)
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('does not schedule an empty draft', async () => {
+      const wrapper = mountInput()
+      await flushPromises()
+
+      await wrapper.get('[data-testid="send-later-tomorrow"]').trigger('click')
+
+      expect(wrapper.emitted('schedule')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('keeps the steering controls: Stop while empty, compact Stop plus the pill with text', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      await flushPromises()
+      expect(wrapper.find('[data-testid="composer-send-group"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="composer-send-later"]').exists()).toBe(false)
+      expect(wrapper.findAll('[data-testid="composer-stop"]')).toHaveLength(1)
+
+      await setEditorText(wrapper, 'Use pnpm instead')
+      expect(wrapper.findAll('[data-testid="composer-stop"]')).toHaveLength(1)
+      expect(wrapper.get('[data-testid="composer-send"]').attributes('title')).toBe(
+        'Steer the agent',
+      )
+      await wrapper.get('[data-testid="send-later-in-1-hour"]').trigger('click')
+      expect(wrapper.emitted('schedule')?.[0]?.[0]).toBe('Use pnpm instead')
+      expect(wrapper.emitted('schedule')?.[0]?.[6]).toEqual(new Date(2026, 10, 18, 15, 20))
+      wrapper.unmount()
+    })
+
+    it('is not offered in the scheduled-task editor', async () => {
+      const wrapper = mountInput({ variant: 'scheduled-task', prompt: 'Daily review' })
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="composer-send-group"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="composer-send-later"]').exists()).toBe(false)
+      wrapper.unmount()
+    })
+  })
 })
 
 /** Build a FileList-like with real File objects (jsdom has File but no DataTransfer). */
@@ -1721,10 +1841,13 @@ function makeFileList(files: File[]): FileList {
 }
 
 describe('HarnessChatInput chat upload', () => {
+  const files = workspaceFiles()
+
   beforeEach(() => {
     setActivePinia(createPinia())
     sessionStorage.clear()
     vi.clearAllMocks()
+    resetWorkspaceFiles()
     vi.useRealTimers()
     resetProviderCatalogCache()
     resetAgentConfigsCache()
@@ -1750,131 +1873,58 @@ describe('HarnessChatInput chat upload', () => {
       },
     ])
     nativeModelsMock.mockResolvedValue(catalog)
+    vi.spyOn(useFileExplorerStore(), 'fetchDirectory').mockResolvedValue(undefined)
   })
 
-  /** Resolve the tracked upload the way a backend `files:upload_result` would. */
-  function succeedUpload(requestId: string, path = CHAT_UPLOAD_DIR): void {
-    useFileExplorerStore().handleUploadResult(requestId, path, 'success', 'ws-1')
-  }
-
-  /** Serve fresh workspace listings: root → `.opencuria` → upload dir. */
-  function mockUploadDirListing(uploaded: FileEntryRaw[] = []) {
-    const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
-    return vi.spyOn(store, 'fetchDirectoryEntries').mockImplementation(async (_ws, path) => {
-      if (path === '/workspace')
-        return [{ name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 }]
-      if (path === '/workspace/.opencuria')
-        return [{ name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 }]
-      return uploaded
-    })
-  }
-
-  function uploadRequest(index = 0) {
-    const calls = vi.mocked(sendFilesUpload).mock.calls
-    return {
-      requestId: calls[index]![1] as string,
-      path: calls[index]![2] as string,
-      filename: calls[index]![3] as string,
-    }
-  }
-
-  it('uploads a picked file and inserts an @file: token', async () => {
-    mockUploadDirListing()
-    const file = new File(['hello'], 'my notes.txt', { type: 'text/plain' })
-    resetProviderCatalogCache()
-    const wrapper = mountInput()
-
-    const input = wrapper.find('[data-testid="composer-file-input"]')
-    Object.defineProperty(input.element, 'files', {
-      configurable: true,
-      value: makeFileList([file]),
-    })
-    await input.trigger('change')
-    await vi.waitFor(() => {
-      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
-    })
-    await vi.waitFor(() =>
-      expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain(
-        'Loading',
-      ),
+  /** Keep uploads pending until the test settles them. */
+  function holdUploads() {
+    const pending: Array<{
+      input: { filename: string; signal?: AbortSignal }
+      resolve: (path: string) => void
+    }> = []
+    files.upload.mockImplementation(
+      (_workspaceId, input) =>
+        new Promise((resolve, reject) => {
+          input.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          )
+          pending.push({ input, resolve: (path) => resolve({ path, size: input.body.size }) })
+        }),
     )
+    return pending
+  }
 
-    const { requestId, path, filename } = uploadRequest()
-    expect(path).toBe(CHAT_UPLOAD_DIR)
-    expect(filename).toBe('my_notes.txt')
-    succeedUpload(requestId)
-    await vi.waitFor(() => {
-      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/my_notes.txt `)
-    })
-  })
-
-  it('deduplicates against existing upload-dir files instead of overwriting', async () => {
-    const store = useFileExplorerStore()
-    // A stale explorer tree (e.g. another client uploaded since) must not
-    // decide the name; the fresh listing does.
-    store.setTree('/workspace', [
-      { name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 },
-    ])
-    store.setTree('/workspace/.opencuria', [
-      { name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 },
-    ])
-    store.setTree(CHAT_UPLOAD_DIR, [
-      { name: 'a.txt', path: `${CHAT_UPLOAD_DIR}/a.txt`, type: 'file', size: 1 },
-    ])
-    mockUploadDirListing([
-      { name: 'a.txt', path: `${CHAT_UPLOAD_DIR}/a.txt`, type: 'file', size: 1 },
-      { name: 'a_1.txt', path: `${CHAT_UPLOAD_DIR}/a_1.txt`, type: 'file', size: 1 },
-    ])
-    const wrapper = mountInput()
-
+  async function pickFiles(wrapper: VueWrapper, picked: File[]): Promise<void> {
     const input = wrapper.find('[data-testid="composer-file-input"]')
     Object.defineProperty(input.element, 'files', {
       configurable: true,
-      value: makeFileList([new File(['x'], 'a.txt', { type: 'text/plain' })]),
+      value: makeFileList(picked),
     })
     await input.trigger('change')
-    await vi.waitFor(() => {
-      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
-    })
+  }
 
-    const { requestId, filename } = uploadRequest()
-    expect(filename).toBe('a_2.txt')
-    succeedUpload(requestId)
-    await vi.waitFor(() => {
-      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/a_2.txt `)
-    })
-  })
-
-  it('deduplicates against the workspace upload dir when the explorer never loaded it', async () => {
-    const store = useFileExplorerStore()
-    // Typical tree: the hidden `.opencuria` folder is listed but collapsed,
-    // so a nested upload-dir listing has no tree node to attach to.
-    store.setTree('/workspace', [
-      { name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 },
-    ])
-    const uploaded: FileEntryRaw[] = [
-      { name: 'image.png', path: `${CHAT_UPLOAD_DIR}/image.png`, type: 'file', size: 1 },
-    ]
-    mockUploadDirListing(uploaded)
-    // Mirror the real tree update, which drops listings without a parent node.
-    vi.spyOn(store, 'fetchDirectory').mockImplementation(async (_ws, path) => {
-      if (path === CHAT_UPLOAD_DIR) store.setTree(path, uploaded)
-    })
+  it('uploads a picked file without overwriting and mentions the server path', async () => {
+    const listSpy = vi.spyOn(useFileExplorerStore(), 'fetchDirectoryEntries')
+    files.upload.mockResolvedValueOnce({ path: `${CHAT_UPLOAD_DIR}/my_notes_1.txt`, size: 5 })
+    const file = new File(['hello'], 'my notes.txt', { type: 'text/plain' })
     const wrapper = mountInput()
-    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
 
-    const upload = vm.uploadChatFiles([new File(['new'], 'image.png', { type: 'image/png' })])
-    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
-
-    expect(uploadRequest().filename).toBe('image_1.png')
-    succeedUpload(uploadRequest().requestId)
-    await upload
-    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/image_1.png `)
+    await pickFiles(wrapper, [file])
+    await vi.waitFor(() => {
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/my_notes_1.txt `)
+    })
+    expect(files.upload).toHaveBeenCalledExactlyOnceWith('ws-1', {
+      directory: CHAT_UPLOAD_DIR,
+      filename: 'my_notes.txt',
+      body: file,
+      conflict: 'rename',
+      signal: expect.any(AbortSignal),
+    })
+    expect(listSpy).not.toHaveBeenCalled()
+    expect(useFileExplorerStore().fetchDirectory).toHaveBeenCalledWith('ws-1', '/workspace')
   })
 
   it('uploads dropped files on the composer card', async () => {
-    mockUploadDirListing()
     const wrapper = mountInput()
     const card = wrapper.find('[data-testid="composer-card"]')
 
@@ -1885,63 +1935,30 @@ describe('HarnessChatInput chat upload', () => {
     })
     card.element.dispatchEvent(event)
     await vi.waitFor(() => {
-      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
-    })
-
-    const { requestId } = uploadRequest()
-    expect(vi.mocked(sendFilesUpload).mock.calls[0]![2]).toBe(CHAT_UPLOAD_DIR)
-    succeedUpload(requestId)
-    await vi.waitFor(() => {
       expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/drop.txt `)
     })
+    expect(files.upload.mock.calls[0]![1]).toMatchObject({ directory: CHAT_UPLOAD_DIR, body: file })
   })
 
   it('uploads a doubly-handled drop only once (composer card + parent zone)', async () => {
-    const store = useFileExplorerStore()
-    mockUploadDirListing()
-    // Keep the tracked upload pending so the second batch runs strictly
-    // while the first is still in flight (reproduces the double drop).
-    const pending: Array<(data: unknown) => void> = []
-    const trackSpy = vi.spyOn(store, 'trackAndUpload').mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          const wrapped = (data: unknown) => {
-            const ok =
-              data !== null && typeof data === 'object' && (data as { ok?: boolean }).ok === true
-            if (ok) resolve()
-          }
-          pending.push(wrapped)
-        }),
-    )
+    const pending = holdUploads()
     const wrapper = mountInput()
     const vm = wrapper.vm as unknown as {
       uploadChatFiles: (files: File[] | FileList) => Promise<void>
     }
 
-    const file = new File(['hi'], 'drop.txt', { type: 'text/plain' })
-    const files = makeFileList([file])
-    // Simulate the drop bubbling: the composer card handler runs first,
-    // then — before it finishes — the parent panel/home forwarder calls
-    // `uploadChatFiles` again with the same files.
-    const first = vm.uploadChatFiles(files)
-    await vi.waitFor(() => {
-      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
-    })
-    const second = vm.uploadChatFiles(files)
-    // Let the serialized second batch start before resolving the upload.
+    const list = makeFileList([new File(['hi'], 'drop.txt', { type: 'text/plain' })])
+    // The composer card handler runs first; before it finishes, the parent
+    // panel/home forwarder calls `uploadChatFiles` again with the same files.
+    const first = vm.uploadChatFiles(list)
+    await vi.waitFor(() => expect(pending).toHaveLength(1))
+    const second = vm.uploadChatFiles(list)
     await new Promise((resolve) => setTimeout(resolve, 20))
-    pending.forEach((done) => done({ ok: true }))
+    pending[0]!.resolve(`${CHAT_UPLOAD_DIR}/drop.txt`)
     await Promise.all([first, second])
-    // The second batch was serialized behind the first and skips the
-    // already-tracked upload, so the file is sent exactly once.
-    expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
-    expect(trackSpy).toHaveBeenCalledTimes(1)
 
-    await vi.waitFor(() => {
-      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/drop.txt `)
-    })
-    const value = editorText(wrapper) as string
-    expect(value.match(/@file:/g)).toHaveLength(1)
+    expect(files.upload).toHaveBeenCalledTimes(1)
+    expect(editorText(wrapper).match(/@file:/g)).toHaveLength(1)
   })
 
   it('ignores drops while the workspace is not ready', async () => {
@@ -1953,199 +1970,115 @@ describe('HarnessChatInput chat upload', () => {
       value: { files: makeFileList([file]), types: ['Files'] },
     })
     card.element.dispatchEvent(event)
-    await wrapper.vm.$nextTick()
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
+    expect(files.upload).not.toHaveBeenCalled()
     expect(editorText(wrapper)).toBe('')
   })
 
-  it('skips >10 MiB files before arrayBuffer() with a visible toast and no send', async () => {
-    mockUploadDirListing()
+  it('skips files above 500 MB with a visible toast and never reads them', async () => {
     const wrapper = mountInput()
     const big = new File(['x'], 'big.bin', { type: 'application/octet-stream' })
-    Object.defineProperty(big, 'size', { value: 10 * 1024 * 1024 + 1 })
+    Object.defineProperty(big, 'size', { value: 500 * 1024 * 1024 + 1 })
     const arrayBufferSpy = vi.spyOn(big, 'arrayBuffer')
 
-    const input = wrapper.find('[data-testid="composer-file-input"]')
-    Object.defineProperty(input.element, 'files', {
-      configurable: true,
-      value: makeFileList([big]),
-    })
-    await input.trigger('change')
-    await vi.waitFor(() => {
-      expect(arrayBufferSpy).not.toHaveBeenCalled()
-    })
-    // The size guard runs before any tracked upload; the only send would be
-    // the best-effort upload-dir prefetch (mocked), never an upload itself.
-    await new Promise((resolve) => setTimeout(resolve, 20))
-
-    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
-    expect(editorText(wrapper)).toBe('')
+    await pickFiles(wrapper, [big])
     const { toast } = await import('vue-sonner')
-    expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
-      'Upload failed',
-      expect.objectContaining({ description: expect.stringContaining('10 MB') }),
+    await vi.waitFor(() =>
+      expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+        'Upload failed',
+        expect.objectContaining({ description: expect.stringContaining('500 MB') }),
+      ),
     )
+    expect(arrayBufferSpy).not.toHaveBeenCalled()
+    expect(files.upload).not.toHaveBeenCalled()
+    expect(editorText(wrapper)).toBe('')
   })
 
-  it('a synchronous sendFilesUpload throw fails visibly without inserting a token', async () => {
-    const store = useFileExplorerStore()
-    mockUploadDirListing()
-    vi.mocked(sendFilesUpload).mockImplementationOnce(() => {
-      throw new Error('Upload exceeds the 10 MB limit.')
-    })
-    const failSpy = vi.spyOn(store, 'failUpload')
+  it('fails visibly without inserting a token when the upload fails', async () => {
+    files.upload.mockRejectedValueOnce(new FileTransferError('Disk full', 'http_507'))
     const wrapper = mountInput()
 
-    const input = wrapper.find('[data-testid="composer-file-input"]')
-    Object.defineProperty(input.element, 'files', {
-      configurable: true,
-      value: makeFileList([new File(['hi'], 'a.txt', { type: 'text/plain' })]),
-    })
-    await input.trigger('change')
-    await vi.waitFor(() => {
-      expect(failSpy).toHaveBeenCalledTimes(1)
-    })
-    expect(failSpy.mock.calls[0]![1]).toContain('10 MB')
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await pickFiles(wrapper, [new File(['hi'], 'a.txt', { type: 'text/plain' })])
+    const { toast } = await import('vue-sonner')
+    await vi.waitFor(() =>
+      expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+        'Upload failed',
+        expect.objectContaining({ description: 'Disk full' }),
+      ),
+    )
     expect(editorText(wrapper)).toBe('')
   })
 
-  it('deduplicates scheduled uploads against its selected workspace, not the shared tree', async () => {
+  it('uploads scheduled-task files to its workspace without touching the shared tree', async () => {
     const store = useFileExplorerStore()
     store.setTree('/workspace', [
       { name: 'unrelated.txt', path: '/workspace/unrelated.txt', type: 'file', size: 1 },
     ])
-    const listSpy = vi
-      .spyOn(store, 'fetchDirectoryEntries')
-      .mockImplementation(async (_ws, path) => {
-        if (path === '/workspace')
-          return [{ name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 }]
-        if (path === '/workspace/.opencuria')
-          return [{ name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 }]
-        return [{ name: 'task.txt', path: `${CHAT_UPLOAD_DIR}/task.txt`, type: 'file', size: 1 }]
-      })
+    files.upload.mockResolvedValueOnce({ path: `${CHAT_UPLOAD_DIR}/task_1.txt`, size: 2 })
     const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
     const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
-    const upload = vm.uploadChatFiles([new File(['hi'], 'task.txt')])
-    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
-    expect(vi.mocked(sendFilesUpload).mock.calls[0]![3]).toBe('task_1.txt')
-    expect(listSpy.mock.calls.map((call) => call[1])).toEqual([
-      '/workspace',
-      '/workspace/.opencuria',
-      CHAT_UPLOAD_DIR,
-    ])
-    expect(store.tree.map((entry) => entry.name)).toEqual(['unrelated.txt'])
-    succeedUpload(uploadRequest().requestId)
-    await upload
-    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/task_1.txt `)
-    wrapper.unmount()
-  })
 
-  it('aborts a scheduled upload when selected-workspace filename listing fails', async () => {
-    const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue(null)
-    const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
-    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
     await vm.uploadChatFiles([new File(['hi'], 'task.txt')])
-    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
-    expect(editorText(wrapper)).toBe('')
-    const { toast } = await import('vue-sonner')
-    expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
-      'Upload failed',
-      expect.objectContaining({ description: expect.stringContaining('Could not check') }),
-    )
+
+    expect(files.upload.mock.calls[0]![1]).toMatchObject({
+      filename: 'task.txt',
+      conflict: 'rename',
+    })
+    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/task_1.txt `)
+    expect(wrapper.emitted('update:prompt')?.slice(-1)[0]?.[0]).toContain('task_1.txt')
+    expect(store.fetchDirectory).not.toHaveBeenCalled()
+    expect(store.tree.map((entry) => entry.name)).toEqual(['unrelated.txt'])
     wrapper.unmount()
   })
 
   it('cancels its pending scheduled upload when the workspace changes', async () => {
-    const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
-    vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue([])
+    const pending = holdUploads()
     const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
-    const vm = wrapper.vm as unknown as {
-      uploadChatFiles: (files: File[]) => Promise<void>
-    }
+    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
     const upload = vm.uploadChatFiles([new File(['hi'], 'task.txt')])
-    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
-    const requestId = uploadRequest().requestId
-    let anotherChatCompleted = false
-    const anotherChatUpload = store
-      .trackAndUpload('ws-1', 'other-chat-upload', CHAT_UPLOAD_DIR, 'other.txt', 'eA==', false)
-      .then(
-        () => {
-          anotherChatCompleted = true
-        },
-        () => {
-          anotherChatCompleted = true
-        },
-      )
+    await vi.waitFor(() => expect(pending).toHaveLength(1))
     expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([true])
 
     await wrapper.setProps({ workspaceId: 'ws-2' })
     await upload
-    expect(anotherChatCompleted).toBe(false)
+    expect(pending[0]!.input.signal?.aborted).toBe(true)
     expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([false])
     expect(editorText(wrapper)).toBe('')
     expect(wrapper.emitted('update:prompt')).toBeUndefined()
-
     const { toast } = await import('vue-sonner')
-    expect(vi.mocked(toast.error)).not.toHaveBeenCalledWith(
-      'Upload failed',
-      expect.objectContaining({ description: expect.stringContaining('timed out') }),
-    )
-    store.handleUploadResult(requestId, CHAT_UPLOAD_DIR, 'success', 'ws-1')
     expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
-    store.handleUploadResult('other-chat-upload', CHAT_UPLOAD_DIR, 'success', 'ws-1')
-    await anotherChatUpload
-    expect(anotherChatCompleted).toBe(true)
-    await wrapper.setProps({ workspaceId: 'ws-1' })
+
     const retry = vm.uploadChatFiles([new File(['hi'], 'retry.txt')])
-    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(2))
-    const retryId = uploadRequest(1).requestId
-    succeedUpload(retryId)
+    await vi.waitFor(() => expect(pending).toHaveLength(2))
+    expect(files.upload.mock.calls[1]![0]).toBe('ws-2')
+    pending[1]!.resolve(`${CHAT_UPLOAD_DIR}/retry.txt`)
     await retry
     expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/retry.txt `)
     wrapper.unmount()
   })
 
   it.each(['reset', 'unmount'] as const)(
-    'cancels its owned upload on scheduled-task %s without changing another transfer',
+    'cancels its owned upload on scheduled-task %s',
     async (lifecycle) => {
-      const store = useFileExplorerStore()
-      vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
-      vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue([])
+      const pending = holdUploads()
       const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
-      const vm = wrapper.vm as unknown as {
-        uploadChatFiles: (files: File[]) => Promise<void>
-      }
+      const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
       const upload = vm.uploadChatFiles([new File(['hi'], `${lifecycle}.txt`)])
-      await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
-      const requestId = uploadRequest().requestId
-      let otherCompleted = false
-      const otherUpload = store
-        .trackAndUpload('ws-1', `other-${lifecycle}`, CHAT_UPLOAD_DIR, 'other.txt', 'eA==')
-        .then(() => {
-          otherCompleted = true
-        })
+      await vi.waitFor(() => expect(pending).toHaveLength(1))
 
       if (lifecycle === 'reset') await wrapper.setProps({ resetKey: 1 })
       else wrapper.unmount()
       await upload
-      expect(otherCompleted).toBe(false)
+
+      expect(pending[0]!.input.signal?.aborted).toBe(true)
+      expect(wrapper.emitted('update:prompt')).toBeUndefined()
+      const { toast } = await import('vue-sonner')
+      expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
       if (lifecycle === 'reset') {
         expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([false])
         expect(editorText(wrapper)).toBe('')
+        wrapper.unmount()
       }
-
-      store.handleUploadResult(requestId, CHAT_UPLOAD_DIR, 'success', 'ws-1')
-      expect(wrapper.emitted('update:prompt')).toBeUndefined()
-      store.handleUploadResult(`other-${lifecycle}`, CHAT_UPLOAD_DIR, 'success', 'ws-1')
-      await otherUpload
-      expect(otherCompleted).toBe(true)
-      const { toast } = await import('vue-sonner')
-      expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
-      if (lifecycle === 'reset') wrapper.unmount()
     },
   )
 

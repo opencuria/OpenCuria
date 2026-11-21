@@ -6,15 +6,15 @@ import type {
   Skill,
   Workspace,
 } from "@opencuria/client";
-import { NativeForm } from "../ui/NativeForm";
+import { errorRows, loadErrorState } from "../ui/formStates";
 import type {
+  NativeFormEmptyState,
   NativeFormItemRow,
   NativeFormSection,
   NativeFormSwipeAction,
 } from "../ui/NativeForm.types";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { NativeModal } from "../ui/primitives";
-import { useTheme } from "../ui/theme";
 import { ScheduledTaskSheet } from "./ScheduledTaskSheet";
 import { deviceTimeZone, type AgentCatalog } from "./scheduledTaskForm";
 import {
@@ -26,8 +26,9 @@ import {
   clockParts,
   scheduleAgenda,
   taskState,
+  taskStatus,
   taskSubtitle,
-  taskTile,
+  taskSymbol,
 } from "./scheduledTaskPresentation";
 import { useNow, type ScheduledTasksState } from "./useScheduledTasks";
 
@@ -74,7 +75,6 @@ export function ScheduledTasksSheet({
   defaultWorkspaceId,
   onOpenChat,
 }: ScheduledTasksSheetProps): React.JSX.Element | null {
-  const { theme } = useTheme();
   const now = useNow();
   const [detailId, setDetailId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -115,7 +115,6 @@ export function ScheduledTasksSheet({
 
   const row = (task: ScheduledTask): NativeFormItemRow => {
     const state = taskState(task, now);
-    const tile = taskTile(state, theme);
     const toggle: NativeFormSwipeAction[] =
       state === "ended"
         ? []
@@ -147,9 +146,10 @@ export function ScheduledTasksSheet({
       testID: `scheduled-task-${task.id}`,
       title: task.name,
       subtitle: taskSubtitle(task, names.get(task.workspace_id), zone),
+      status: taskStatus(state),
       ...(state === "scheduled"
         ? leadingClock(new Date(task.next_run_at))
-        : { symbol: tile.symbol, tint: tile.tint }),
+        : taskSymbol(state)),
       busy: state === "running",
       onPress: () => setDetailId(task.id),
       actions,
@@ -164,54 +164,77 @@ export function ScheduledTasksSheet({
     };
   };
 
+  // Nothing to show yet: a failure replaces the spinner. A task created
+  // meanwhile (its response supersedes the first load) shows right away.
+  const failed = !schedules.tasks.length && Boolean(schedules.error);
+  const waiting = !schedules.loaded && !schedules.tasks.length && !failed;
+  const agenda: NativeFormSection[] = scheduleAgenda(schedules.tasks, {
+    now,
+    showEnded,
+  }).map((group) => ({
+    id: group.id,
+    title: group.title,
+    rows: group.tasks.map(row),
+  }));
   const sections: NativeFormSection[] =
-    !schedules.tasks.length && schedules.error
-      ? [
-          {
-            id: "error",
-            rows: [
-              {
-                kind: "note",
-                id: "schedules-error",
-                text: `Could not load scheduled tasks: ${schedules.error}`,
-                tone: "danger",
-              },
-              {
-                kind: "button",
-                id: "schedules-retry",
-                title: "Retry",
-                symbol: "arrow.counterclockwise",
-                busy: schedules.loading,
-                onPress: () => void schedules.refresh(),
-              },
-            ],
-          },
-        ]
-      : !schedules.loaded
+    failed || waiting
+      ? []
+      : schedules.error
         ? [
             {
-              id: "loading",
-              rows: [
-                {
-                  kind: "note",
-                  id: "schedules-loading",
-                  text: "Loading scheduled tasks…",
-                },
-              ],
+              id: "error",
+              rows: errorRows(
+                "scheduled-tasks",
+                schedules.error,
+                () => void schedules.refresh(),
+                schedules.loading,
+              ),
             },
+            ...agenda,
           ]
-        : scheduleAgenda(schedules.tasks, { now, showEnded }).map((group) => ({
-            id: group.id,
-            title: group.title,
-            rows: group.tasks.map(row),
-          }));
+        : agenda;
+  const empty: NativeFormEmptyState = failed
+    ? loadErrorState(
+        "scheduled tasks",
+        schedules.error ?? "",
+        () => void schedules.refresh(),
+        schedules.loading,
+      )
+    : hasEnded && !showEnded
+      ? {
+          title: "Nothing scheduled",
+          description: "All tasks have ended.",
+          symbol: "calendar.badge.clock",
+          action: {
+            title: "Show ended tasks",
+            onPress: () => setShowEnded(true),
+            testID: "scheduled-tasks-show-ended",
+          },
+        }
+      : {
+          title: "No scheduled tasks yet",
+          description:
+            "Let an agent run a prompt on its own, once or on repeat. Each run starts a new chat.",
+          symbol: "calendar.badge.clock",
+          action: {
+            title: "New scheduled task",
+            symbol: "plus",
+            onPress: () => setCreating(true),
+            testID: "scheduled-tasks-empty-new",
+          },
+        };
+  const created = (task: ScheduledTask) => {
+    schedules.upsert(task);
+    // The new task supersedes a first load still in flight or failed.
+    if (!schedules.loaded) void schedules.refresh();
+  };
 
   return (
     <NativeModal
       visible
       onClose={onClose}
       title="Scheduled tasks"
-      scrollable={false}
+      largeTitle
       primaryAction={{
         title: "New scheduled task",
         symbol: "plus",
@@ -226,28 +249,16 @@ export function ScheduledTasksSheet({
       onAction={(id) => {
         if (id === "ended") setShowEnded((value) => !value);
       }}
+      form={{
+        sections,
+        onRefresh: schedules.refresh,
+        empty,
+        loading: waiting,
+        contentInsetBottom: NEW_TASK_INSET,
+        testID: "scheduled-task-list",
+      }}
       testID="scheduled-tasks-sheet"
     >
-      <NativeForm
-        sections={sections}
-        onRefresh={schedules.refresh}
-        empty={
-          hasEnded && !showEnded
-            ? {
-                title: "Nothing scheduled",
-                description: "Ended tasks are hidden. Show them from the menu.",
-                symbol: "calendar.badge.clock",
-              }
-            : {
-                title: "No scheduled tasks",
-                description:
-                  "Let an agent run a prompt on its own, once or on repeat. Each run starts a new chat.",
-                symbol: "calendar.badge.clock",
-              }
-        }
-        contentInsetBottom={NEW_TASK_INSET}
-        testID="scheduled-task-list"
-      />
       <ScheduledTaskSheet
         task={detail}
         visible={Boolean(detail)}
@@ -274,7 +285,7 @@ export function ScheduledTasksSheet({
           defaultWorkspaceId ? { workspaceId: defaultWorkspaceId } : undefined
         }
         onClose={() => setCreating(false)}
-        onSaved={schedules.upsert}
+        onSaved={created}
         onDeleted={schedules.remove}
         onOpenChat={onOpenChat}
       />

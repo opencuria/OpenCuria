@@ -103,6 +103,16 @@ class CaptureRepository:
         )
 
     @staticmethod
+    def line_guest_os(line: CapturedImage) -> str | None:
+        """Guest OS of a line's versions; ``None`` while it has no version."""
+        return (
+            ImageInstance.objects.filter(captured_image=line)
+            .order_by("-generation")
+            .values_list("guest_os", flat=True)
+            .first()
+        )
+
+    @staticmethod
     def version_capturing(line: CapturedImage) -> bool:
         """Whether a line already has a capturing version."""
         return ImageInstance.objects.filter(
@@ -129,6 +139,7 @@ class CaptureRepository:
             generation=ImageLineRepository.next_captured_version(line.id),
             message=message,
             min_disk_size_gb=ws.qemu_disk_size_gb,
+            guest_os=ws.guest_os,
             process_definitions=WorkspaceProcessRepository.snapshot_definitions(ws.id),
             status="capturing",
         )

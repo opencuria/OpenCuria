@@ -79,15 +79,20 @@ class OperationExecutor:
     ) -> bool:
         """Find temporary guests which may still execute orphaned image scripts."""
         owned = {
-            f"image-build-{op_id}"
+            f"{prefix}{op_id}{suffix}"
             for op_id in self.running
             if op_id != inspected_operation
+            for prefix, suffix in (
+                ("image-build-", ""),
+                ("image-build-", "-base"),
+                ("image-capture-", ""),
+            )
         }
         return any(
             resource.get("kind") == "workspace"
             and resource.get("metadata", {})
             .get("workspace_id", "")
-            .startswith("image-build-")
+            .startswith(("image-build-", "image-capture-"))
             and resource.get("state") not in {"exited", "stopped", "removed"}
             and resource.get("metadata", {}).get("workspace_id") not in owned
             for runtime in snapshot.get("runtimes", [])

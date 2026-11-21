@@ -1,6 +1,9 @@
 import React, { useEffect, useImperativeHandle, useRef } from "react";
 import {
+  Button,
+  HStack,
   Host,
+  Image,
   SecureField,
   TextField,
   useNativeState,
@@ -9,9 +12,14 @@ import {
 import {
   accessibilityLabel,
   autocorrectionDisabled,
+  buttonStyle,
+  contentShape,
+  font,
+  foregroundStyle,
   frame,
   keyboardType,
   onSubmit,
+  shapes,
   submitLabel,
   textContentType,
   textFieldStyle,
@@ -42,7 +50,10 @@ export function NativeTextField(
     text,
     autoFocus: props.autoFocus,
     testID: props.testID,
-    placeholder: props.placeholder ?? props.label,
+    // A grouped row has no label of its own; its placeholder names it.
+    placeholder: props.grouped
+      ? props.label
+      : (props.placeholder ?? props.label),
     onTextChange: (value: string) => {
       latest.current = value;
       props.onChangeText(value);
@@ -51,8 +62,8 @@ export function NativeTextField(
       if (focused) props.onFocus?.();
     },
     modifiers: [
-      textFieldStyle("roundedBorder"),
-      frame({ minHeight: 44, maxWidth: Infinity }),
+      textFieldStyle(props.grouped ? "plain" : "roundedBorder"),
+      frame({ minHeight: props.grouped ? 52 : 44, maxWidth: Infinity }),
       accessibilityLabel(props.accessibilityLabel ?? props.label),
       keyboardType(props.keyboardType ?? "default"),
       ...(props.prose ? [] : [autocorrectionDisabled()]),
@@ -66,6 +77,12 @@ export function NativeTextField(
           : []),
     ],
   };
+  const input = props.secureTextEntry ? (
+    <SecureField {...common} ref={field} />
+  ) : (
+    <TextField {...common} ref={field} />
+  );
+  const action = props.trailingAction;
   return (
     <Host
       matchContents={{ vertical: true }}
@@ -73,10 +90,32 @@ export function NativeTextField(
       seedColor={theme.primary}
       ignoreSafeArea="all"
     >
-      {props.secureTextEntry ? (
-        <SecureField {...common} ref={field} />
+      {action ? (
+        <HStack spacing={4}>
+          {input}
+          <Button
+            onPress={action.onPress}
+            testID={action.testID}
+            modifiers={[
+              buttonStyle("borderless"),
+              accessibilityLabel(action.label),
+            ]}
+          >
+            <Image
+              systemName={action.symbol}
+              modifiers={[
+                font({ textStyle: "body" }),
+                foregroundStyle(theme.subtleText),
+                // The glyph sits at the row's trailing inset; the 44 pt frame
+                // around it is the target.
+                frame({ minWidth: 44, minHeight: 44, alignment: "trailing" }),
+                contentShape(shapes.rectangle()),
+              ]}
+            />
+          </Button>
+        </HStack>
       ) : (
-        <TextField {...common} ref={field} />
+        input
       )}
     </Host>
   );

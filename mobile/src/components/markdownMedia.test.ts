@@ -121,20 +121,29 @@ describe("splitMarkdownMedia", () => {
   });
 
   it("supports spaces, umlauts, relative and reference-style destinations", () => {
-    // Paths stay URL-encoded like the webapp's `src`; the media cache decodes once.
+    // Destinations are URLs: decoded once into the file path the cache loads.
     expect(
       mediaPaths(
-        "![s](</workspace/screenshots/Bild 1.png>)\n\n![u](/workspace/übersicht.png)\n\n![r](screenshots/rel.png)\n\n![ref][shot]\n\n![e](/workspace/a%20b.png)\n\n[shot]: /workspace/ref.png",
+        "![s](</workspace/screenshots/Bild 1.png>)\n\n![u](/workspace/übersicht.png)\n\n![r](screenshots/rel.png)\n\n![ref][shot]\n\n![e](/workspace/a%20b.png)\n\n![p](/workspace/100%25%20done%231.png)\n\n<img src=\"/workspace/c d.png\">\n\n[shot]: /workspace/ref.png",
       ),
     ).toEqual([
-      "/workspace/screenshots/Bild%201.png",
-      "/workspace/%C3%BCbersicht.png",
+      "/workspace/screenshots/Bild 1.png",
+      "/workspace/übersicht.png",
       "/workspace/screenshots/rel.png",
       "/workspace/ref.png",
-      "/workspace/a%20b.png",
+      "/workspace/a b.png",
+      "/workspace/100% done#1.png",
+      "/workspace/c d.png",
     ]);
-    const [piece] = splitMarkdownMedia("![](</workspace/Bild 1.png>)");
-    expect(piece).toMatchObject({ media: { label: "Bild 1.png" } });
+    for (const markdown of [
+      "![](</workspace/Bild 1.png>)",
+      "![](/workspace/Bild%201.png)",
+    ]) {
+      const [piece] = splitMarkdownMedia(markdown);
+      expect(piece).toMatchObject({
+        media: { path: "/workspace/Bild 1.png", label: "Bild 1.png" },
+      });
+    }
   });
 
   it("keeps the same image twice and classifies videos", () => {

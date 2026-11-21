@@ -9,8 +9,8 @@ stack that covers every setting of the webapp.
 - `SettingsPage` is one page: a title, `NativeForm` sections, an optional
   primary action (iOS bar / Android button or FAB), overflow actions,
   search, loading and empty states. Pages never draw their own chrome.
-- `pages/RootPage.tsx` is the first page: profile, organization card and
-  grouped links with prominent section titles. Page groups:
+- `pages/RootPage.tsx` is the first page: profile, organization card,
+  grouped links, the account and, last, Sign out. Page groups:
   `pages/models` (Provider & Models, Agents, Skills), `pages/access`
   (Credentials, Credential services, Plugins, API keys) and
   `pages/infrastructure` (Captured images, Image definitions, Runners).
@@ -34,9 +34,17 @@ stack that covers every setting of the webapp.
 - Settings that the webapp saves automatically use `useAutosave` and show
   `autosaveSection(...)`; forms with secrets or several fields save with a
   primary action instead.
-- Confirm destructive actions with `Alert.alert`, report results with
-  `showToast`, show load failures with `loadErrorSections`. Deletions of
-  images, builds and definitions go through `pages/DeletionPage`.
+- Confirm destructive actions with `Alert.alert` and put them in their own
+  last section; report results with `showToast`. Deletions of images,
+  builds and definitions go through `pages/DeletionPage`.
+- States (`ui/formStates.ts`, `sections.ts`): a page that failed to load
+  and has nothing to show passes no sections and `loadFailure(...)` as
+  `empty` (centered "Couldn’t load …" with Retry); a detail page whose
+  item is gone keeps its "… unavailable" state. Errors next to content
+  use `errorRows` (note and Retry), as `pendingSection`, `autosaveSection`
+  and `refreshError` (a failed refresh above older data) do. A list's empty state repeats its primary action
+  (`empty.action`, test ID `empty-<id>`); `SettingsPage` then hides the
+  toolbar action, so each screen offers one main action.
 - Read-only text (keys, tokens, logs) uses `pages/TextPage` with Copy and
   Share; one-time secrets live only in the resource store of this opening.
 - Poll with `usePolling` while a page is mounted; reload after the browser

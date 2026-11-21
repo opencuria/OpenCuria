@@ -1,7 +1,7 @@
 import { marked } from "marked";
 import {
   classifyWorkspaceFile,
-  resolveWorkspaceMediaPath,
+  resolveWorkspaceLinkPath,
 } from "@opencuria/chat-core/workspaceFileRefs";
 
 /** A picture or video referenced from chat Markdown. */
@@ -321,19 +321,9 @@ function reference(raw: string, destination: string, alt: string): Reference {
   };
 }
 
-/**
- * Percent-encode a parsed destination like marked's own URL cleaning (and the
- * webapp's rendered `src`), so spaces survive and the media cache decodes once.
- */
+/** A parsed destination is a URL: `%20` names the file `a b.png`, like a browser. */
 function workspaceMediaPath(destination: string): string | null {
-  if (!destination) return null;
-  try {
-    return resolveWorkspaceMediaPath(
-      encodeURI(destination).replace(/%25/g, "%"),
-    );
-  } catch {
-    return null;
-  }
+  return destination ? resolveWorkspaceLinkPath(destination) : null;
 }
 
 function htmlAttribute(tag: string, name: string): string | null {
@@ -476,12 +466,7 @@ function escapeRegExp(text: string): string {
 }
 
 function filename(path: string): string {
-  const name = path.split("/").filter(Boolean).pop() ?? "";
-  try {
-    return decodeURIComponent(name);
-  } catch {
-    return name;
-  }
+  return path.split("/").filter(Boolean).pop() ?? "";
 }
 
 function asToken(value: unknown): LexToken | null {

@@ -1,20 +1,19 @@
 import React, { useEffect } from "react";
 import { Alert } from "react-native";
-import { NativeForm } from "../ui/NativeForm";
+import { errorRows, loadErrorState } from "../ui/formStates";
 import type {
+  NativeFormEmptyState,
   NativeFormItemRow,
   NativeFormSection,
   NativeFormSwipeAction,
 } from "../ui/NativeForm.types";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { NativeModal } from "../ui/primitives";
-import { tileColor, type TileColor } from "../ui/tileColors";
-import { useTheme } from "../ui/theme";
 import {
+  appActionTitle,
   appSections,
   appSubtitle,
   type AppRow,
-  type AppState,
 } from "./appPresentation";
 import { runPrimaryAction, type AppsState } from "./useApps";
 
@@ -23,14 +22,6 @@ export interface AppsSheetProps {
   onClose: () => void;
   apps: AppsState;
 }
-
-const TILES: Record<AppState, TileColor> = {
-  installed: "indigo",
-  update: "orange",
-  available: "green",
-  incompatible: "gray",
-  unsupported: "gray",
-};
 
 function confirm(
   title: string,
@@ -53,7 +44,6 @@ export function AppsSheet({
   onClose,
   apps,
 }: AppsSheetProps): React.JSX.Element | null {
-  const { theme } = useTheme();
   const { refresh } = apps;
   // Opening the list checks for apps and updates published since.
   useEffect(() => {
@@ -85,11 +75,8 @@ export function AppsSheet({
   const item = (row: AppRow): NativeFormItemRow => {
     const progress = apps.progress[row.appId];
     const busy = progress !== undefined;
-    const runnable =
-      apps.supported &&
-      (row.state === "installed" ||
-        row.state === "update" ||
-        row.state === "available");
+    const action = apps.supported ? appActionTitle(row.state) : null;
+    const run = () => void runPrimaryAction(apps, row);
     const actions: NativeMenuAction[] = [];
     const swipe: NativeFormSwipeAction[] = [];
     if (row.state === "update")
@@ -131,22 +118,24 @@ export function AppsSheet({
       id: row.appId,
       testID: `app-${row.appId}`,
       title: row.name,
-      subtitle: busy
-        ? `Downloading… ${Math.round(progress * 100)}%`
-        : appSubtitle(row, apps.platform),
-      subtitleTone: row.state === "update" ? "accent" : undefined,
+      subtitle: appSubtitle(row, apps.platform, progress),
       symbol: "square.grid.2x2.fill",
+      tile: true,
       image: apps.icons[row.appId],
-      tint: tileColor(TILES[row.state], theme),
-      busy,
-      badge:
-        row.state === "update"
-          ? "Update"
-          : row.state === "available"
-            ? "Install"
-            : undefined,
+      // The capsule shows the download's spinner in its place.
+      busy: busy && !action,
+      accessory: action
+        ? {
+            title: action,
+            prominent: action !== "Open",
+            busy,
+            onPress: run,
+            accessibilityLabel: `${action} ${row.name}`,
+            testID: `app-action-${row.appId}`,
+          }
+        : undefined,
       disabled: busy,
-      onPress: runnable ? () => void runPrimaryAction(apps, row) : undefined,
+      onPress: action ? run : undefined,
       actions: busy ? [] : actions,
       trailingSwipe: busy ? [] : swipe,
       onAction: (id) => act(row, id),
@@ -154,6 +143,8 @@ export function AppsSheet({
   };
 
   const { installed, available } = appSections(apps.rows);
+  const hasRows = installed.length > 0 || available.length > 0;
+  const retry = () => void apps.refresh();
   const notes: NativeFormSection[] = [];
   if (!apps.supported)
     notes.push({
@@ -164,6 +155,7 @@ export function AppsSheet({
           id: "apps-unsupported",
           text: "This build of OpenCuria cannot open apps.",
           tone: "warning",
+          symbol: "exclamationmark.triangle",
         },
       ],
     });
@@ -177,34 +169,35 @@ export function AppsSheet({
           text: installed.length
             ? "You’re offline. Installed apps still open; new apps and updates show up once you are back online."
             : "You’re offline. New apps show up here once you are back online.",
+          tone: "muted",
+          symbol: "wifi.slash",
         },
       ],
     });
-  else if (apps.error)
+  // Without anything to list, a failed load is the centered empty state.
+  else if (apps.error && (hasRows || notes.length))
     notes.push({
       id: "error",
-      rows: [
-        installed.length
-          ? {
+      // With installed apps the failure reassures (muted, like offline).
+      rows: installed.length
+        ? [
+            {
               kind: "note",
               id: "apps-error",
               text: "Can’t reach OpenCuria right now. Installed apps still open; new apps and updates show up once you are back online.",
-            }
-          : {
-              kind: "note",
-              id: "apps-error",
-              text: `Could not load apps: ${apps.error}`,
-              tone: "danger",
+              tone: "muted",
+              symbol: "wifi.slash",
             },
-        {
-          kind: "button",
-          id: "apps-retry",
-          title: "Retry",
-          symbol: "arrow.counterclockwise",
-          busy: apps.loading,
-          onPress: () => void apps.refresh(),
-        },
-      ],
+            {
+              kind: "button",
+              id: "apps-retry",
+              title: "Retry",
+              symbol: "arrow.clockwise",
+              busy: apps.loading,
+              onPress: retry,
+            },
+          ]
+        : errorRows("apps", apps.error, retry, apps.loading),
     });
   const sections: NativeFormSection[] = [
     ...notes,
@@ -212,42 +205,41 @@ export function AppsSheet({
       ? [{ id: "installed", title: "Installed", rows: installed.map(item) }]
       : []),
     ...(available.length
-      ? [{ id: "available", title: "Ready to install", rows: available.map(item) }]
+      ? [
+          {
+            id: "available",
+            title: "Ready to install",
+            rows: available.map(item),
+          },
+        ]
       : []),
   ];
   const waiting =
     !apps.offline && !apps.loaded && !apps.error && !installed.length;
+  const empty: NativeFormEmptyState =
+    apps.error && !apps.offline
+      ? loadErrorState("apps", apps.error, retry, apps.loading)
+      : {
+          title: "No apps yet",
+          description:
+            "Ask an agent to build an Expo app and send it to you. It shows up here to install.",
+          symbol: "square.grid.2x2.fill",
+        };
 
   return (
     <NativeModal
       visible
       onClose={onClose}
       title="Apps"
-      scrollable={false}
+      largeTitle
       testID="apps-sheet"
-    >
-      <NativeForm
-        sections={
-          waiting
-            ? [
-                {
-                  id: "loading",
-                  rows: [
-                    { kind: "note", id: "apps-loading", text: "Loading apps…" },
-                  ],
-                },
-              ]
-            : sections
-        }
-        onRefresh={apps.refresh}
-        empty={{
-          title: "No apps yet",
-          description:
-            "Ask an agent to build an Expo app and send it to you. It shows up here to install.",
-          symbol: "square.grid.2x2.fill",
-        }}
-        testID="app-list"
-      />
-    </NativeModal>
+      form={{
+        sections: waiting ? [] : sections,
+        loading: waiting,
+        onRefresh: apps.refresh,
+        empty,
+        testID: "app-list",
+      }}
+    />
   );
 }

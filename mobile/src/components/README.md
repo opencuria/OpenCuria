@@ -18,6 +18,13 @@ labels and stable `testID`s.
 - `ChatComposer`: controlled draft. It clears on send and restores the draft when
   `onSend` rejects; `contextKey` discards late picker, search and send results.
   It hosts the sheet stack; `gates` passes pending questions and permissions.
+  The field shows file mentions by name while the draft keeps their tokens
+  (`composerDisplay`); a mention is deleted whole. A sent prompt is edited in
+  the field (`editing`), never in its bubble; meanwhile the transcript ends with
+  it (`editingMessageId`) and the host keeps the chat's own draft aside.
+- Prompts (`PromptContent`, `promptBlocks`): mentions are chips in the flow of their
+  paragraph and mentioned pictures thumbnails below the bubble, as in the webapp. A
+  prompt just sent flies in from the composer (`PromptFlight`).
 - `ComposerSheets`: the sheet stack behind the composer top, as in the webapp (shared
   `composerSheets` order: mentions, questions, permissions). Only the top sheet is
   interactive; gate sheets fold into their header and shrink with the keyboard.
@@ -26,7 +33,9 @@ labels and stable `testID`s.
 
 ## Rules
 
-- `resolveMedia` returns a local URI or `{ uri, release }` lease; release it when hidden.
+- `resolveMedia` returns a URI or `{ uri, release }` lease; release it when hidden.
+  Its `describe` gives size and blurred preview: embedded media above 5 MB wait for
+  a tap (`MediaPlaceholder`), opened media always load.
 - Never attach auth headers to external fetches; only credential-free `http(s)` links
   open externally, workspace links go through `onOpenFile`.
 - Undefined callbacks hide their actions.

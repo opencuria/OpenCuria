@@ -6,7 +6,6 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
 import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
 import { activePointingWorkspace } from '@/lib/voicePointing'
-import { useNotificationStore } from '@/stores/notifications'
 
 const props = defineProps<{
   src: string
@@ -14,6 +13,8 @@ const props = defineProps<{
   /** Original workspace reference, independent of the temporary browser URL. */
   path?: string
   workspaceId?: string
+  /** Signed workspace download URL; other images download from `src`. */
+  downloadUrl?: string
 }>()
 
 const emit = defineEmits<{
@@ -28,7 +29,6 @@ interface Point {
 const triggerEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
 const stageEl = ref<HTMLElement | null>(null)
 const loadFailed = ref(false)
-const isDownloading = ref(false)
 // Zoom is relative to the original pixels: 100% always means actual image size.
 const zoom = ref(1)
 const panX = ref(0)
@@ -43,7 +43,6 @@ const maxZoom = 8
 const zoomLevels = [0.1, 0.125, 1 / 6, 0.25, 1 / 3, 0.5, 2 / 3, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8]
 const pointers = new Map<number, Point>()
 let resizeObserver: ResizeObserver | null = null
-let downloadController: AbortController | null = null
 
 const imageReady = computed(() => !loadFailed.value && naturalWidth.value > 0)
 const minZoom = computed(() => {
@@ -204,62 +203,31 @@ function onDoubleClick(event: MouseEvent): void {
   else setZoom(Math.max(1, minZoom.value * 2), getStagePoint(event.clientX, event.clientY))
 }
 
-function downloadFilename(mime: string): string {
+const downloadHref = computed(() => props.downloadUrl || props.src)
+/** Signed links name the file themselves; other sources need a name. */
+const downloadName = computed(() => {
+  if (props.downloadUrl) return ''
   const pathName = props.path?.split('/').pop()
   if (pathName) return pathName
-  const source = new URL(props.src, window.location.href)
-  if (source.protocol === 'http:' || source.protocol === 'https:') {
-    const name = decodeURIComponent(source.pathname.split('/').pop() ?? '')
-    if (name.includes('.')) return name
+  const dataMime = /^data:([^;,]+)/.exec(props.src)?.[1]
+  if (dataMime) {
+    const extension = dataMime === 'image/jpeg' ? 'jpg' : dataMime.split('/')[1]?.split('+')[0]
+    return `image.${extension || 'png'}`
   }
-  const extension = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]?.split('+')[0] || 'png'
-  return `image.${extension}`
-}
-
-async function downloadImage(): Promise<void> {
-  if (isDownloading.value || !imageReady.value) return
-  const controller = new AbortController()
-  downloadController = controller
-  isDownloading.value = true
   try {
-    const response = await fetch(props.src, { signal: controller.signal })
-    if (!response.ok) throw new Error('Image download failed')
-    const blob = await response.blob()
-    if (controller.signal.aborted) return
-    const filename = downloadFilename(blob.type)
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    try {
-      anchor.href = url
-      anchor.download = filename
-      document.body.appendChild(anchor)
-      anchor.click()
-    } finally {
-      anchor.remove()
-      // Allow the browser to start reading the blob before revoking it.
-      setTimeout(() => URL.revokeObjectURL(url), 30_000)
-    }
+    const name = decodeURIComponent(
+      new URL(props.src, window.location.href).pathname.split('/').pop() ?? '',
+    )
+    if (name.includes('.')) return name
   } catch {
-    if (!controller.signal.aborted) {
-      useNotificationStore().error(
-        'Download failed',
-        'The image could not be downloaded. Please retry.',
-      )
-    }
-  } finally {
-    if (downloadController === controller) {
-      downloadController = null
-      isDownloading.value = false
-    }
+    // Fall back to a generic name below.
   }
-}
+  return 'image.png'
+})
 
 watch(
   () => props.src,
   () => {
-    downloadController?.abort()
-    downloadController = null
-    isDownloading.value = false
     clearPointers()
     loadFailed.value = false
     naturalWidth.value = 0
@@ -283,7 +251,6 @@ watch(
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
-  downloadController?.abort()
   clearPointers()
 })
 </script>
@@ -345,14 +312,16 @@ onUnmounted(() => {
           <Plus />
         </Button>
         <Button
+          as="a"
           variant="ghost"
           size="icon"
           class="rounded-full"
           aria-label="Download image"
           title="Download image"
-          :disabled="!imageReady || isDownloading"
-          :aria-busy="isDownloading"
-          @click="downloadImage"
+          :href="downloadHref"
+          :download="downloadName"
+          target="_blank"
+          rel="noopener noreferrer"
         >
           <Download />
         </Button>

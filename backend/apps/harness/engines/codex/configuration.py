@@ -23,9 +23,18 @@ def _toml(value: Any) -> str:
 
 
 def runtime_settings(
-    auth: CodexAuthConfiguration, model: str, *, readonly: bool
+    auth: CodexAuthConfiguration,
+    model: str,
+    *,
+    readonly: bool,
+    native_shell: str = "/bin/sh",
 ) -> tuple[dict[str, Any], str, str]:
-    """Return authoritative pinned-CLI overrides and the provider wire model."""
+    """Return authoritative pinned-CLI overrides and the provider wire model.
+
+    Commands Codex spawns itself use the guest's native ``sh`` (an absolute
+    Windows path on Windows guests). The module stays import-free so the
+    runner can validate its output standalone.
+    """
     provider = "openrouter" if auth.provider_id == "openrouter" else "openai"
     bare = model.split("/", 1)[1]
     # Official OpenRouter Codex guide requires ~ before the vendor/model slug.
@@ -64,7 +73,7 @@ def runtime_settings(
             "request_max_retries": 0,
             "stream_max_retries": 0,
             "auth": {
-                "command": "/bin/sh",
+                "command": native_shell,
                 "args": ["-c", 'printf %s "$OPENCURIA_CODEX_API_KEY"'],
                 "timeout_ms": 5000,
             },

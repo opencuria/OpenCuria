@@ -23,6 +23,12 @@ BUILD_SCRIPT_TIMEOUT = "build_script_timeout"
 INSUFFICIENT_STORAGE = "insufficient_storage"
 INTERRUPTED = "interrupted"
 HANDLER_FAILED = "handler_failed"
+#: A Windows guest could not be generalized for publication (sysprep).
+GENERALIZE_FAILED = "generalize_failed"
+#: The runner has no usable Windows installation media or base image.
+WINDOWS_MEDIA_UNAVAILABLE = "windows_media_unavailable"
+#: The host lacks UEFI Secure Boot firmware or a TPM emulator for Windows.
+WINDOWS_HOST_UNSUPPORTED = "windows_host_unsupported"
 
 #: Every code a terminal operation result may carry.
 CODES = frozenset(
@@ -40,6 +46,9 @@ CODES = frozenset(
         INSUFFICIENT_STORAGE,
         INTERRUPTED,
         HANDLER_FAILED,
+        GENERALIZE_FAILED,
+        WINDOWS_MEDIA_UNAVAILABLE,
+        WINDOWS_HOST_UNSUPPORTED,
     }
 )
 

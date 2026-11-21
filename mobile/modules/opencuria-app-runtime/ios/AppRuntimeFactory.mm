@@ -25,6 +25,14 @@
     extraDataAsJSON:(nullable NSString *)extraDataAsJSON;
 @end
 
+// RCTReactNativeFactory implements RCTTurboModuleManagerDelegate, but adopts it
+// only in its class extension (RCTReactNativeFactory.mm), so the header does not
+// declare the method this factory forwards to via super. Check it still exists
+// when upgrading React Native.
+@interface RCTReactNativeFactory (OCTurboModuleManagerDelegate)
+- (id<RCTTurboModule>)getModuleInstanceFromClass:(Class)moduleClass;
+@end
+
 /**
  The app instance's ExceptionsManager. Once the bundle has run, React Native
  reports uncaught JavaScript errors (e.g. in a render) through this module

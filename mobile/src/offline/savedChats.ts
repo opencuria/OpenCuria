@@ -32,6 +32,8 @@ const EMPTY: ChatControllerSnapshot = Object.freeze({
   todos: NONE,
   permissions: NONE,
   questions: NONE,
+  steers: NONE,
+  scheduled: NONE,
   activeSessionId: null,
   activeSession: null,
   activeSessionLineage: NONE,

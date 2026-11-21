@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
+from apps.licensing.services import WindowsLicenseService
 from common.exceptions import ConflictError
 
 from ..enums import TaskType, WorkspaceStatus
@@ -123,18 +124,31 @@ class WorkspaceCapacityService:
             if not workspace.runner.is_online:
                 raise RunnerOfflineError(str(workspace.runner_id))
             effective = WorkspaceCapacityService.previous_resources(workspace)
+            vcpus, memory_mb, disk_size_gb = resolve_qemu_resources(
+                runner=workspace.runner,
+                qemu_vcpus=None,
+                qemu_memory_mb=None,
+                qemu_disk_size_gb=None,
+                current=(
+                    effective["vcpus"],
+                    effective["memory_mb"],
+                    effective["disk_size_gb"],
+                ),
+                guest_os=workspace.guest_os,
+            )
             WorkspaceCapacityService.ensure(
                 workspace.runner_id,
-                vcpus=effective["vcpus"],
-                memory_mb=effective["memory_mb"],
-                disk_size_gb=effective["disk_size_gb"],
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_size_gb=disk_size_gb,
                 exclude_workspace_id=workspace.id,
             )
+            WindowsLicenseService().admit(workspace)
             workspace = WorkspaceRepository.update_qemu_resources(
                 workspace,
-                qemu_vcpus=effective["vcpus"],
-                qemu_memory_mb=effective["memory_mb"],
-                qemu_disk_size_gb=effective["disk_size_gb"],
+                qemu_vcpus=vcpus,
+                qemu_memory_mb=memory_mb,
+                qemu_disk_size_gb=disk_size_gb,
             )
             task = TaskRepository.create(
                 task_id=task_id,

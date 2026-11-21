@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from apps.harness.access.guest import LINUX_GUEST
 from apps.harness.agents.definitions import get_agent
 from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.configuration import runtime_settings
@@ -70,7 +71,8 @@ async def test_real_runtime_retains_native_base_prompt_search_and_delegation(tmp
     for request in turns:
         context = json.dumps(request.get("input", []))
         assert "You are a coding agent running in the Codex" in context
-        for paragraph in opencuria_context(get_agent("build")).split("\n\n"):
+        context_text = opencuria_context(get_agent("build"), LINUX_GUEST)
+        for paragraph in context_text.split("\n\n"):
             assert context.count(paragraph) == 1
         assert get_agent("build").system_prompt not in context
         assert (

@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tarfile
 import uuid
 from pathlib import Path
@@ -136,6 +137,66 @@ async def test_rejects_unsupported_guest_platform_and_unapproved_artifact(setup_
     manager._download.assert_not_awaited()
 
 
+def _run_platform_probe(tmp_path, system, machine):
+    """Run the real guest probe with a fake ``uname`` first on PATH."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uname = fake_bin / "uname"
+    uname.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in -s) printf "%s\\n" "{system}" ;; '
+        f'-m) printf "%s\\n" "{machine}" ;; *) exit 9 ;; esac\n'
+    )
+    uname.chmod(0o755)
+    result = subprocess.run(
+        ["sh", "-c", artifacts._GUEST_PLATFORM_PROBE],
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout
+
+
+@pytest.mark.parametrize(
+    "system,machine,expected",
+    [
+        ("MSYS_NT-10.0-26100", "x86_64", "win32-x64\n"),
+        ("CYGWIN_NT-10.0-26100", "x86_64", "win32-x64\n"),
+        ("MSYS_NT-10.0-26100", "aarch64", None),
+        ("MINGW64_NT-10.0-26100", "x86_64", None),
+        ("Darwin", "arm64", None),
+        ("Linux", "riscv64", None),
+    ],
+)
+def test_guest_platform_probe_reports_windows_msys_guests(
+    tmp_path, system, machine, expected
+):
+    code, output = _run_platform_probe(tmp_path, system, machine)
+    if expected is None:
+        assert code != 0 and output == ""
+    else:
+        assert (code, output) == (0, expected)
+        assert RuntimeArtifactManager._platform_key(output) == "win32-x64"
+
+
+@pytest.mark.parametrize(
+    "machine,arch", [("x86_64", "x64"), ("amd64", "x64"), ("aarch64", "arm64")]
+)
+def test_guest_platform_probe_linux_output_is_unchanged(tmp_path, machine, arch):
+    code, output = _run_platform_probe(tmp_path, "Linux", machine)
+    assert code == 0
+    assert output in {f"linux-{arch}\n", f"linux-{arch}-musl\n"}
+
+
+@pytest.mark.parametrize(
+    "output", ["win32-arm64", "windows-x64", "darwin-arm64", "win32-x64 extra", ""]
+)
+def test_platform_key_rejects_unpinned_values(output):
+    with pytest.raises(ValueError, match="Unsupported workspace platform"):
+        RuntimeArtifactManager._platform_key(output)
+
+
 @pytest.mark.asyncio
 async def test_rejects_stale_claude_version_before_provisioning(setup_manager):
     manager, runtime, _info, _payload, _digest = setup_manager
@@ -149,7 +210,7 @@ async def test_rejects_stale_claude_version_before_provisioning(setup_manager):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform", tuple(artifacts.CLAUDE_PLATFORM_PINS))
-async def test_all_pinned_linux_sizes_fit_and_are_accepted_by_provisioning(
+async def test_all_pinned_sizes_fit_and_are_accepted_by_provisioning(
     tmp_path, platform, monkeypatch
 ):
     """Provision each official platform pin through a pre-populated local cache."""
@@ -179,8 +240,173 @@ async def test_all_pinned_linux_sizes_fit_and_are_accepted_by_provisioning(
     assert result["ok"] is True
     assert result["platform"] == platform
     assert result["version"] == "2.1.321"
+    binary = "claude.exe" if platform == "win32-x64" else "claude"
+    assert result["path"] == (
+        f"{manager._guest_runtime_root}/claude-agent/2.1.321/{binary}"
+    )
+    install, verify = (
+        call.args[1] for call in runtime.exec_command_wait.await_args_list[1:]
+    )
+    assert install[3] == "opencuria-artifact-installer" and install[-1] == binary
+    assert verify[3] == "opencuria-artifact-verify" and verify[-1] == binary
     manager._download.assert_not_awaited()
     assert runtime.put_archive.await_count == 1
+
+
+# Entries of the signed 2.1.321 release manifest (sha256 pinned in artifacts.py).
+CLAUDE_RELEASE_WIN32_X64 = {
+    "binary": "claude.exe",
+    "checksum": "e6dae5fc45902b15751f2591a02f51760351c4788c5fd8291b3f1443d40c13a4",
+    "size": 346487456,
+}
+
+
+def _canonical_claude_spec_hash(manifest: dict) -> str:
+    canonical = json.loads(json.dumps(manifest))
+    canonical["artifacts"]["claude-agent"]["manifest_sha256"] = "x"
+    return hashlib.sha256((json.dumps(canonical, indent=2) + "\n").encode()).hexdigest()
+
+
+def test_shipped_claude_manifest_pins_win32_x64_release_entry(tmp_path):
+    manifest = json.loads(artifacts.ARTIFACT_MANIFEST_PATH.read_text("utf-8"))
+    entry = manifest["artifacts"]["claude-agent"]
+    assert entry["platforms"]["win32-x64"] == {
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/win32-x64/claude.exe",
+        "sha256": CLAUDE_RELEASE_WIN32_X64["checksum"],
+        "size": CLAUDE_RELEASE_WIN32_X64["size"],
+    }
+    assert artifacts.CLAUDE_PLATFORM_PINS["win32-x64"] == (
+        CLAUDE_RELEASE_WIN32_X64["checksum"],
+        CLAUDE_RELEASE_WIN32_X64["size"],
+    )
+    assert artifacts.claude_binary_name("win32-x64") == "claude.exe"
+    assert CLAUDE_RELEASE_WIN32_X64["size"] <= artifacts.ARTIFACT_MAX_DOWNLOAD_SIZE
+    assert _canonical_claude_spec_hash(manifest) == entry["manifest_sha256"]
+    assert entry["manifest_sha256"] == artifacts.CLAUDE_ARTIFACT_SPEC_SHA256
+    RuntimeArtifactManager(
+        {}, lambda _: None, lambda _: None, tmp_path / "state"
+    )  # The shipped manifest passes the integrity check.
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda platforms: platforms.pop("win32-x64"),
+        lambda platforms: platforms["win32-x64"].update(sha256="0" * 64),
+        lambda platforms: platforms["win32-x64"].update(
+            url="https://downloads.claude.ai/claude-code-releases/2.1.321/win32-x64/claude"
+        ),
+        lambda platforms: platforms.update(
+            {"win32-arm64": dict(platforms["win32-x64"])}
+        ),
+    ],
+)
+def test_claude_win32_manifest_tampering_fails_integrity(tmp_path, change):
+    manifest = json.loads(artifacts.ARTIFACT_MANIFEST_PATH.read_text("utf-8"))
+    change(manifest["artifacts"]["claude-agent"]["platforms"])
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    with pytest.raises(RuntimeError, match="integrity"):
+        RuntimeArtifactManager(
+            {}, lambda _: None, lambda _: None, tmp_path / "state", manifest_path=path
+        )
+
+
+@pytest.mark.skipif(
+    not os.environ.get("CLAUDE_TEST_RELEASE_MANIFEST"),
+    reason="set CLAUDE_TEST_RELEASE_MANIFEST to the downloaded 2.1.321 manifest.json",
+)
+def test_claude_pins_match_downloaded_release_manifest():
+    raw = Path(os.environ["CLAUDE_TEST_RELEASE_MANIFEST"]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == artifacts.CLAUDE_RELEASE_MANIFEST_SHA256
+    release = json.loads(raw)["platforms"]
+    shipped = json.loads(artifacts.ARTIFACT_MANIFEST_PATH.read_text("utf-8"))
+    for platform, (digest, size) in artifacts.CLAUDE_PLATFORM_PINS.items():
+        binary = artifacts.claude_binary_name(platform)
+        assert release[platform] == {
+            "binary": binary,
+            "checksum": digest,
+            "size": size,
+        }
+        assert shipped["artifacts"]["claude-agent"]["platforms"][platform]["url"] == (
+            f"https://downloads.claude.ai/claude-code-releases/2.1.321/{platform}/{binary}"
+        )
+
+
+def _fake_claude_release(tmp_path) -> tuple[Path, str, Path]:
+    """A tiny executable that answers --version like the release and logs $0."""
+    log = tmp_path / "invocations.log"
+    source = tmp_path / "upload" / "opencuria-claude-agent-fixture"
+    source.parent.mkdir()
+    source.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$0" >> "{log}"\n'
+        "printf '2.1.321 (Claude Code)\\n'\n"
+    )
+    return source, hashlib.sha256(source.read_bytes()).hexdigest(), log
+
+
+def _guest_script(script: str, *args: str) -> tuple[int, str]:
+    result = subprocess.run(
+        ["sh", "-c", script, "opencuria-test", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout
+
+
+@pytest.mark.parametrize("binary", ["claude", "claude.exe"])
+def test_guest_installer_stages_and_publishes_the_platform_binary_name(
+    tmp_path, binary
+):
+    source, digest, log = _fake_claude_release(tmp_path)
+    root = tmp_path / "guest" / "runtimes"
+    stage_name = ".claude-stage-" + uuid.uuid4().hex
+
+    code, output = _guest_script(
+        artifacts._GUEST_INSTALLER,
+        str(source), digest, "2.1.321", stage_name, str(root), binary,
+    )
+
+    assert (code, output) == (0, "2.1.321\n")
+    version_dir = root / "claude-agent" / "2.1.321"
+    assert sorted(p.name for p in version_dir.iterdir()) == [binary]
+    final = version_dir / binary
+    assert final.stat().st_mode & 0o777 == 0o555
+    assert not source.exists()
+    suffix = ".exe" if binary == "claude.exe" else ""
+    # The stage was executed under its .exe name before the hard-link publish.
+    assert log.read_text().splitlines()[0] == str(version_dir / (stage_name + suffix))
+    assert _guest_script(
+        artifacts._GUEST_VERIFY, str(root), digest, "2.1.321", binary
+    ) == (0, "2.1.321\n")
+    other = "claude" if binary == "claude.exe" else "claude.exe"
+    assert _guest_script(
+        artifacts._GUEST_VERIFY, str(root), digest, "2.1.321", other
+    )[0] == 4
+
+
+@pytest.mark.parametrize(
+    "binary",
+    ["", "claude.EXE", "claude.sh", "../claude", "bin/claude", "claude.exe.exe"],
+)
+def test_guest_scripts_reject_unexpected_binary_names(tmp_path, binary):
+    source, digest, log = _fake_claude_release(tmp_path)
+    root = tmp_path / "guest" / "runtimes"
+    stage_name = ".claude-stage-" + uuid.uuid4().hex
+
+    code, output = _guest_script(
+        artifacts._GUEST_INSTALLER,
+        str(source), digest, "2.1.321", stage_name, str(root), binary,
+    )
+
+    assert (code, output) == (2, "")
+    assert not root.exists() and not log.exists()
+    root.mkdir(parents=True)
+    assert _guest_script(
+        artifacts._GUEST_VERIFY, str(root), digest, "2.1.321", binary
+    ) == (4, "")
 
 
 @pytest.mark.asyncio

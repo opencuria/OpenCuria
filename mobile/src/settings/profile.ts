@@ -36,21 +36,3 @@ export function isOrganizationAdmin(
       ?.role === "admin"
   );
 }
-
-/** Avatar colors: mid-tone system hues that keep white initials readable. */
-const AVATAR_COLORS = [
-  "#E5679E",
-  "#8E6CEF",
-  "#3E8EF7",
-  "#2FA88F",
-  "#E8833A",
-  "#C1564F",
-];
-
-/** A stable avatar color per account, like ChatGPT's profile circle. */
-export function avatarColor(user: Pick<AuthUser, "email">): string {
-  let hash = 0;
-  for (const character of user.email ?? "")
-    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
-  return AVATAR_COLORS[hash % AVATAR_COLORS.length]!;
-}

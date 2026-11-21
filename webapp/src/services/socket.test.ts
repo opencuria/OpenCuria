@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises } from '@vue/test-utils'
 
 const { io } = vi.hoisted(() => ({ io: vi.fn() }))
 vi.mock('socket.io-client', () => ({ io }))
@@ -114,73 +113,16 @@ describe('browser realtime adapter', () => {
       terminal_id: 'terminal-1',
       data: 'aGk=',
     })
-    service.sendFilesUpload('ws-1', 'request-1', '/workspace', 'a.txt', 'aGk=')
-    expect(socket.emit.mock.calls.map(([event]) => event)).toEqual([
-      'frontend:terminal_input',
-      'frontend:files_upload_start',
-      'frontend:files_upload_chunk',
-      'frontend:files_upload_finish',
-    ])
     vi.spyOn(useWorkspaceStore(), 'isWorkspaceTransitioning').mockReturnValue(true)
     socket.emit.mockClear()
     service.sendTerminalInput('ws-1', 'terminal-1', 'aGk=')
-    service.sendFilesUpload('ws-1', 'request-2', '/workspace', 'a.txt', 'aGk=')
     await expect(service.findWorkspaceFiles('ws-1', 'a', 50)).rejects.toMatchObject({
       code: 'workspace_transitioning',
     })
     await expect(service.listWorkspaceFiles('ws-1', '/workspace')).rejects.toMatchObject({
       code: 'workspace_transitioning',
     })
-    await expect(service.readWorkspaceFile('ws-1', '/workspace/a.png')).rejects.toMatchObject({
-      code: 'workspace_transitioning',
-    })
-    await expect(service.downloadWorkspaceFile('ws-1', '/workspace')).rejects.toMatchObject({
-      code: 'workspace_transitioning',
-    })
     expect(socket.emit).not.toHaveBeenCalled()
-  })
-
-  it('loads chat media through the shared client without view-level file event listeners', async () => {
-    const { useWorkspaceImageStore } = await import('@/stores/workspaceImages')
-    service.connect()
-    socket.connect()
-    const store = useWorkspaceImageStore()
-    const path = '/workspace/shot.png'
-    store.fetchImage('ws-1', path)
-    const request = socket.emit.mock.calls.find(([event]) => event === 'frontend:files_read')![1]
-    const identity = { workspace_id: 'ws-1', request_id: request.request_id, path }
-    socket.trigger('files:content_chunk', {
-      ...identity,
-      index: 1,
-      total_chunks: 2,
-      content: 'ZGVm',
-    })
-    socket.trigger('files:content_chunk', {
-      ...identity,
-      index: 0,
-      total_chunks: 2,
-      content: 'YWJj',
-    })
-    socket.trigger('files:content_result', {
-      ...identity,
-      content: '',
-      size: 6,
-      truncated: false,
-      mime_type: 'image/png',
-      chunked: true,
-      total_chunks: 2,
-    })
-    await flushPromises()
-    expect(store.getImageUrl(path)).toBe('data:image/png;base64,YWJjZGVm')
-    expect(store.isFetchingImage(path)).toBe(false)
-
-    store.fetchImage('ws-1', '/workspace/pending.png')
-    store.reset()
-    await flushPromises()
-    expect(store.isFetchingImage('/workspace/pending.png')).toBe(false)
-    expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
-      workspace_id: 'ws-1',
-    })
   })
 
   it('loads directory trees and file suggestions without view listeners and cancels on reset', async () => {
@@ -219,79 +161,5 @@ describe('browser realtime adapter', () => {
     expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
       workspace_id: 'ws-1',
     })
-  })
-
-  it('loads explorer previews and downloads without view-level file event listeners', async () => {
-    const { useFileExplorerStore } = await import('@/stores/fileExplorer')
-    const { useEditorStore } = await import('@/stores/editor')
-    service.connect()
-    socket.connect()
-    const store = useFileExplorerStore()
-    const path = '/workspace/a.pdf'
-    store.selectFile(path, 'ws-1')
-    const read = socket.emit.mock.calls.find(([event]) => event === 'frontend:files_read')![1]
-    const readIdentity = { workspace_id: 'ws-1', request_id: read.request_id, path }
-    socket.trigger('files:content_chunk', {
-      ...readIdentity,
-      index: 0,
-      total_chunks: 1,
-      content: 'YWJj',
-    })
-    socket.trigger('files:content_result', {
-      ...readIdentity,
-      content: '',
-      size: 10_000_000,
-      truncated: true,
-      chunked: true,
-      total_chunks: 1,
-      mime_type: 'application/pdf',
-    })
-    await flushPromises()
-    expect(useEditorStore().activeTab).toMatchObject({
-      rawBase64: 'YWJj',
-      size: 10_000_000,
-      truncated: true,
-      mediaType: 'pdf',
-      readOnly: true,
-      loading: false,
-    })
-
-    vi.useFakeTimers()
-    const save = vi.fn(() => 'blob:download')
-    vi.stubGlobal(
-      'URL',
-      class extends URL {
-        static createObjectURL = save
-        static revokeObjectURL = vi.fn()
-      },
-    )
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-    const pending = store.downloadFile('ws-1', path)
-    const download = socket.emit.mock.calls.find(
-      ([event]) => event === 'frontend:files_download',
-    )![1]
-    const downloadIdentity = { workspace_id: 'ws-1', request_id: download.request_id, path }
-    socket.trigger('files:download_chunk', {
-      ...downloadIdentity,
-      index: 0,
-      total_chunks: 1,
-      content: 'YWJj',
-    })
-    socket.trigger('files:download_result', {
-      ...downloadIdentity,
-      content: '',
-      filename: 'a.pdf',
-      is_archive: false,
-      size: 3,
-      chunked: true,
-      total_chunks: 1,
-    })
-    await pending
-    expect(save).toHaveBeenCalledWith(expect.objectContaining({ size: 3 }))
-    expect(click).toHaveBeenCalledOnce()
-    expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
-      workspace_id: 'ws-1',
-    })
-    vi.advanceTimersByTime(1000)
   })
 })

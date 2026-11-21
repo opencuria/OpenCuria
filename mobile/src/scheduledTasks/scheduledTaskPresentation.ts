@@ -1,6 +1,6 @@
 /**
  * How scheduled tasks read on a phone: an agenda grouped by the day of each
- * task's next run, state tiles, and run outcomes. Times are shown in the
+ * task's next run, state symbols, and run outcomes. Times are shown in the
  * device's zone; schedules keep their own zone for the rules.
  */
 import {
@@ -12,9 +12,7 @@ import {
   type ScheduledTaskRun,
 } from "@opencuria/chat-core/scheduledTasks";
 import type { NativeSymbol } from "../ui/controls.types";
-import type { NativeFormTone } from "../ui/NativeForm.types";
-import type { OpenCuriaTheme } from "../ui/theme";
-import { tileColor } from "../ui/tileColors";
+import type { NativeFormStatus, NativeFormTone } from "../ui/NativeForm.types";
 
 const DAY_MS = 86_400_000;
 
@@ -181,24 +179,39 @@ export function activeTaskCount(
   return tasks.filter((task) => taskState(task, now) !== "ended").length;
 }
 
-/** Leading tile of a row or header; scheduled rows lead with their time. */
-export function taskTile(
-  state: TaskState,
-  theme: OpenCuriaTheme,
-): { symbol: NativeSymbol; tint: string } {
+export interface TaskSymbol {
+  symbol: NativeSymbol;
+  /** Colors the plain symbol of a row; ink without it. */
+  symbolStatus?: NativeFormStatus;
+}
+
+/**
+ * Leading symbol of a row or the hero's symbol. Scheduled rows lead with
+ * their time instead; running ones add a status dot and a spinner.
+ */
+export function taskSymbol(state: TaskState): TaskSymbol {
   switch (state) {
     case "running":
-      return { symbol: "play.fill", tint: theme.primary };
+      return { symbol: "play.fill" };
     case "paused":
-      return { symbol: "pause.fill", tint: tileColor("gray", theme) };
+      return { symbol: "pause.fill", symbolStatus: "neutral" };
     case "ended":
-      return { symbol: "checkmark", tint: tileColor("gray", theme) };
+      return { symbol: "checkmark", symbolStatus: "neutral" };
     default:
-      return {
-        symbol: "calendar.badge.clock",
-        tint: tileColor("indigo", theme),
-      };
+      return { symbol: "calendar.badge.clock" };
   }
+}
+
+/**
+ * Status dot of a task: running, or a failed last run (only the editor
+ * knows the runs). Idle tasks carry none; their state is the symbol.
+ */
+export function taskStatus(
+  state: TaskState,
+  lastRunFailed = false,
+): NativeFormStatus | undefined {
+  if (state === "running") return "positive";
+  return lastRunFailed ? "critical" : undefined;
 }
 
 /** "Berlin" for "Europe/Berlin", "New York" for "America/New_York". */
@@ -228,7 +241,8 @@ export function taskStatusLine(
   now = new Date(),
 ): { text: string; tone: NativeFormTone } {
   const state = taskState(task, now);
-  if (state === "running") return { text: "Running now", tone: "accent" };
+  // The status dot carries the color.
+  if (state === "running") return { text: "Running now", tone: "muted" };
   if (state === "ended") return { text: "Ended", tone: "muted" };
   if (state === "paused") return { text: "Paused", tone: "muted" };
   const at = nextRun(task);
@@ -242,14 +256,14 @@ export interface RunPresentation {
   subtitle: string;
   subtitleTone: NativeFormTone;
   symbol: NativeSymbol;
-  tint: string;
+  /** Outcome color of the symbol; queued and running runs stay ink. */
+  symbolStatus?: NativeFormStatus;
   busy: boolean;
 }
 
-/** Outcome tile, label and time (or the reason it failed) of one run. */
+/** Outcome symbol, label and time (or the reason it failed) of one run. */
 export function runPresentation(
   run: ScheduledTaskRun,
-  theme: OpenCuriaTheme,
   now = new Date(),
 ): RunPresentation {
   const at = new Date(run.started_at ?? run.scheduled_for);
@@ -272,37 +286,30 @@ export function runPresentation(
         ? reason || problem
         : "";
   const manual = run.trigger === "manual" ? "Run now" : "";
-  const tile = runTile(run, theme);
   return {
     title: scheduleRunStatusLabel(run.status),
     subtitle: [when, detail || manual].filter(Boolean).join(" · "),
     subtitleTone: run.status === "error" ? "danger" : "muted",
-    ...tile,
+    ...runSymbol(run),
     busy: isScheduleRunActive(run),
   };
 }
 
-function runTile(
-  run: ScheduledTaskRun,
-  theme: OpenCuriaTheme,
-): { symbol: NativeSymbol; tint: string } {
+function runSymbol(run: ScheduledTaskRun): TaskSymbol {
   switch (run.status) {
     case "succeeded":
-      return {
-        symbol: "checkmark.circle.fill",
-        tint: tileColor("green", theme),
-      };
+      return { symbol: "checkmark.circle.fill", symbolStatus: "positive" };
     case "error":
-      return { symbol: "xmark.circle.fill", tint: tileColor("red", theme) };
+      return { symbol: "xmark.circle.fill", symbolStatus: "critical" };
     case "interrupted":
       return {
         symbol: "exclamationmark.triangle.fill",
-        tint: tileColor("orange", theme),
+        symbolStatus: "attention",
       };
     case "skipped":
-      return { symbol: "minus.circle.fill", tint: tileColor("gray", theme) };
+      return { symbol: "minus.circle.fill", symbolStatus: "neutral" };
     default:
-      return { symbol: "clock", tint: theme.primary };
+      return { symbol: "clock" };
   }
 }
 

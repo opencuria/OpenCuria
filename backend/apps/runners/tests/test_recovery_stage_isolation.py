@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from apps.licensing.services import WindowsLicenseService
 from apps.runners.deletion_repository import DeletionRepository
 from apps.runners.inventory_repository import InventoryRepository
 from apps.runners.operations import OperationRepository
@@ -25,6 +26,7 @@ def stages(monkeypatch):
         "capture": (CaptureService, "tick"),
         "recreate": (RecreateService, "tick"),
         "retention": (ImageRetentionService, "tick"),
+        "windows_licenses": (WindowsLicenseService, "release_deleted"),
         "inventory": (InventoryRepository, "refresh_candidates"),
         "inspection": (OperationRepository, "list_for_inspection"),
         "commands": (OperationRepository, "candidates"),
@@ -54,6 +56,7 @@ def stages(monkeypatch):
         "capture",
         "recreate",
         "retention",
+        "windows_licenses",
         "inventory",
         "inspection",
         "commands",

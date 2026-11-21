@@ -71,6 +71,20 @@ function renderComposer(
   };
 }
 
+/** The text the native field shows: plain runs and mention names. */
+function shownText(input: { props: { children?: unknown } }): string {
+  const collect = (node: unknown): string => {
+    if (typeof node === "string") return node;
+    if (Array.isArray(node)) return node.map(collect).join("");
+    if (node && typeof node === "object" && "props" in node)
+      return collect(
+        (node as { props: { children?: unknown } }).props.children,
+      );
+    return "";
+  };
+  return collect(input.props.children);
+}
+
 describe("ChatComposer", () => {
   it("keeps the same editor and layout through loading, unavailable and running states", () => {
     const { rerenderComposer } = renderComposer({ contextKey: "new" });
@@ -203,6 +217,51 @@ describe("ChatComposer", () => {
     );
   });
 
+  it("lets attachments leave with the text and gives them back when sending fails", async () => {
+    const photo = {
+      id: "photo",
+      uri: "file:///photo.jpg",
+      name: "photo.jpg",
+      kind: "image" as const,
+    };
+    let fail: (error: Error) => void = () => undefined;
+    const onSend = jest.fn(
+      () => new Promise<void>((_resolve, reject) => (fail = reject)),
+    );
+    function Host(): React.JSX.Element {
+      const [draft, setDraft] = React.useState("What is this?");
+      const [files, setFiles] = React.useState([photo]);
+      return (
+        <ThemeProvider>
+          <ChatComposer
+            draft={draft}
+            onDraftChange={setDraft}
+            attachments={files}
+            onAttachmentsChange={setFiles}
+            onSend={onSend}
+          />
+        </ThemeProvider>
+      );
+    }
+    render(<Host />);
+    expect(screen.getByText("photo.jpg")).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    expect(onSend).toHaveBeenCalledWith({
+      text: "What is this?",
+      skillIds: [],
+      attachments: [photo],
+    });
+    expect(screen.queryByText("photo.jpg")).toBeNull();
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe("");
+
+    await act(async () => fail(new Error("upload failed")));
+    expect(screen.getByText("photo.jpg")).toBeTruthy();
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
+      "What is this?",
+    );
+  });
+
   it("stops a busy run even when the composer is disabled and empty", async () => {
     const onStop = jest.fn().mockResolvedValue(undefined);
     renderComposer({ busy: true, disabled: true, onStop });
@@ -230,12 +289,42 @@ describe("ChatComposer", () => {
       "@file:/workspace/src/main.ts ",
       { start: 29, end: 29 },
     );
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe(
-      "@file:/workspace/src/main.ts ",
+    // The field shows the file by name; the draft keeps the token.
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
+      "main.ts ",
     );
+    expect(screen.getByText("main.ts")).toBeTruthy();
     expect(
       screen.getByTestId("chat-composer-input").props.selection,
     ).toBeUndefined();
+  });
+
+  it("edits around a mention by its name and deletes it whole", async () => {
+    const { onDraftChange } = renderComposer({
+      draft: "Read @file:/workspace/src/main.ts now",
+    });
+    const input = screen.getByTestId("chat-composer-input");
+    expect(shownText(input)).toBe("Read main.ts now");
+
+    // "R" became "Please r": the caret follows the edited range.
+    fireEvent.changeText(input, "Please read main.ts now");
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "Please read @file:/workspace/src/main.ts now",
+      { start: 8, end: 8 },
+    );
+
+    // Backspace at the end of the name removes the mention.
+    fireEvent(input, "selectionChange", {
+      nativeEvent: { selection: { start: 19, end: 19 } },
+    });
+    fireEvent.changeText(input, "Please read main.t now");
+    expect(onDraftChange).toHaveBeenLastCalledWith("Please read  now", {
+      start: 12,
+      end: 12,
+    });
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
+      "Please read  now",
+    );
   });
 
   it("uses native cursor updates for typing in the middle without pinning TextInput selection", () => {
@@ -248,7 +337,7 @@ describe("ChatComposer", () => {
     fireEvent.changeText(input, "aXb");
 
     expect(onDraftChange).toHaveBeenLastCalledWith("aXb", { start: 1, end: 1 });
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe("aXb");
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe("aXb");
     expect(
       screen.getByTestId("chat-composer-input").props.selection,
     ).toBeUndefined();
@@ -267,7 +356,7 @@ describe("ChatComposer", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chat-composer-error")).toBeTruthy(),
     );
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe(
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
       "keep this draft",
     );
     expect(onSend).toHaveBeenCalledWith({
@@ -279,6 +368,51 @@ describe("ChatComposer", () => {
       start: 15,
       end: 15,
     });
+  });
+
+  it("edits a sent prompt in the field below a banner that cancels it", async () => {
+    const { TextInput } = require("react-native");
+    // Both are shared mocks: an earlier test's frame may already have called
+    // them, so clear them and wait for the caret this edit places.
+    const focus = TextInput.prototype.focus as jest.Mock;
+    const setSelection = TextInput.prototype.setSelection as jest.Mock;
+    focus.mockClear();
+    setSelection.mockClear();
+    const onCancel = jest.fn();
+    const onSend = jest.fn().mockResolvedValue(undefined);
+    renderComposer({
+      draft: "Original prompt",
+      onSend,
+      editing: { id: "prompt", onCancel },
+    });
+
+    expect(screen.getByTestId("chat-composer-editing")).toHaveTextContent(
+      "Editing message",
+    );
+    // The keyboard opens with the caret after the prompt.
+    await waitFor(() => expect(setSelection).toHaveBeenLastCalledWith(15, 15));
+    expect(focus).toHaveBeenCalled();
+
+    fireEvent.changeText(
+      screen.getByTestId("chat-composer-input"),
+      "Original prompt, updated",
+    );
+    await act(async () => {
+      fireEvent.press(screen.getByTestId("chat-composer-send"));
+    });
+    expect(onSend).toHaveBeenCalledWith({
+      text: "Original prompt, updated",
+      skillIds: [],
+      attachments: [],
+    });
+
+    fireEvent.press(screen.getByRole("button", { name: "Cancel editing" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no editing banner for a new message", () => {
+    renderComposer({ draft: "Hello" });
+    expect(screen.queryByTestId("chat-composer-editing")).toBeNull();
   });
 
   it("clears the draft at once and closes the keyboard while a message is sent", async () => {
@@ -293,7 +427,7 @@ describe("ChatComposer", () => {
 
     fireEvent.press(screen.getByTestId("chat-composer-send"));
 
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe("");
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe("");
     expect(KeyboardController.dismiss).toHaveBeenCalledTimes(1);
     expect(onSend).toHaveBeenCalledWith({
       text: "ship it",
@@ -317,7 +451,7 @@ describe("ChatComposer", () => {
 
     const cleared = screen.getByTestId("chat-composer-input");
     expect(cleared).not.toBe(input);
-    expect(cleared.props.value).toBe("");
+    expect(shownText(cleared)).toBe("");
     await waitFor(() =>
       expect(screen.getByTestId("chat-composer-send")).toBeTruthy(),
     );
@@ -337,7 +471,7 @@ describe("ChatComposer", () => {
     fireEvent.press(await screen.findByRole("button", { name: "Add explore" }));
 
     expect(screen.getByTestId("chat-composer-input")).toBe(input);
-    expect(input.props.value).toBe("first\nsecond @agent:explore ");
+    expect(shownText(input)).toBe("first\nsecond @agent:explore ");
   });
 
   it("replaces the editor when the host resets a long draft", () => {
@@ -363,7 +497,7 @@ describe("ChatComposer", () => {
 
     const cleared = screen.getByTestId("chat-composer-input");
     expect(cleared).not.toBe(input);
-    expect(cleared.props.value).toBe("");
+    expect(shownText(cleared)).toBe("");
   });
 
   it("clears a confirmed draft without invalidating an in-flight native picker", async () => {
@@ -382,7 +516,7 @@ describe("ChatComposer", () => {
     render(<Host />);
     fireEvent.press(screen.getByTestId("chat-composer-send"));
     await waitFor(() =>
-      expect(screen.getByTestId("chat-composer-input").props.value).toBe(""),
+      expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(""),
     );
   });
 
@@ -427,5 +561,346 @@ describe("ChatComposer", () => {
 
     await waitFor(() => expect(onChoosePhotos).toHaveBeenCalledTimes(1));
     expect(onAttachmentsChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("ChatComposer steering and send later", () => {
+  /** A local date a few days ahead, inside the one-year scheduling window. */
+  const soon = new Date();
+  soon.setDate(soon.getDate() + 3);
+  soon.setHours(9, 0, 0, 0);
+  const soonDate = [
+    soon.getFullYear(),
+    String(soon.getMonth() + 1).padStart(2, "0"),
+    String(soon.getDate()).padStart(2, "0"),
+  ].join("-");
+  const scheduled = {
+    id: "later-1",
+    session_id: "session-1",
+    content: "Check the deploy",
+    send_at: soon.toISOString(),
+    status: "pending" as const,
+    created_at: new Date().toISOString(),
+  };
+
+  function queue(
+    overrides: Partial<
+      NonNullable<React.ComponentProps<typeof ChatComposer>["queue"]>
+    > = {},
+  ) {
+    return {
+      steers: [],
+      scheduled: [],
+      onWithdrawSteer: jest.fn(),
+      onSendNow: jest.fn(),
+      onReschedule: jest.fn(),
+      onEdit: jest.fn(),
+      onDelete: jest.fn(),
+      ...overrides,
+    };
+  }
+
+  it("steers with a draft while the agent works and keeps Stop at hand", async () => {
+    const onStop = jest.fn();
+    const { onSend, rerenderComposer } = renderComposer({
+      busy: true,
+      steering: true,
+      onStop,
+    });
+    expect(screen.getByTestId("chat-composer-stop")).toBeTruthy();
+    expect(screen.queryByTestId("chat-composer-send")).toBeNull();
+
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Use pnpm");
+    expect(screen.getByTestId("chat-composer-send")).toBeEnabled();
+    fireEvent.press(screen.getByTestId("chat-composer-stop"));
+    expect(onStop).toHaveBeenCalledTimes(1);
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Use pnpm" }),
+      ),
+    );
+
+    // A send that is still on its way cannot be followed up yet.
+    rerenderComposer({ busy: true, steering: false, onStop });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Again");
+    expect(screen.queryByTestId("chat-composer-send")).toBeNull();
+    expect(screen.getByTestId("chat-composer-stop")).toBeTruthy();
+  });
+
+  it("schedules the draft from the send button's long-press menu", async () => {
+    const onSchedule = jest.fn(async () => undefined);
+    const { onDraftChange, onSend } = renderComposer({ onSchedule });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Check CI");
+
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(screen.getByRole("button", { name: /^Tomorrow, / }));
+
+    await waitFor(() =>
+      expect(onSchedule).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Check CI" }),
+        expect.any(Date),
+      ),
+    );
+    const sendAt = (onSchedule.mock.calls[0] as unknown[])[1] as Date;
+    expect([sendAt.getHours(), sendAt.getMinutes()]).toEqual([9, 0]);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onDraftChange).toHaveBeenLastCalledWith("", { start: 0, end: 0 });
+  });
+
+  it("gives the draft back when scheduling fails", async () => {
+    const onSchedule = jest.fn(async () => {
+      throw new Error("offline");
+    });
+    renderComposer({ onSchedule });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Ship it");
+
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(screen.getByRole("button", { name: "In 1 hour" }));
+
+    expect(await screen.findByText(/could not be scheduled/i)).toBeTruthy();
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
+      "Ship it",
+    );
+  });
+
+  it("offers no send-later menu without a draft", () => {
+    renderComposer({ onSchedule: jest.fn() });
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    expect(screen.queryByRole("button", { name: "In 1 hour" })).toBeNull();
+  });
+
+  it("schedules at a custom date and time from native pickers", async () => {
+    const onSchedule = jest.fn(async () => undefined);
+    renderComposer({ onSchedule });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Report");
+
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(
+      screen.getByRole("button", { name: "Choose date & time…" }),
+    );
+    fireEvent.changeText(screen.getByTestId("send-later-date"), soonDate);
+    fireEvent.changeText(screen.getByTestId("send-later-time"), "07:45");
+    expect(screen.getByText(/^Sends /)).toBeTruthy();
+    fireEvent.press(screen.getByTestId("send-later-confirm"));
+
+    await waitFor(() =>
+      expect(onSchedule).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Report" }),
+        new Date(soon.getFullYear(), soon.getMonth(), soon.getDate(), 7, 45),
+      ),
+    );
+  });
+
+  it("refuses a past custom time", () => {
+    renderComposer({ onSchedule: jest.fn() });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Report");
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(
+      screen.getByRole("button", { name: "Choose date & time…" }),
+    );
+    fireEvent.changeText(screen.getByTestId("send-later-date"), "2001-03-04");
+    expect(screen.getByText("Choose a time in the future.")).toBeTruthy();
+    expect(screen.getByTestId("send-later-confirm")).toBeDisabled();
+  });
+
+  it("reschedules a scheduled message from its menu", async () => {
+    const outgoing = queue({ scheduled: [scheduled] });
+    renderComposer({ queue: outgoing });
+
+    fireEvent.press(screen.getByTestId("composer-scheduled-menu-later-1"));
+    fireEvent.press(screen.getByRole("button", { name: "Change time" }));
+    fireEvent.changeText(screen.getByTestId("send-later-time"), "10:30");
+    fireEvent.press(screen.getByTestId("send-later-confirm"));
+
+    await waitFor(() =>
+      expect(outgoing.onReschedule).toHaveBeenCalledWith(
+        "later-1",
+        expect.any(Date),
+      ),
+    );
+    const sendAt = (
+      outgoing.onReschedule.mock.calls[0] as unknown[]
+    )[1] as Date;
+    expect([sendAt.getHours(), sendAt.getMinutes()]).toEqual([10, 30]);
+  });
+});
+
+describe("ChatComposer dictation", () => {
+  function voice(
+    overrides: Partial<
+      NonNullable<React.ComponentProps<typeof ChatComposer>["voice"]>
+    > = {},
+  ) {
+    const receivers: Array<(text: string, send: boolean) => void> = [];
+    const value = {
+      recording: null,
+      clips: [],
+      notice: null,
+      start: jest.fn(),
+      finish: jest.fn(),
+      cancel: jest.fn(),
+      retry: jest.fn(),
+      discard: jest.fn(),
+      dismissNotice: jest.fn(),
+      receive: jest.fn((receiver: (text: string, send: boolean) => void) => {
+        receivers.push(receiver);
+        return () => receivers.splice(receivers.indexOf(receiver), 1);
+      }),
+      ...overrides,
+    };
+    return { value, receivers };
+  }
+
+  it("offers the microphone where Send is until something is written", () => {
+    const { value } = voice();
+    renderComposer({ voice: value, canSend: false });
+    // Offline the message cannot be sent, but it can be dictated.
+    expect(screen.queryByTestId("chat-composer-send")).toBeNull();
+    fireEvent.press(screen.getByTestId("chat-composer-voice"));
+    expect(value.start).toHaveBeenCalledTimes(1);
+
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Hi");
+    expect(screen.queryByTestId("chat-composer-voice")).toBeNull();
+    expect(screen.getByTestId("chat-composer-send")).toBeTruthy();
+  });
+
+  it("dictates a steer beside Stop while the agent works", () => {
+    const { value } = voice();
+    renderComposer({
+      voice: value,
+      busy: true,
+      steering: true,
+      onStop: jest.fn(),
+    });
+    expect(screen.getByTestId("chat-composer-stop")).toBeTruthy();
+    expect(screen.getByTestId("chat-composer-voice")).toBeTruthy();
+  });
+
+  it("replaces the toolbar with discard, time, waveform, stop and send while recording", () => {
+    const { value } = voice({
+      recording: { phase: "recording", elapsedMs: 65_000, levels: [0.2, 1] },
+    });
+    renderComposer({ voice: value });
+    expect(screen.queryByTestId("chat-composer-voice")).toBeNull();
+    expect(screen.queryByTestId("chat-composer-settings")).toBeNull();
+    expect(screen.getByTestId("voice-elapsed")).toHaveTextContent("1:05");
+    expect(
+      screen.getByTestId("voice-waveform", { includeHiddenElements: true }),
+    ).toBeTruthy();
+    fireEvent.press(screen.getByTestId("voice-stop"));
+    fireEvent.press(screen.getByTestId("voice-send"));
+    fireEvent.press(screen.getByTestId("voice-cancel"));
+    expect(value.finish.mock.calls).toEqual([[false], [true]]);
+    expect(value.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the microphone before stop and send work", () => {
+    const { value } = voice({
+      recording: { phase: "starting", elapsedMs: 0, levels: [] },
+    });
+    renderComposer({ voice: value });
+    fireEvent.press(screen.getByTestId("voice-send"));
+    expect(value.finish).not.toHaveBeenCalled();
+    fireEvent.press(screen.getByTestId("voice-cancel"));
+    expect(value.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds transcripts to the end of the draft and sends when asked", async () => {
+    const { value, receivers } = voice();
+    const { onDraftChange, onSend } = renderComposer({
+      voice: value,
+      draft: "Look at this:",
+    });
+    expect(receivers).toHaveLength(1);
+    act(() => receivers[0]!("The login fails.", false));
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "Look at this:\nThe login fails.",
+      { start: 30, end: 30 },
+    );
+    expect(onSend).not.toHaveBeenCalled();
+
+    act(() => receivers[0]!("Please fix it.", true));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "Look at this:\nThe login fails.\nPlease fix it.",
+        }),
+      ),
+    );
+  });
+
+  it("shows saved recordings with their state and lets them be retried", () => {
+    const { value } = voice({
+      clips: [
+        {
+          id: "a",
+          durationMs: 42_000,
+          status: {
+            kind: "waiting",
+            failure: { kind: "offline", message: "No connection." },
+            retryAt: null,
+          },
+        },
+        {
+          id: "b",
+          durationMs: 3_000,
+          status: {
+            kind: "failed",
+            failure: { kind: "rejected", message: "Select a speech provider" },
+          },
+        },
+      ],
+    });
+    renderComposer({ voice: value });
+    expect(screen.getByTestId("voice-clip-a")).toHaveTextContent(
+      /Recording · 0:42/,
+    );
+    expect(screen.getByTestId("voice-clip-status-a")).toHaveTextContent(
+      "Saved. Transcribes when online.",
+    );
+    expect(screen.getByTestId("voice-clip-status-b")).toHaveTextContent(
+      "Select a speech provider",
+    );
+    fireEvent.press(screen.getByTestId("voice-clip-retry-b"));
+    expect(value.retry).toHaveBeenCalledWith("b");
+  });
+
+  it("asks before discarding a saved recording", () => {
+    const { Alert } = require("react-native");
+    const alert = jest
+      .spyOn(Alert, "alert")
+      .mockImplementation(() => undefined);
+    const { value } = voice({
+      clips: [{ id: "a", durationMs: 1_000, status: { kind: "transcribing" } }],
+    });
+    renderComposer({ voice: value });
+    expect(screen.queryByTestId("voice-clip-retry-a")).toBeNull();
+    fireEvent.press(screen.getByTestId("voice-clip-discard-a"));
+    const buttons = alert.mock.calls[0]![2] as Array<{
+      text: string;
+      onPress?: () => void;
+    }>;
+    expect(value.discard).not.toHaveBeenCalled();
+    buttons.find((button) => button.text === "Discard")!.onPress!();
+    expect(value.discard).toHaveBeenCalledWith("a");
+    alert.mockRestore();
+  });
+
+  it("shows dictation notices with their action", () => {
+    const onPress = jest.fn();
+    const { value } = voice({
+      notice: {
+        tone: "error",
+        message: "Microphone access was denied.",
+        action: { label: "Open Settings", onPress },
+      },
+    });
+    renderComposer({ voice: value });
+    expect(screen.getByTestId("chat-composer-voice-notice")).toHaveTextContent(
+      /Microphone access was denied/,
+    );
+    fireEvent.press(screen.getByText("Open Settings"));
+    expect(onPress).toHaveBeenCalledTimes(1);
   });
 });

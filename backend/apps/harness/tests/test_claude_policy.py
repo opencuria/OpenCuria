@@ -331,3 +331,82 @@ def test_workflow_label_prefers_name_then_script_path_then_meta(
     from apps.harness.engines.claude.policy import workflow_label
 
     assert workflow_label(arguments) == label
+
+
+def _windows_decision(
+    source_name: str, arguments: dict, rules: dict, guest=None
+) -> tuple[str, str]:
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    decision, _event_tool, action, _title = decide_tool(
+        source_name=source_name,
+        arguments=arguments,
+        tools=default_tool_registry(),
+        agent=get_agent("build"),
+        evaluator=PermissionEvaluator(global_rules=rules),
+        mode="build",
+        depth=0,
+        max_depth=2,
+        cwd="/workspace",
+        guest=guest or WINDOWS_GUEST,
+    )
+    return decision, action
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "C:\\workspace\\secret\\key.pem",
+        "c:/Workspace/secret/key.pem",
+        "/c/workspace/secret/key.pem",
+        "C:\\workspace\\src\\..\\secret\\key.pem",
+    ],
+)
+def test_windows_native_paths_match_workspace_rules(spelling: str) -> None:
+    """Every spelling the Windows CLI may report hits the same path rule."""
+    rules = {"*": "allow", "read": {"*": "allow", "/workspace/secret/*": "deny"}}
+    decision, action = _windows_decision("Read", {"file_path": spelling}, rules)
+    assert (decision, action) == ("deny", "/workspace/secret/key.pem")
+
+
+def test_windows_paths_outside_the_workspace_never_match_workspace_rules() -> None:
+    """A native path outside C:\\workspace keeps its spelling (fail closed)."""
+    rules = {"*": "allow", "read": {"*": "ask", "/workspace/*": "allow"}}
+    decision, action = _windows_decision(
+        "Read", {"file_path": "C:\\Users\\root\\.ssh\\id_rsa"}, rules
+    )
+    assert (decision, action) == ("ask", "C:\\Users\\root\\.ssh\\id_rsa")
+    decision, action = _windows_decision(
+        "Read", {"file_path": "C:\\workspace\\notes.txt"}, rules
+    )
+    assert (decision, action) == ("allow", "/workspace/notes.txt")
+
+
+def test_windows_bash_external_paths_apply_external_directory_rules() -> None:
+    """Native shell paths outside C:\\workspace trigger external_directory."""
+    rules = {"*": "allow", "external_directory": "deny"}
+    command = {"command": 'type "C:\\Users\\root\\secret.txt"'}
+    assert _windows_decision("Bash", command, rules)[0] == "deny"
+    assert _windows_decision("Bash", {"command": "ls /c/workspace"}, rules)[0] == (
+        "allow"
+    )
+
+
+def test_linux_guest_keeps_the_existing_canonical_paths() -> None:
+    """Linux guests canonicalize exactly as before."""
+    from apps.harness.access.guest import LINUX_GUEST
+
+    rules = {"*": "allow"}
+    _decision, action = _windows_decision(
+        "Read", {"file_path": "C:\\workspace\\a"}, rules, LINUX_GUEST
+    )
+    assert action == "/workspace/C:\\workspace\\a"
+    assert (
+        _windows_decision(
+            "Bash",
+            {"command": "ls /c/workspace"},
+            {**rules, "external_directory": "deny"},
+            LINUX_GUEST,
+        )[0]
+        == "deny"
+    )

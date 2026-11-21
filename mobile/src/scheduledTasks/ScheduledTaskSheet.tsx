@@ -12,15 +12,13 @@ import type {
   Workspace,
 } from "@opencuria/client";
 import { ModelSheet, modelSheetEngines } from "../components/ModelSheet";
-import { NativeForm } from "../ui/NativeForm";
+import { errorRows } from "../ui/formStates";
 import type {
   NativeFormQuickAction,
   NativeFormRow,
   NativeFormSection,
 } from "../ui/NativeForm.types";
 import { NativeModal } from "../ui/primitives";
-import { useTheme } from "../ui/theme";
-import { tileColor } from "../ui/tileColors";
 import { showToast } from "../ui/toast";
 import { errorText } from "../workspaces/workspaceOperations";
 import {
@@ -49,8 +47,9 @@ import {
   relativeRunTime,
   runPresentation,
   taskState,
+  taskStatus,
   taskStatusLine,
-  taskTile,
+  taskSymbol,
 } from "./scheduledTaskPresentation";
 import { useNow } from "./useScheduledTasks";
 
@@ -157,7 +156,6 @@ function TaskSheet({
   onDeleted,
   onOpenChat,
 }: ScheduledTaskSheetProps): React.JSX.Element {
-  const { theme } = useTheme();
   const now = useNow();
   const available = workspaces.filter(
     (workspace) => !HIDDEN_WORKSPACES.has(workspace.status),
@@ -308,6 +306,7 @@ function TaskSheet({
           id: "task-no-workspace",
           text: "Create a workspace before scheduling a task.",
           tone: "danger",
+          symbol: "exclamationmark.triangle",
         },
       ];
 
@@ -416,7 +415,6 @@ function TaskSheet({
 
   function headerSection(): NativeFormSection {
     const current = task!;
-    const tile = taskTile(state, theme);
     const status = taskStatusLine(current, now);
     const last = latestSettledRun(runs.runs);
     const failed = last?.status === "error";
@@ -462,9 +460,8 @@ function TaskSheet({
           title: current.name,
           subtitle: failed ? `Last run failed · ${status.text}` : status.text,
           subtitleTone: failed ? "danger" : status.tone,
-          symbol: tile.symbol,
-          tint:
-            failed && state !== "running" ? tileColor("red", theme) : tile.tint,
+          status: taskStatus(state, failed),
+          symbol: taskSymbol(state).symbol,
           busy: state === "running",
           actions,
           onAction: (id) => {
@@ -505,24 +502,21 @@ function TaskSheet({
     const shown = allRuns ? runs.runs : runs.runs.slice(0, VISIBLE_RUNS);
     const rows: NativeFormRow[] =
       !runs.runs.length && runs.loading
-        ? [{ kind: "note", id: "runs-loading", text: "Loading runs…" }]
+        ? [
+            {
+              kind: "note",
+              id: "runs-loading",
+              text: "Loading runs…",
+              busy: true,
+            },
+          ]
         : !runs.runs.length && runs.error
-          ? [
-              {
-                kind: "note",
-                id: "runs-error",
-                text: runs.error,
-                tone: "danger",
-              },
-              {
-                kind: "button",
-                id: "runs-retry",
-                title: "Retry",
-                symbol: "arrow.counterclockwise",
-                busy: runs.loading,
-                onPress: () => void runs.reload(),
-              },
-            ]
+          ? errorRows(
+              "runs",
+              runs.error,
+              () => void runs.reload(),
+              runs.loading,
+            )
           : !runs.runs.length
             ? [
                 {
@@ -533,7 +527,7 @@ function TaskSheet({
               ]
             : [
                 ...shown.map((run): NativeFormRow => {
-                  const view = runPresentation(run, theme, now);
+                  const view = runPresentation(run, now);
                   const sessionId = run.session_id;
                   return {
                     kind: "item",
@@ -542,7 +536,7 @@ function TaskSheet({
                     subtitle: view.subtitle,
                     subtitleTone: view.subtitleTone,
                     symbol: view.symbol,
-                    tint: view.tint,
+                    symbolStatus: view.symbolStatus,
                     busy: view.busy,
                     onPress: sessionId
                       ? () =>
@@ -598,7 +592,6 @@ function TaskSheet({
       visible
       onClose={close}
       title={task ? "Scheduled task" : "New scheduled task"}
-      scrollable={false}
       swipeToDismiss={!dirty}
       primaryAction={{
         title: task ? "Save" : "Schedule",
@@ -609,9 +602,9 @@ function TaskSheet({
         busy: saving,
         testID: "scheduled-task-save",
       }}
+      form={{ sections }}
       testID="scheduled-task-sheet"
     >
-      <NativeForm sections={sections} />
       <ModelSheet
         visible={modelSheet}
         onClose={() => setModelSheet(false)}

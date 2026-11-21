@@ -89,17 +89,23 @@ jest.mock("../ToolDetailSheet", () => {
   };
 });
 
+/** What `client.files.readBytes` returns for a small file. */
+function textBytes(text: string) {
+  const bytes = new TextEncoder().encode(text);
+  return { link: { size: bytes.length }, bytes, truncated: false };
+}
+
 function setup(
   file: FileViewerTarget | null = "/workspace/index.ts",
   connected = true,
 ) {
-  const readFile = jest.fn().mockResolvedValue({
-    content: btoa("const answer = 42;"),
-    size: 18,
-  });
-  const client = { files: { readFile } } as unknown as OpenCuriaClient;
+  const readBytes = jest
+    .fn()
+    .mockResolvedValue(textBytes("const answer = 42;"));
+  const client = { files: { readBytes } } as unknown as OpenCuriaClient;
   const release = jest.fn();
   const media = {
+    describe: jest.fn().mockResolvedValue({ size: 1024, thumbnailUrl: "" }),
     resolvePinned: jest
       .fn()
       .mockResolvedValue({ uri: "file:///cached-media", release }),
@@ -129,7 +135,7 @@ function setup(
   return {
     ...tree,
     element,
-    readFile,
+    readBytes,
     media,
     release,
     onInsertIntoChat,
@@ -143,16 +149,15 @@ beforeEach(() => {
 });
 
 it("opens an explorer file in the same viewer and returns to the file tree", async () => {
-  const readFile = jest.fn().mockResolvedValue({
-    content: btoa("const answer = 42;"),
-    size: 18,
-  });
+  const readBytes = jest
+    .fn()
+    .mockResolvedValue(textBytes("const answer = 42;"));
   const client = {
     files: {
       listFiles: jest.fn().mockResolvedValue({
         entries: [{ path: "/workspace/index.ts", type: "file" }],
       }),
-      readFile,
+      readBytes,
     },
   } as unknown as OpenCuriaClient;
   render(
@@ -169,24 +174,20 @@ it("opens an explorer file in the same viewer and returns to the file tree", asy
   );
   fireEvent.press(await screen.findByRole("button", { name: "index.ts" }));
   await screen.findByTestId("file-source");
-  expect(readFile).toHaveBeenCalledWith(
-    "ws",
-    "/workspace/index.ts",
-    1024 * 1024,
-  );
+  expect(readBytes).toHaveBeenCalledWith("ws", "/workspace/index.ts", {
+    maxBytes: 1024 * 1024,
+  });
   fireEvent.press(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByTestId("file-viewer")).toBeNull();
   expect(screen.getByRole("button", { name: "index.ts" })).toBeTruthy();
 });
 
 it("shows TypeScript source and offers the explorer's copy and mention actions", async () => {
-  const { readFile, media, onInsertIntoChat, onClose } = setup();
+  const { readBytes, media, onInsertIntoChat, onClose } = setup();
   await screen.findByTestId("file-source");
-  expect(readFile).toHaveBeenCalledWith(
-    "ws",
-    "/workspace/index.ts",
-    1024 * 1024,
-  );
+  expect(readBytes).toHaveBeenCalledWith("ws", "/workspace/index.ts", {
+    maxBytes: 1024 * 1024,
+  });
   expect(media.resolvePinned).not.toHaveBeenCalled();
   fireEvent.press(screen.getByRole("button", { name: "Copy contents" }));
   expect(Clipboard.setStringAsync).toHaveBeenCalledWith("const answer = 42;");
@@ -194,6 +195,36 @@ it("shows TypeScript source and offers the explorer's copy and mention actions",
   expect(onInsertIntoChat).toHaveBeenCalledWith("@file:/workspace/index.ts ");
   fireEvent.press(screen.getByRole("button", { name: "Close" }));
   expect(onClose).toHaveBeenCalled();
+});
+
+it("streams workspace videos from their link", async () => {
+  const { rerender, element, media } = setup(null);
+  media.resolvePinned.mockResolvedValueOnce({
+    uri: "https://curia.test/content/clip.mp4",
+    release: jest.fn(),
+  });
+  rerender(element("/workspace/clip.mp4"));
+  expect((await screen.findByTestId("file-video")).props.player.source).toBe(
+    "https://curia.test/content/clip.mp4",
+  );
+});
+
+it("shows large pictures of a Markdown file as previews that load on tap", async () => {
+  const { rerender, element, readBytes, media } = setup(null);
+  readBytes.mockResolvedValueOnce(textBytes("![chart](/workspace/chart.png)"));
+  media.describe.mockResolvedValue({
+    size: 6 * 1024 * 1024,
+    thumbnailUrl: "https://curia.test/thumbnail/chart.png",
+  });
+  rerender(element("/workspace/notes.md"));
+  fireEvent.press(
+    await screen.findByRole("button", { name: "Load image chart, 6.0 MB" }),
+  );
+  expect(
+    await screen.findByRole("button", { name: "Open image preview chart" }),
+  ).toBeTruthy();
+  expect(media.describe).toHaveBeenCalledWith("/workspace/chart.png");
+  expect(media.resolvePinned).toHaveBeenCalledTimes(1);
 });
 
 it("renders Markdown and switches to source", async () => {
@@ -235,8 +266,8 @@ it("releases a media request that finishes after closing", async () => {
 });
 
 it("shows permission errors in the viewer and can retry", async () => {
-  const { rerender, element, readFile } = setup(null);
-  readFile.mockResolvedValueOnce({ error: "Permission denied" });
+  const { rerender, element, readBytes } = setup(null);
+  readBytes.mockRejectedValueOnce(new Error("Permission denied"));
   rerender(element("/workspace/private.txt"));
   await screen.findByText("Permission denied");
   expect(screen.queryByTestId("file-source")).toBeNull();
@@ -245,8 +276,8 @@ it("shows permission errors in the viewer and can retry", async () => {
 });
 
 it("offers sharing for binary files without displaying them as text", async () => {
-  const { rerender, element, readFile, media } = setup(null);
-  readFile.mockResolvedValueOnce({ content: btoa("PK\0"), size: 3 });
+  const { rerender, element, readBytes, media } = setup(null);
+  readBytes.mockResolvedValueOnce(textBytes("PK\0"));
   media.openFile.mockResolvedValueOnce({
     uri: "file:///download",
     mimeType: "application/zip",
@@ -266,10 +297,10 @@ it("offers sharing for binary files without displaying them as text", async () =
 });
 
 it("shows workspace PDFs in the native document view and shares the same file", async () => {
-  const { readFile, media } = setup("/workspace/docs/report.pdf");
+  const { readBytes, media } = setup("/workspace/docs/report.pdf");
   await screen.findByLabelText("report.pdf file:///download");
   expect(media.openFile).toHaveBeenCalledWith("/workspace/docs/report.pdf");
-  expect(readFile).not.toHaveBeenCalled();
+  expect(readBytes).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Word wrap" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Copy contents" })).toBeNull();
   fireEvent.press(screen.getByRole("button", { name: "Share" }));
@@ -339,10 +370,10 @@ it("opens inline image attachments in the same viewer without workspace-path act
     mime: "image/png",
     filename: "generated.png",
   };
-  const { media, readFile } = setup(attachment);
+  const { media, readBytes } = setup(attachment);
   await screen.findByLabelText("generated.png");
   expect(media.saveAttachment).toHaveBeenCalledWith(attachment.uri);
-  expect(readFile).not.toHaveBeenCalled();
+  expect(readBytes).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Copy path" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Mention in chat" })).toBeNull();
 });

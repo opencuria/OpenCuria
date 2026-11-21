@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -23,6 +24,7 @@ from ...access.base import (
     WorkspaceAccessor,
     sanitize_exec_workdir,
 )
+from ...access.guest import GuestPlatform, guest_of
 from ...agents.definitions import AgentDefinition, get_agent
 from ...constants import DEFAULT_MAX_DEPTH
 from ...media.context import build_user_content, mcp_content_blocks
@@ -77,6 +79,25 @@ EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
 BindingCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 ChildEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 OwnerCallback = Callable[[dict[str, str], str], Awaitable[None]]
+
+
+def claude_project_key(cwd: str, guest: GuestPlatform) -> str:
+    """Return the project key the guest's Claude CLI derives from its cwd.
+
+    The CLI keys transcripts by its own realpath cwd. On Linux that is the
+    POSIX cwd, resolved like the SDK does. A native Windows CLI runs in
+    ``C:\\workspace`` (``C--workspace``); the host cannot resolve that path,
+    so the SDK's sanitizer is applied to the NFC-normalized native spelling.
+    """
+    try:
+        from claude_agent_sdk import project_key_for_directory
+        from claude_agent_sdk._internal.sessions import _sanitize_path
+    except ImportError as exc:
+        raise RuntimeError("claude-agent-sdk is not installed") from exc
+    native = guest.to_native_path(cwd)
+    if native == cwd:
+        return project_key_for_directory(cwd)
+    return _sanitize_path(unicodedata.normalize("NFC", native))
 
 
 class ClaudeEngine:
@@ -269,7 +290,10 @@ class ClaudeEngine:
         if not isinstance(result, dict) or result.get("ok") is not True:
             raise RuntimeError("Claude Code runtime provisioning failed")
         path = str(result.get("path") or "")
-        if path != f"/opt/opencuria/runtimes/claude-agent/{CLI_VERSION}/claude":
+        expected = guest_of(self.accessor).artifact_executable(
+            f"/opt/opencuria/runtimes/claude-agent/{CLI_VERSION}", "claude"
+        )
+        if path != expected:
             raise RuntimeError("Runner returned an invalid Claude Code runtime path")
         return path
 
@@ -717,7 +741,7 @@ class ClaudeEngine:
             schemas = self._bridge_schemas_for_sdk(
                 self._schemas(child, self._mode, depth, options.max_depth)
             )
-            system = opencuria_context(child)
+            system = opencuria_context(child, guest_of(self.accessor))
             if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
                 raise ValueError("Claude child prompt exceeds the managed size limit")
             definitions[child.name] = SdkAgentDefinition(
@@ -1456,11 +1480,7 @@ class ClaudeEngine:
         self._mode = mode
         self._model = resolve_claude_sdk_model(model)
         self._cwd = sanitize_exec_workdir(options.cwd or HARNESS_WORKSPACE_ROOT)
-        try:
-            from claude_agent_sdk import project_key_for_directory
-        except ImportError as exc:
-            raise RuntimeError("claude-agent-sdk is not installed") from exc
-        self._project_key = project_key_for_directory(self._cwd)
+        self._project_key = claude_project_key(self._cwd, guest_of(self.accessor))
         if not re.fullmatch(r"[A-Za-z0-9-]{1,255}", self._project_key):
             raise ValueError("Claude SDK produced an unsafe project key")
         bind_project_key = getattr(self.session_store, "bind_project_key", None)
@@ -1532,7 +1552,9 @@ class ClaudeEngine:
         self._managed_skill_names = set(skill_names)
         if agent.name == "explore":
             self._managed_skill_names.clear()
-        composed = ComposedPrompt(system=opencuria_context(agent))
+        composed = ComposedPrompt(
+            system=opencuria_context(agent, guest_of(self.accessor))
+        )
         system = composed.system
         if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
             raise ValueError(

@@ -50,7 +50,6 @@ export function ToolDetailSheet({
           title={title}
           subtitle={subtitle}
           onClose={onClose}
-          closePlacement="leading"
           actions={actions}
           onAction={onAction}
         >

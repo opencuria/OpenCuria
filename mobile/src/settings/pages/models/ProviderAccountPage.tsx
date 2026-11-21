@@ -17,6 +17,7 @@ import type {
 } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { PROVIDER_ACCOUNTS } from "./catalog";
@@ -474,27 +475,33 @@ export function ProviderAccountPage({
                 rows: credentialRows(provider.id, form, account, edit),
               },
             ]),
+        ...(account?.can_manage && isAdmin && account.scope === "organization"
+          ? [
+              {
+                id: "sharing",
+                rows: [
+                  {
+                    kind: "button" as const,
+                    id: "unshare",
+                    title: "Unshare",
+                    symbol: "person" as const,
+                    busy: busy === "unshare",
+                    disabled: Boolean(busy),
+                    onPress: () => {
+                      const body = payload();
+                      if (body) confirmUnshare(body);
+                    },
+                  },
+                ],
+              },
+            ]
+          : []),
+        // Destructive actions stand alone, last.
         ...(account && account.can_manage
           ? [
               {
                 id: "danger",
                 rows: [
-                  ...(isAdmin && account.scope === "organization"
-                    ? [
-                        {
-                          kind: "button" as const,
-                          id: "unshare",
-                          title: "Unshare",
-                          symbol: "person" as const,
-                          busy: busy === "unshare",
-                          disabled: Boolean(busy),
-                          onPress: () => {
-                            const body = payload();
-                            if (body) confirmUnshare(body);
-                          },
-                        },
-                      ]
-                    : []),
                   {
                     kind: "button" as const,
                     id: "delete",
@@ -517,13 +524,15 @@ export function ProviderAccountPage({
       title={account ? account.label : `New ${provider.name} account`}
       sections={sections}
       loading={!form && !accounts.data && !accounts.error}
-      empty={{
-        title: "Account unavailable",
-        description: accounts.error ?? "This account no longer exists.",
-        symbol: "exclamationmark.triangle.fill",
-      }}
+      empty={
+        (form ? undefined : loadFailure("account", accounts)) ?? {
+          title: "Account unavailable",
+          description: "This account no longer exists.",
+          symbol: "exclamationmark.triangle",
+        }
+      }
       primaryAction={
-        manageable && !(chatgpt && !account)
+        form && manageable && !(chatgpt && !account)
           ? {
               title: account ? "Save" : "Add",
               onPress: save,

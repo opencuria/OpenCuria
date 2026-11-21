@@ -8,11 +8,31 @@ from typing import Literal
 
 ProcessProfile = Literal["agent", "helper"]
 
-TOKEN_PROBE_CODE = """import json
-boot = open('/proc/sys/kernel/random/boot_id').read().strip()
-start = open('/proc/1/stat').read().rsplit(')', 1)[1].split()[19]
-print(json.dumps({'boot_id': boot, 'init_starttime': start}))
+#: Guest incarnation evidence, shared by the probe and the supervisor. Linux
+#: guests: kernel boot id and init's start time. Windows guests (MSYS2 Python):
+#: the bootstrap's per-seed instance id and the kernel boot counter, so a reboot,
+#: a reset or a clone always yields a different token.
+GUEST_TOKEN_CODE = r"""
+def guest_token():
+    try:
+        boot = open('/proc/sys/kernel/random/boot_id').read().strip()
+        start = open('/proc/1/stat').read().rsplit(')', 1)[1].split()[19]
+        return {'boot_id': boot, 'init_starttime': start}
+    except FileNotFoundError:
+        pass
+    key = ('/proc/registry/HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Control/'
+           'Session Manager/Memory Management/PrefetchParameters/BootId')
+    count = int.from_bytes(open(key, 'rb').read()[:4], 'little')
+    instance = open('/c/ProgramData/opencuria/instance-id').read().strip()
+    return {'boot_id': 'windows-%s-%d' % (instance[:64], count),
+            'init_starttime': str(count)}
 """
+
+TOKEN_PROBE_CODE = (
+    "import json\n"
+    + GUEST_TOKEN_CODE
+    + "print(json.dumps(guest_token()))\n"
+)
 
 ISOLATED_AGENT_PATH = "/usr/local/bin:/usr/bin:/bin"
 ISOLATED_AGENT_CONFIG_ROOT = "/workspace/.opencuria/harness/claude"
@@ -21,6 +41,23 @@ ISOLATED_CODEX_PATH = (
     "/opt/opencuria/runtimes/codex-agent/0.166.0/codex-path:" + ISOLATED_AGENT_PATH
 )
 ISOLATED_AGENT_ENV_MAX_SIZE = 256 * 1024
+#: Appended to the isolated agent PATH inside Windows guests (MSYS2 Python).
+WINDOWS_AGENT_PATH = (
+    ":/c/Windows/System32:/c/Windows:/c/Windows/System32/Wbem"
+    ":/c/Windows/System32/WindowsPowerShell/v1.0"
+)
+#: Machine-wide Windows variables an isolated agent keeps (never secrets).
+#: Without them native programs misbehave, e.g. the shell creates
+#: ``%SystemDrive%\ProgramData`` literally below the working directory.
+WINDOWS_SYSTEM_ENV = (
+    "SYSTEMDRIVE", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "OS",
+    "PROGRAMDATA", "ALLUSERSPROFILE", "PUBLIC", "PROGRAMFILES",
+    "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432", "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION",
+    "NUMBER_OF_PROCESSORS", "COMPUTERNAME", "USERNAME", "USERDOMAIN",
+    "TEMP", "TMP",
+)
 _AGENT_DESKTOP_ENV = {"DISPLAY": ":1", "XAUTHORITY": "/root/.Xauthority"}
 _AGENT_AUTH_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 _AGENT_FIXED_ENV = {
@@ -244,6 +281,10 @@ def _isolated_agent_env(
 # stdin. Values never appear in argv, durable control JSON, or logs.
 MANAGED_CODE = r"""
 import fcntl, json, os, re, shutil, signal, subprocess, sys, time
+""" + GUEST_TOKEN_CODE + f"""
+WINDOWS_AGENT_PATH = {WINDOWS_AGENT_PATH!r}
+WINDOWS_SYSTEM_ENV = {WINDOWS_SYSTEM_ENV!r}
+""" + r"""
 path, action = sys.argv[1:3]
 os.umask(0o077)
 os.makedirs(path, mode=0o700, exist_ok=True)
@@ -274,12 +315,12 @@ def cleanup_home(identity):
             re.fullmatch(r'/tmp/opencuria-agent-home-[0-9a-f]{32}', home) and
             os.path.isdir(home) and not os.path.islink(home)):
         shutil.rmtree(home)
-boot = open('/proc/sys/kernel/random/boot_id').read().strip()
+token = guest_token()
+boot = token['boot_id']
 lock = open(path + '/lock', 'a')
 fcntl.flock(lock, fcntl.LOCK_EX)
 if action == 'start':
     config = json.loads(sys.argv[3])
-    token = {'boot_id': boot, 'init_starttime': stat(1)['starttime']}
     if config.get('expected_token') != token:
         sys.exit(125)
     if os.path.exists(path + '/closed') or os.path.exists(path + '/identity'):
@@ -400,6 +441,23 @@ if action == 'start':
         if os.path.islink(home) or not os.path.isdir(home): sys.exit(125)
         os.chmod(home, 0o700)
         child_env = {'PATH': expected_path, 'HOME': home}
+        if sys.platform in ('cygwin', 'msys'):
+            # Windows guests: native agents also need the system directories
+            # (PowerShell, cmd) and machine variables, and Claude Code runs its
+            # Bash tool in MSYS2. The isolated home is their user profile, as
+            # HOME is on Linux guests.
+            child_env['PATH'] += WINDOWS_AGENT_PATH
+            system = {k.upper(): v for k, v in os.environ.items()}
+            child_env.update({k: system[k] for k in WINDOWS_SYSTEM_ENV if k in system})
+            profile_dir = subprocess.run(['/usr/bin/cygpath', '-w', home], capture_output=True,
+                                         text=True, check=True).stdout.strip()
+            for sub in ('AppData/Roaming', 'AppData/Local'):
+                os.makedirs(home + '/' + sub, mode=0o700, exist_ok=True)
+            child_env.update(USERPROFILE=profile_dir,
+                             APPDATA=profile_dir + '\\AppData\\Roaming',
+                             LOCALAPPDATA=profile_dir + '\\AppData\\Local')
+            if profile == 'claude':
+                child_env['CLAUDE_CODE_GIT_BASH_PATH'] = 'C:\\msys64\\usr\\bin\\bash.exe'
         child_env.update(explicit)
     else:
         child_env = dict(os.environ, **config['env'])
@@ -439,8 +497,8 @@ elif action == 'close':
         sys.exit(0)
     identity = json.load(open(path + '/identity'))
     if (identity['boot_id'] != boot or
-            identity.get('init_starttime', stat(1)['starttime'])
-            != stat(1)['starttime']):
+            identity.get('init_starttime', token['init_starttime'])
+            != token['init_starttime']):
         sys.exit(0)
     pid = identity['pid']; current = stat(pid)
     group = members(identity['pgid'])

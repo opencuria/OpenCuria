@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick, ref } from 'vue'
 
@@ -7,12 +7,11 @@ import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessMentionImages, { type MentionFileToken } from './HarnessMentionImages.vue'
 import ImageLightbox from './ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
-import { readWorkspaceFile } from '@/services/socket'
+import { resetWorkspaceFiles, workspaceFiles } from '@/services/workspaceFiles.fixtures'
 
-vi.mock('@/services/socket', () => ({
-  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
-}))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
+
+const files = workspaceFiles()
 
 function fileToken(path: string, overrides: Partial<MentionFileToken> = {}): MentionFileToken {
   const raw = `@file:${path}`
@@ -53,8 +52,7 @@ async function flushBadges(): Promise<void> {
 describe('HarnessMarkdown mentions', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    useWorkspaceImageStore().reset()
-    vi.mocked(readWorkspaceFile).mockClear()
+    resetWorkspaceFiles()
     class ResizeObserverStub {
       observe(): void {}
       disconnect(): void {}
@@ -107,7 +105,7 @@ describe('HarnessMarkdown mentions', () => {
     expect(wrapper.findAll('[data-testid="mention-badge-file"]')).toHaveLength(1)
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
     expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
-    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
   })
 
   it('reports rendered image mentions to the message view instead of drawing them inside prose', async () => {
@@ -132,7 +130,7 @@ describe('HarnessMarkdown mentions', () => {
     expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([
       expect.objectContaining({ path: '/workspace/cat.png' }),
     ])
-    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
   })
 
   it('ignores sandbox escapes and malformed tokens', async () => {
@@ -148,7 +146,7 @@ describe('HarnessMarkdown mentions', () => {
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
     expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
     expect(wrapper.text()).toContain('stuck@email.com')
-    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
   })
 
   it('leaves code blocks and assistant responses unchanged', async () => {
@@ -166,7 +164,7 @@ describe('HarnessMarkdown mentions', () => {
     await flushBadges()
     expect(imageCode.find('[data-testid="mention-images"]').exists()).toBe(false)
     expect(imageCode.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
-    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
 
     const assistant = mountMarkdown('Fix @file:/workspace/a.ts with @agent:plan', 'ws-mentions')
     await flushBadges()
@@ -237,8 +235,7 @@ describe('HarnessMarkdown mentions', () => {
 describe('HarnessMentionImages', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    useWorkspaceImageStore().reset()
-    vi.mocked(readWorkspaceFile).mockClear()
+    resetWorkspaceFiles()
     class ResizeObserverStub {
       observe(): void {}
       disconnect(): void {}
@@ -269,42 +266,48 @@ describe('HarnessMentionImages', () => {
   }
 
   it('bounds wide and tall previews and opens the full image in the lightbox', async () => {
-    const store = useWorkspaceImageStore()
-    store.imageCache['/workspace/wide.png'] = 'data:image/png;base64,abc'
-    store.imageCache['/workspace/tall.png'] = 'data:image/png;base64,def'
     const wrapper = mountStrip([
       fileToken('/workspace/wide.png'),
       fileToken('/workspace/tall.png', { start: 40 }),
     ])
+    await flushPromises()
     const tiles = wrapper.findAll('.relative.w-20')
     expect(tiles).toHaveLength(2)
-    const buttons = wrapper.findAll('[data-testid="mention-image-button"]')
+    const buttons = wrapper.findAll('[data-testid="workspace-media-button"]')
     expect(buttons[0]!.classes()).toContain('h-14')
     expect(buttons[0]!.classes()).toContain('w-full')
-    expect(wrapper.findAll('[data-testid="mention-image"]')[0]!.classes()).toContain(
+    expect(wrapper.findAll('[data-testid="workspace-media-image"]')[0]!.classes()).toContain(
       'object-contain',
     )
     await buttons[0]!.trigger('click')
-    expect(wrapper.findComponent(ImageLightbox).props('src')).toBe('data:image/png;base64,abc')
+    expect(wrapper.findComponent(ImageLightbox).props('src')).toBe(
+      'https://files.test/content/workspace/wide.png',
+    )
   })
 
-  it('renders a loading skeleton while the image fetches', () => {
-    const store = useWorkspaceImageStore()
-    store.fetchingPaths['/workspace/cat.png'] = true
+  it('renders a loading skeleton while the image link resolves', () => {
+    files.link.mockReturnValue(new Promise(() => {}))
 
     const wrapper = mountStrip([fileToken('/workspace/cat.png')])
+    const loading = wrapper.get('[data-testid="workspace-media-loading"]')
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="mention-image-loading"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="mention-image-loading"]').classes()).toContain('h-14')
-    expect(wrapper.find('[data-testid="mention-image-loading"]').classes()).toContain('w-full')
-    expect(wrapper.find('[data-testid="mention-image"]').exists()).toBe(false)
+    expect(loading.classes()).toContain('h-14')
+    expect(loading.classes()).toContain('w-full')
+    expect(wrapper.find('[data-testid="workspace-media-image"]').exists()).toBe(false)
+  })
+
+  it('shows a fallback tile when the image is missing', async () => {
+    files.link.mockRejectedValue(new Error('The file does not exist.'))
+    const wrapper = mountStrip([fileToken('/workspace/gone.png')])
+    await flushPromises()
+    expect(wrapper.get('[data-testid="mention-image-fallback"]').text()).toBe('gone.png')
   })
 
   it('shows a bounded fallback tile without fetching when the workspace is absent', () => {
     const wrapper = mountStrip([fileToken('/workspace/missing.png')], '')
     expect(wrapper.find('[data-testid="mention-image-fallback"]').classes()).toContain('h-14')
     expect(wrapper.find('[data-testid="mention-image-fallback"]').classes()).toContain('w-full')
-    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
   })
 
   it('ignores non-image and escaping tokens without fetching', () => {
@@ -318,7 +321,7 @@ describe('HarnessMentionImages', () => {
     )
 
     expect(wrapper.html()).not.toContain('mention-images')
-    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
+    expect(files.link).not.toHaveBeenCalled()
   })
 
   it('has no remove affordance in history, but emits offsets when removable', async () => {

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from apps.harness.access.base import WorkspaceByteStream
 from apps.harness.engines.claude.transport import ClaudeWorkspaceTransport
 
 
@@ -73,8 +74,9 @@ async def test_transport_frames_ndjson_across_chunks_and_bounds_writes() -> None
     assert messages == [{"type": "one"}, {"type": "two", "text": "a b"}]
     assert accessor.opened["command"] == ["/opt/claude"]
 
-    await transport.write("x" * (64 * 1024 + 5))
-    assert [len(chunk) for chunk in stream.sent] == [64 * 1024, 5]
+    limit = WorkspaceByteStream.MAX_CHUNK_SIZE
+    await transport.write("x" * (limit + 5))
+    assert [len(chunk) for chunk in stream.sent] == [limit, 5]
     await transport.end_input()
     await transport.close()
     await transport.close()
@@ -118,3 +120,60 @@ async def test_transport_preserves_cli_escaped_control_and_format_characters() -
         ]
     finally:
         await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_maps_windows_mirror_paths_for_the_sdk() -> None:
+    """Native Windows mirror paths resolve to the SDK's POSIX projects dir."""
+    import json as _json
+
+    from claude_agent_sdk._internal.session_store import file_path_to_session_key
+
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    sid = "8f3c3f0e-0f43-4d5b-8a32-6d1c7b0a9e11"
+    config = "/workspace/.opencuria/harness/claude/s/config"
+    frames = [
+        {
+            "type": "transcript_mirror",
+            "filePath": "C:/workspace/.opencuria/harness/claude/s/config"
+            f"\\projects\\C--workspace\\{sid}.jsonl",
+            "entries": [{"type": "user"}],
+        },
+        {
+            "type": "transcript_mirror",
+            "filePath": f"D:\\elsewhere\\projects\\C--workspace\\{sid}.jsonl",
+            "entries": [],
+        },
+        {"type": "assistant", "filePath": "C:\\workspace\\a.py"},
+    ]
+    wire = b"".join(_json.dumps(frame).encode() + b"\n" for frame in frames)
+    accessor = FakeAccessor(FakeStream([wire]))
+    accessor.guest = WINDOWS_GUEST
+    transport = ClaudeWorkspaceTransport(
+        accessor, ["/claude"], cwd="/workspace", env={"CLAUDE_CONFIG_DIR": config}
+    )
+    await transport.connect()
+    mirrored, outside, other = [item async for item in transport.read_messages()]
+    assert mirrored["filePath"] == f"{config}/projects/C--workspace/{sid}.jsonl"
+    assert file_path_to_session_key(mirrored["filePath"], f"{config}/projects") == {
+        "project_key": "C--workspace",
+        "session_id": sid,
+    }
+    assert outside == frames[1]
+    assert other == frames[2]
+
+
+@pytest.mark.asyncio
+async def test_transport_keeps_linux_mirror_paths_unchanged() -> None:
+    """Linux guests hand the CLI's mirror path to the SDK verbatim."""
+    frame = (
+        b'{"type":"transcript_mirror","filePath":"/workspace/c/projects/'
+        b'-workspace/x.jsonl","entries":[]}\n'
+    )
+    transport = ClaudeWorkspaceTransport(
+        FakeAccessor(FakeStream([frame])), ["/claude"], cwd="/workspace", env={}
+    )
+    await transport.connect()
+    [message] = [item async for item in transport.read_messages()]
+    assert message["filePath"] == "/workspace/c/projects/-workspace/x.jsonl"

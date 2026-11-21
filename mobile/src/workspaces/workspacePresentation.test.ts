@@ -8,8 +8,11 @@ import {
   workspaceMenuActions,
   workspacePickerActions,
   workspaceState,
+  workspaceStatus,
   workspaceStorage,
   workspaceSubtitle,
+  workspaceSymbol,
+  workspaceSystem,
 } from "./workspacePresentation";
 
 const GIB = 1024 ** 3;
@@ -110,6 +113,24 @@ describe("workspace list presentation", () => {
     ]);
   });
 
+  it("maps each state to a status dot and a symbol", () => {
+    expect(workspaceStatus("running")).toBe("positive");
+    expect(workspaceStatus("attention")).toBe("attention");
+    expect(workspaceStatus("error")).toBe("critical");
+    // Transitions show a spinner instead of a dot.
+    expect(workspaceStatus("busy")).toBeUndefined();
+    expect(workspaceStatus("stopped")).toBe("neutral");
+    expect(workspaceStatus("offline")).toBe("neutral");
+    expect(workspaceStatus("removed")).toBe("neutral");
+    expect(
+      workspaceStatus(workspaceState(workspace({ status: "failed" })).tone),
+    ).toBe("critical");
+    expect(workspaceSymbol("error")).toBe("exclamationmark.triangle");
+    expect(workspaceSymbol("attention")).toBe("exclamationmark.triangle");
+    expect(workspaceSymbol("running")).toBe("server.rack");
+    expect(workspaceSymbol("stopped")).toBe("server.rack");
+  });
+
   it("marks transitions and busy chats as busy", () => {
     expect(
       workspaceState(workspace({ active_operation: "stopping" })),
@@ -162,5 +183,39 @@ describe("workspace list presentation", () => {
     expect(formatMemory(1536)).toBe("1.5 GiB");
     expect(memoryStep(2048)).toBe(512);
     expect(memoryStep(8192)).toBe(1024);
+  });
+
+  it("shows the OS and license state of Windows workspaces only", () => {
+    const windows = (activation_status: string, activation_code = "") =>
+      workspaceSystem(
+        workspace({
+          guest_os: "windows",
+          windows_license: {
+            kind: "device_key",
+            activation_status: activation_status as "activated",
+            activation_code,
+          },
+        }),
+      );
+    expect(windows("activated")).toEqual({
+      text: "Windows · Activated",
+      tone: "success",
+    });
+    expect(windows("failed", "0xC004F074")).toEqual({
+      text: "Windows · Activation failed (0xC004F074)",
+      tone: "warning",
+    });
+    expect(windows("pending")).toEqual({
+      text: "Windows · Activating…",
+      tone: "accent",
+    });
+    expect(windows("not_activated")?.tone).toBe("muted");
+    expect(
+      workspaceSystem(
+        workspace({ guest_os: "windows", windows_license: null }),
+      ),
+    ).toEqual({ text: "Windows", tone: "muted" });
+    expect(workspaceSystem(workspace({ guest_os: "linux" }))).toBeNull();
+    expect(workspaceSystem(workspace())).toBeNull();
   });
 });

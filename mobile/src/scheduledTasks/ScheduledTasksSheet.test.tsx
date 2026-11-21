@@ -371,15 +371,92 @@ it("explains a failed load and retries", async () => {
     .mockResolvedValueOnce([deps]);
   const { tree } = renderSheet(client);
   await waitFor(() =>
-    expect(
-      screen.getByText("Could not load scheduled tasks: Server unavailable"),
-    ).toBeTruthy(),
+    expect(screen.getByText("Couldn’t load scheduled tasks")).toBeTruthy(),
   );
+  expect(screen.getByText("Server unavailable")).toBeTruthy();
   await act(async () =>
     fireEvent.press(screen.getByRole("button", { name: "Retry" })),
   );
   await waitFor(() =>
     expect(screen.getByText("Dependency review")).toBeTruthy(),
   );
+  tree.unmount();
+});
+
+it("shows a task created while the first load fails", async () => {
+  const client = mockClient();
+  let fail!: (cause: Error) => void;
+  client.scheduledTasks.list
+    .mockReturnValueOnce(
+      new Promise<ScheduledTask[]>((_, reject) => (fail = reject)),
+    )
+    .mockRejectedValueOnce(new Error("Server unavailable"));
+  const { tree } = renderSheet(client);
+  expect(screen.getByText("Loading")).toBeTruthy();
+  fireEvent.press(screen.getByTestId("new-scheduled-task"));
+  await act(async () => fail(new Error("Server unavailable")));
+  fireEvent.changeText(screen.getByLabelText("Name"), "Morning brief");
+  fireEvent.changeText(
+    screen.getByLabelText("Prompt"),
+    "Summarize overnight alerts.",
+  );
+  await act(async () =>
+    fireEvent.press(screen.getByTestId("scheduled-task-save")),
+  );
+  await waitFor(() => expect(screen.getByText("Morning brief")).toBeTruthy());
+  expect(screen.queryByText("Loading")).toBeNull();
+  // The list loads again; its failure shows above the task with Retry.
+  await waitFor(() =>
+    expect(client.scheduledTasks.list).toHaveBeenCalledTimes(2),
+  );
+  expect(await screen.findByText("Server unavailable")).toBeTruthy();
+  expect(screen.queryByText("Couldn’t load scheduled tasks")).toBeNull();
+  await act(async () =>
+    fireEvent.press(screen.getByRole("button", { name: "Retry" })),
+  );
+  await waitFor(() =>
+    expect(screen.getByText("Dependency review")).toBeTruthy(),
+  );
+  expect(screen.queryByText("Server unavailable")).toBeNull();
+  tree.unmount();
+});
+
+it("shows a spinner on first load, then offers the first task", async () => {
+  const client = mockClient();
+  let finish!: (tasks: ScheduledTask[]) => void;
+  client.scheduledTasks.list.mockReturnValueOnce(
+    new Promise<ScheduledTask[]>((resolve) => (finish = resolve)),
+  );
+  const { tree } = renderSheet(client);
+  expect(screen.getByText("Loading")).toBeTruthy();
+  expect(screen.queryByText("No scheduled tasks yet")).toBeNull();
+
+  await act(async () => finish([]));
+  expect(screen.queryByText("Loading")).toBeNull();
+  expect(screen.getByText("No scheduled tasks yet")).toBeTruthy();
+  // One main action: the empty state's button replaces the toolbar's.
+  expect(screen.queryByTestId("new-scheduled-task")).toBeNull();
+  fireEvent.press(screen.getByTestId("scheduled-tasks-empty-new"));
+  expect(screen.getByTestId("scheduled-task-sheet")).toBeTruthy();
+  tree.unmount();
+});
+
+it("hides ended tasks until asked", async () => {
+  const ended = task({
+    id: "task-ended",
+    name: "Release notes",
+    recurrence: "once",
+    weekdays: [],
+    run_date: "2026-11-01",
+    enabled: false,
+  });
+  const { tree } = renderSheet(mockClient([ended]));
+  await waitFor(() =>
+    expect(screen.getByText("Nothing scheduled")).toBeTruthy(),
+  );
+  expect(screen.queryByText("Release notes")).toBeNull();
+  fireEvent.press(screen.getByTestId("scheduled-tasks-show-ended"));
+  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("Release notes")).toBeTruthy();
   tree.unmount();
 });

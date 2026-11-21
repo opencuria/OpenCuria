@@ -18,12 +18,14 @@ import pytest
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 APPS_ROOT = BACKEND_ROOT / "apps"
 
-#: ASGI adapters for runner/frontend Socket.IO traffic, desktop streams and
-#: the gateway from published apps to their workspace processes.
+#: ASGI adapters for runner/frontend Socket.IO traffic, desktop streams,
+#: workspace file transfers and the gateway from published apps to their
+#: workspace processes.
 REALTIME_ADAPTERS = (
     "apps.runners.sio_server",
     "apps.runners.desktop_proxy",
     "apps.mobile_apps.gateway",
+    "apps.workspace_files.http",
 )
 
 #: Foundational bounded contexts and the only other apps each may import.
@@ -66,6 +68,7 @@ REPOSITORY_ONLY_APPS = {
     "apps.plugins",
     "apps.scheduled_tasks",
     "apps.skills",
+    "apps.workspace_files",
 }
 
 #: Model manager and instance-reload attributes that issue queries.

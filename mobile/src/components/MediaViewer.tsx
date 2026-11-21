@@ -46,9 +46,11 @@ import { MediaViewerFrame } from "../ui/MediaViewerFrame";
 import { useTheme } from "../ui/theme";
 import { mediaKey, type MediaGallery } from "./chatGallery";
 import type { MarkdownMedia } from "./markdownMedia";
+import { MediaPlaceholder } from "./MediaPlaceholder";
 import {
+  placeholderState,
   useWorkspaceMedia,
-  type ResolvedChatMedia,
+  type ChatMediaResolver,
   type WorkspaceMediaState,
 } from "./useWorkspaceMedia";
 
@@ -66,7 +68,7 @@ export const MediaGalleryContext = createContext<OpenMediaGallery | null>(null);
 
 export interface MediaViewerProps {
   gallery: MediaGallery;
-  resolveMedia?: (path: string) => Promise<ResolvedChatMedia>;
+  resolveMedia?: ChatMediaResolver;
   /** Media-cache scope, as for the transcript's inline pictures. */
   scope: string;
   onClose: () => void;
@@ -135,7 +137,8 @@ function resist(value: number, min: number, max: number): number {
  * Full-screen picture viewer in the manner of messaging apps: a native bar
  * with back and share, horizontal paging through the gallery, pinch and
  * double-tap zoom, a thumbnail strip, tap to hide the chrome and a vertical
- * swipe to close. It holds its own media leases while open.
+ * swipe to close. It holds its own media leases while open. The shown
+ * picture always loads; others above the autoload size show their preview.
  */
 export function MediaViewer({
   gallery,
@@ -181,12 +184,16 @@ export function MediaViewer({
         add(position);
     return [...wanted];
   }, [count, index, items, thumbRange]);
-  const { media, retry, reportDisplayError } = useWorkspaceMedia({
+  const { media, retry, request, reportDisplayError } = useWorkspaceMedia({
     paths,
     resolve: resolveMedia,
     scope,
     active: true,
   });
+  const shownPath = items[index]?.path;
+  useEffect(() => {
+    if (shownPath) request(shownPath);
+  }, [request, shownPath]);
   const stateOf = useCallback(
     (item: MarkdownMedia | undefined): WorkspaceMediaState | undefined => {
       if (!item) return undefined;
@@ -772,6 +779,7 @@ function ViewerPage({
 }): React.JSX.Element {
   const { theme } = useTheme();
   const { current, scale, offsetX, offsetY } = zoom;
+  const placeholder = placeholderState(state);
   const zoomStyle = useAnimatedStyle(() => {
     const shown = current.value === position;
     return {
@@ -795,6 +803,14 @@ function ViewerPage({
             onError={item.path ? onDisplayError : undefined}
           />
         </Animated.View>
+      ) : placeholder ? (
+        // A page loads once shown; until then it shows its preview.
+        <MediaPlaceholder
+          state={placeholder}
+          kind="image"
+          label={item.label}
+          style={{ width, height, backgroundColor: "transparent" }}
+        />
       ) : state.status === "failed" ? (
         <View style={styles.status}>
           <Text style={[styles.statusText, { color: theme.mutedText }]}>
@@ -902,6 +918,11 @@ function ThumbnailStrip({
         {items.map((item, position) => {
           const state = stateOf(item);
           const selected = position === index;
+          // Large pictures keep their blurred preview here.
+          const thumbUri =
+            state?.status === "ready"
+              ? state.uri
+              : placeholderState(state)?.preview.thumbnailUrl;
           return (
             <NativeAction
               key={`${mediaKey(item)}:${position}`}
@@ -921,9 +942,9 @@ function ThumbnailStrip({
                   },
                 ]}
               >
-                {state?.status === "ready" ? (
+                {thumbUri ? (
                   <Image
-                    source={{ uri: state.uri }}
+                    source={{ uri: thumbUri }}
                     contentFit="cover"
                     style={styles.fill}
                     recyclingKey={mediaKey(item)}

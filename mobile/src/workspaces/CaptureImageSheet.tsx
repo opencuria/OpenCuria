@@ -6,7 +6,6 @@ import {
   nextImageVersion,
 } from "@opencuria/chat-core/imageVersions";
 import type { OpenCuriaClient, Workspace } from "@opencuria/client";
-import { NativeForm } from "../ui/NativeForm";
 import type { NativeFormSection } from "../ui/NativeForm.types";
 import { NativeModal } from "../ui/primitives";
 import { showToast } from "../ui/toast";
@@ -159,7 +158,6 @@ function CaptureSheet({
       visible
       onClose={onClose}
       title="Capture image"
-      scrollable={false}
       primaryAction={{
         title: "Capture",
         onPress: () => {
@@ -170,8 +168,7 @@ function CaptureSheet({
         testID: "capture-submit",
       }}
       testID="capture-image-sheet"
-    >
-      <NativeForm sections={sections} />
-    </NativeModal>
+      form={{ sections }}
+    />
   );
 }

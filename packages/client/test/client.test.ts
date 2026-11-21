@@ -398,6 +398,56 @@ describe("REST request deadlines", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("gives transcription minutes instead of the default deadline", async () => {
+    vi.useFakeTimers();
+    const answered = deferred<Response>();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ available: true, max_duration_ms: 1000 }),
+      )
+      .mockImplementationOnce(() => answered.promise);
+    const client = clientOptions().create(fetch);
+    await expect(client.voice.config("ws/1")).resolves.toMatchObject({
+      available: true,
+    });
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "https://api.example/api/v1/workspaces/ws%2F1/voice/config/",
+    );
+    const transcript = client.voice.transcribe("ws-1", {
+      audio_base64: "AAAA",
+      mime_type: "audio/mp4",
+      duration_ms: 1200,
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    const signal = fetch.mock.calls[1]?.[1]?.signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    expect(JSON.parse(fetch.mock.calls[1]?.[1]?.body as string)).toEqual({
+      audio_base64: "AAAA",
+      mime_type: "audio/mp4",
+      duration_ms: 1200,
+    });
+    answered.resolve(jsonResponse({ text: "Hi.", segments: [], timing: "approximate" }));
+    await expect(transcript).resolves.toMatchObject({ text: "Hi." });
+  });
+
+  it("reports a refused transcription with the server's reason", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(
+        { detail: "Select a connected speech provider", code: "voice_provider_missing" },
+        409,
+      ),
+    );
+    const client = clientOptions().create(fetch);
+    await expect(
+      client.voice.transcribe("ws-1", {
+        audio_base64: "AAAA",
+        mime_type: "audio/mp4",
+        duration_ms: 1200,
+      }),
+    ).rejects.toMatchObject({ status: 409, code: "voice_provider_missing" });
+  });
+
   it.each(["headers", "body"])(
     "bounds a stalled response's %s and allows a fresh retry",
     async (phase) => {
@@ -614,6 +664,18 @@ describe("REST endpoint wrappers", () => {
     await client.harness.timeline("session-id");
     await client.harness.steer("session-id", "Use pnpm");
     await client.harness.withdraw("session-id", "steer-id");
+    await client.harness.scheduleMessage("session-id", {
+      prompt: "Check CI",
+      send_at: "2026-11-17T08:00:00.000Z",
+      model: "m-1",
+    });
+    await client.harness.rescheduleMessage(
+      "session-id",
+      "later id",
+      "2026-11-18T08:00:00.000Z",
+    );
+    await client.harness.sendScheduledMessage("session-id", "later id");
+    await client.harness.withdrawScheduledMessage("session-id", "later id");
     expect(
       calls.map(({ url, method }) => [
         url.replace("https://api.example/api/v1", ""),
@@ -628,6 +690,13 @@ describe("REST endpoint wrappers", () => {
       ["/harness/sessions/session-id/timeline", "GET"],
       ["/harness/sessions/session-id/steer", "POST"],
       ["/harness/sessions/session-id/steer/steer-id", "DELETE"],
+      ["/harness/sessions/session-id/scheduled-messages", "POST"],
+      ["/harness/sessions/session-id/scheduled-messages/later%20id", "PATCH"],
+      [
+        "/harness/sessions/session-id/scheduled-messages/later%20id/send",
+        "POST",
+      ],
+      ["/harness/sessions/session-id/scheduled-messages/later%20id", "DELETE"],
     ]);
     expect(JSON.parse(calls[3].body!)).toEqual({ response: "once" });
     expect(JSON.parse(calls[4].body!)).toEqual({
@@ -635,6 +704,14 @@ describe("REST endpoint wrappers", () => {
       reject: false,
     });
     expect(JSON.parse(calls[6].body!)).toEqual({ prompt: "Use pnpm" });
+    expect(JSON.parse(calls[8].body!)).toEqual({
+      prompt: "Check CI",
+      send_at: "2026-11-17T08:00:00.000Z",
+      model: "m-1",
+    });
+    expect(JSON.parse(calls[9].body!)).toEqual({
+      send_at: "2026-11-18T08:00:00.000Z",
+    });
   });
 
   it("manages workspaces, images and their catalogs over the webapp's REST contract", async () => {
@@ -1050,340 +1127,25 @@ describe("realtime and file transfers", () => {
     client.realtime.connect();
     const socket = sockets[0];
     socket.connect();
-    const read = client.files.readFile("ws-1", "/workspace/a.txt");
+    const list = client.files.listFiles("ws-1", "/workspace/src");
     const requestId = socket.emitted.find(
-      (item) => item.event === "frontend:files_read",
+      (item) => item.event === "frontend:files_list",
     )!.data.request_id;
-    socket.trigger("files:content_result", {
+    socket.trigger("files:list_result", {
       workspace_id: "ws-2",
       request_id: requestId,
-      path: "/workspace/a.txt",
-      content: "x",
-      size: 1,
-      truncated: false,
+      path: "/workspace/src",
+      entries: [],
     });
-    await expect(read).rejects.toBeInstanceOf(FileTransferError);
-    socket.trigger("files:content_result", {
+    await expect(list).rejects.toBeInstanceOf(FileTransferError);
+    socket.trigger("files:list_result", {
       workspace_id: "ws-1",
       request_id: requestId,
-      path: "/workspace/a.txt",
-      content: "late",
-      size: 4,
-      truncated: false,
+      path: "/workspace/src",
+      entries: [],
     });
     client.realtime.dispose();
   });
-
-  it("rejects wrong-path chunks and ignores late chunks after a failed transfer", async () => {
-    const sockets: MockSocket[] = [];
-    const client = clientOptions().create(
-      vi.fn(async () => jsonResponse({})) as any,
-      {
-        socketFactory: mockSocketFactory(sockets),
-        createFileRequestId: () => "path-read",
-      },
-    );
-    client.realtime.connect();
-    const socket = sockets[0];
-    socket.connect();
-    const read = client.files.readFile("ws-1", "/workspace/expected.txt");
-    socket.trigger("files:content_chunk", {
-      workspace_id: "ws-1",
-      request_id: "path-read",
-      path: "/workspace/wrong.txt",
-      index: 0,
-      total_chunks: 1,
-      content: "YWJj",
-    });
-    await expect(read).rejects.toMatchObject({ code: "correlation_error" });
-    socket.trigger("files:content_chunk", {
-      workspace_id: "ws-1",
-      request_id: "path-read",
-      path: "/workspace/expected.txt",
-      index: 0,
-      total_chunks: 1,
-      content: "YWJj",
-    });
-    socket.trigger("files:content_result", {
-      workspace_id: "ws-1",
-      request_id: "path-read",
-      path: "/workspace/expected.txt",
-      content: "",
-      size: 0,
-      truncated: false,
-      chunked: true,
-      total_chunks: 1,
-    });
-    client.realtime.dispose();
-  });
-
-  it.each([
-    ["read", false],
-    ["read", true],
-    ["download", false],
-    ["download", true],
-    ["list", false],
-    ["list", true],
-    ["find", false],
-    ["find", true],
-  ] as const)(
-    "cancels %s and releases its room (already aborted: %s)",
-    async (kind, alreadyAborted) => {
-      const sockets: MockSocket[] = [];
-      const client = clientOptions().create(
-        vi.fn(async () => jsonResponse({})) as any,
-        {
-          socketFactory: mockSocketFactory(sockets),
-          createFileRequestId: () => "cancel-read",
-        },
-      );
-      client.realtime.connect();
-      const socket = sockets[0];
-      socket.connect();
-      const controller = new AbortController();
-      if (alreadyAborted) controller.abort();
-      const read = {
-        read: () =>
-          client.files.readFile(
-            "ws-1",
-            "/workspace/image.png",
-            undefined,
-            controller.signal,
-          ),
-        download: () =>
-          client.files.downloadFile(
-            "ws-1",
-            "/workspace/image.png",
-            controller.signal,
-          ),
-        list: () =>
-          client.files.listFiles("ws-1", "/workspace", controller.signal),
-        find: () =>
-          client.files.findFiles("ws-1", "image", 50, controller.signal),
-      }[kind]();
-      if (!alreadyAborted) {
-        if (kind === "read" || kind === "download")
-          socket.trigger(
-            `files:${kind === "read" ? "content" : "download"}_chunk`,
-            {
-              workspace_id: "ws-1",
-              request_id: "cancel-read",
-              path: "/workspace/image.png",
-              index: 0,
-              total_chunks: 1,
-              content: "YWJj",
-            },
-          );
-        controller.abort();
-        expect(socket.emitted.at(-1)?.event).toBe(
-          "frontend:unsubscribe_workspace",
-        );
-      } else {
-        expect(socket.emitted).toHaveLength(0);
-      }
-      await expect(read).rejects.toMatchObject({ code: "cancelled" });
-      socket.trigger(`files:${kind === "read" ? "content" : kind}_result`, {
-        workspace_id: "ws-1",
-        request_id: "cancel-read",
-        path: "/workspace/image.png",
-        content: "",
-        size: 3,
-        truncated: false,
-        chunked: true,
-        total_chunks: 1,
-      });
-      client.realtime.dispose();
-    },
-  );
-
-  it("reassembles chunked content with strict correlation", async () => {
-    const sockets: MockSocket[] = [];
-    const client = clientOptions().create(
-      vi.fn(async () => jsonResponse({})) as any,
-      {
-        socketFactory: mockSocketFactory(sockets),
-        createFileRequestId: () => "read-1",
-      },
-    );
-    client.realtime.connect();
-    const socket = sockets[0];
-    socket.connect();
-    const read = client.files.readFile("ws-1", "/workspace/a.txt");
-    socket.trigger("files:content_chunk", {
-      workspace_id: "ws-1",
-      request_id: "read-1",
-      path: "/workspace/a.txt",
-      index: 1,
-      total_chunks: 2,
-      content: "ZGVm",
-    });
-    socket.trigger("files:content_chunk", {
-      workspace_id: "ws-1",
-      request_id: "read-1",
-      path: "/workspace/a.txt",
-      index: 0,
-      total_chunks: 2,
-      content: "YWJj",
-    });
-    socket.trigger("files:content_result", {
-      workspace_id: "ws-1",
-      request_id: "read-1",
-      path: "/workspace/a.txt",
-      content: "",
-      size: 6,
-      truncated: false,
-      chunked: true,
-      total_chunks: 2,
-    });
-    await expect(read).resolves.toMatchObject({ content: "YWJjZGVm", size: 6 });
-    client.realtime.dispose();
-  });
-
-  describe.each([false, true])("file payloads (chunked: %s)", (chunked) => {
-    it.each([
-      ["read", true, 10, true],
-      ["read", true, 3, false],
-      ["read", false, 3, true],
-      ["read", false, 4, false],
-      ["download", false, 3, true],
-      ["download", false, 4, false],
-      ["download", false, 100 * 1024 * 1024 + 1, false],
-      ["download", false, 3.5, false],
-      ["download", false, -1, false],
-    ] as const)(
-      "%s truncated=%s size=%s accepted=%s",
-      async (kind, truncated, size, accepted) => {
-        const sockets: MockSocket[] = [];
-        const client = clientOptions().create(
-          vi.fn(async () => jsonResponse({})) as any,
-          {
-            socketFactory: mockSocketFactory(sockets),
-            createFileRequestId: () => "payload",
-          },
-        );
-        client.realtime.connect();
-        const socket = sockets[0];
-        socket.connect();
-        const pending =
-          kind === "read"
-            ? client.files.readFile("ws-1", "/workspace/a.txt")
-            : client.files.downloadFile("ws-1", "/workspace/a.txt");
-        const identity = {
-          workspace_id: "ws-1",
-          request_id: "payload",
-          path: "/workspace/a.txt",
-        };
-        const event = kind === "read" ? "content" : "download";
-        if (chunked)
-          socket.trigger(`files:${event}_chunk`, {
-            ...identity,
-            index: 0,
-            total_chunks: 1,
-            content: "YWJj",
-          });
-        socket.trigger(`files:${event}_result`, {
-          ...identity,
-          content: chunked ? "" : "YWJj",
-          size,
-          truncated,
-          filename: "a.txt",
-          is_archive: false,
-          chunked,
-          total_chunks: chunked ? 1 : undefined,
-        });
-        if (accepted)
-          await expect(pending).resolves.toMatchObject({
-            content: "YWJj",
-            size,
-          });
-        else await expect(pending).rejects.toBeInstanceOf(FileTransferError);
-        client.realtime.dispose();
-      },
-    );
-  });
-
-  it("fails pending transfer on disconnect, rejects disconnected uploads, and bounds upload size", async () => {
-    const sockets: MockSocket[] = [];
-    const client = clientOptions().create(
-      vi.fn(async () => jsonResponse({})) as any,
-      {
-        socketFactory: mockSocketFactory(sockets),
-        createFileRequestId: () => "file-1",
-        fileTransferTimeoutMs: 100,
-      },
-    );
-    client.realtime.connect();
-    const socket = sockets[0];
-    socket.connect();
-    const pending = client.files.listFiles("ws-1", "/workspace");
-    socket.disconnect();
-    await expect(pending).rejects.toMatchObject({ code: "disconnected" });
-    await expect(
-      client.files.uploadFile("ws-1", {
-        directory: "/workspace",
-        filename: "a.txt",
-        base64: "YQ==",
-      }),
-    ).rejects.toMatchObject({ code: "disconnected" });
-    socket.connect();
-    const oversized = "A".repeat(14 * 1024 * 1024 + 4);
-    await expect(
-      client.files.uploadFile("ws-1", {
-        directory: "/workspace",
-        filename: "big.bin",
-        base64: oversized,
-      }),
-    ).rejects.toMatchObject({ code: "size_limit" });
-    client.realtime.dispose();
-  });
-
-  it.each([0, 4, 256 * 1024 + 4])(
-    "uploads %i base64 characters through start/chunks/finish",
-    async (length) => {
-      const sockets: MockSocket[] = [];
-      const client = clientOptions().create(
-        vi.fn(async () => jsonResponse({})) as any,
-        {
-          socketFactory: mockSocketFactory(sockets),
-          createFileRequestId: () => "upload-1",
-        },
-      );
-      client.realtime.connect();
-      const socket = sockets[0];
-      socket.connect();
-      const content = "A".repeat(length);
-      const upload = client.files.uploadFile("ws-1", {
-        directory: "/workspace",
-        filename: "a.bin",
-        base64: content,
-      });
-      const events = socket.emitted.filter(({ event }) =>
-        event.startsWith("frontend:files_upload"),
-      );
-      expect(events.map(({ event }) => event)).toEqual([
-        "frontend:files_upload_start",
-        ...Array(Math.ceil(length / (256 * 1024))).fill(
-          "frontend:files_upload_chunk",
-        ),
-        "frontend:files_upload_finish",
-      ]);
-      expect(events[0].data.total_chunks).toBe(
-        Math.ceil(length / (256 * 1024)),
-      );
-      socket.trigger("files:upload_result", {
-        workspace_id: "ws-1",
-        request_id: "upload-1",
-        path: "/workspace",
-        filename: "a.bin",
-        status: "success",
-      });
-      await expect(upload).resolves.toMatchObject({
-        status: "success",
-        path: "/workspace/a.bin",
-      });
-      client.realtime.dispose();
-    },
-  );
 
   it("bounds pending transfer time and provides deterministic connection status", async () => {
     const sockets: MockSocket[] = [];
@@ -1842,6 +1604,71 @@ describe("settings API", () => {
       ],
       ["/computer-use-config/", "PUT", { max_steps: 20 }],
     ]);
+  });
+
+  it("manages Windows licensing with encoded ids and write-only keys", async () => {
+    const fetch = recordingFetch((_url, init) =>
+      init?.method === "DELETE" && _url.includes("/keys/")
+        ? new Response(null, { status: 204 })
+        : jsonResponse({ mode: "per_user" }),
+    );
+    const client = clientOptions().create(fetch);
+    await expect(client.windowsLicensing.get("org a")).resolves.toEqual({
+      mode: "per_user",
+    });
+    await client.windowsLicensing.update("org-a", {
+      mode: "per_device",
+      max_running: null,
+    });
+    await client.windowsLicensing.addKey("org-a", {
+      product_key: "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
+      label: "Office",
+      seats: 5,
+    });
+    await client.windowsLicensing.updateKey("org-a", "k/1", { seats: 3 });
+    await expect(
+      client.windowsLicensing.deleteKey("org-a", "k/1"),
+    ).resolves.toBeUndefined();
+    await client.windowsLicensing.setUserLicensed("org-a", "7", true);
+    await client.windowsLicensing.setUserLicensed("org-a", "7", false);
+    const base = "/licensing/organizations/org-a/windows/";
+    expect(calls(fetch)).toEqual([
+      ["/licensing/organizations/org%20a/windows/", "GET", undefined],
+      [base, "PATCH", { mode: "per_device", max_running: null }],
+      [
+        `${base}keys/`,
+        "POST",
+        {
+          product_key: "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
+          label: "Office",
+          seats: 5,
+        },
+      ],
+      [`${base}keys/k%2F1/`, "PATCH", { seats: 3 }],
+      [`${base}keys/k%2F1/`, "DELETE", undefined],
+      [`${base}users/7/`, "PUT", undefined],
+      [`${base}users/7/`, "DELETE", undefined],
+    ]);
+  });
+
+  it("surfaces Windows license conflicts with their detail and code", async () => {
+    const fetch = recordingFetch(() =>
+      jsonResponse(
+        {
+          detail: "2 workspaces still hold seats of this key.",
+          code: "windows_key_in_use",
+        },
+        409,
+      ),
+    );
+    const client = clientOptions().create(fetch);
+    await expect(
+      client.windowsLicensing.deleteKey("org-a", "k1"),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "windows_key_in_use",
+      message: "2 workspaces still hold seats of this key.",
+    });
   });
 
   it("drives runners, image builds and deletions", async () => {

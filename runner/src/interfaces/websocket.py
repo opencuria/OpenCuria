@@ -26,6 +26,7 @@ from ..config import RunnerSettings
 from ..git import GIT_OPERATIONS, git_timeout_for
 from ..operation_executor import COMMANDS, OperationExecutor
 from ..runtime.artifacts import ArtifactRequestError
+from ..runtime.display_stream import novnc_file
 from ..service import WorkspaceService
 from ..services.sessions.terminals import CLOSED, EXITED
 from ..services.system_metrics import SystemMetricsCollector
@@ -100,6 +101,9 @@ class WebSocketInterface(Interface):
             ),
             events=self._sio,
             capture_fence=getattr(service, "capture_fence", None),
+            desktop_kind=lambda workspace_id: service.desktop.desktop_kind(workspace_id),
+            open_display=lambda workspace_id: service.desktop.open_display(workspace_id),
+            display_file=novnc_file,
         )
         self._uploads = UploadTransfers()
         terminals = getattr(self._service, "terminal_manager", None)
@@ -530,27 +534,6 @@ class WebSocketInterface(Interface):
         async def connect_error(data: object) -> None:
             logger.error("websocket_connect_error", data=data)
 
-        async def _fail_upload(
-            *,
-            workspace_id: str,
-            request_id: str,
-            path: str,
-            error: str,
-            log_msg: str,
-        ) -> None:
-            self._uploads.discard("browser-upload", request_id)
-            await sio.emit(
-                "files:upload_result",
-                {
-                    "workspace_id": workspace_id,
-                    "request_id": request_id,
-                    "path": path,
-                    "status": "error",
-                    "error": error,
-                },
-            )
-            logger.error(log_msg, error=error, request_id=request_id)
-
         def _file_request_echo(
             data: object, *, default_path: str = "/workspace"
         ) -> tuple[str, str, str]:
@@ -875,8 +858,14 @@ class WebSocketInterface(Interface):
 
         # -- harness workspace-access RPC ----------------------------------------
 
-        #: Generic stream chunk cap (raw bytes per workspace:stream_output).
-        STREAM_OUTPUT_CHUNK = 64 * 1024
+        #: Most raw bytes one workspace:stream_output or stream_input carries.
+        #: Every output chunk waits for its ACK, so file transfers need large
+        #: chunks; reads queued behind a pending ACK are coalesced up to it.
+        STREAM_OUTPUT_CHUNK = 1024 * 1024
+        #: Raw bytes per guest read, and the most one stream buffers behind a
+        #: pending ACK before backpressure reaches the guest process.
+        STREAM_READ_CHUNK = 256 * 1024
+        STREAM_SENDER_BYTES = 4 * 1024 * 1024
         #: ACK timeout for one workspace:stream_output event.
         STREAM_OUTPUT_ACK_TIMEOUT = 15.0
 
@@ -1002,7 +991,7 @@ class WebSocketInterface(Interface):
             )
 
         def _decode_stream_data(raw: object) -> bytes:
-            """Strictly validate a base64 stream input chunk (max 64KiB raw)."""
+            """Strictly validate one base64 stream input chunk (bounded raw)."""
             import base64 as _b64
 
             if not isinstance(raw, str) or not raw:
@@ -1012,7 +1001,7 @@ class WebSocketInterface(Interface):
             except Exception as exc:
                 raise ValueError("invalid base64 stream data") from exc
             if not decoded or len(decoded) > STREAM_OUTPUT_CHUNK:
-                raise ValueError("stream data exceeds 64KiB chunk limit")
+                raise ValueError("stream data exceeds the chunk limit")
             return decoded
 
         async def _close_stream_evidence(connection_id: str) -> dict:
@@ -1046,16 +1035,20 @@ class WebSocketInterface(Interface):
 
             task_key = f"stream:{connection_id}"
             sender_queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(
-                maxsize=128
+                maxsize=1024
             )
+            buffered = 0
+            has_room = asyncio.Event()
+            has_room.set()
 
             async def _read_loop(stream_name: str) -> None:
                 """Pump one runtime stream into the sender queue."""
+                nonlocal buffered
                 try:
                     while True:
                         try:
                             chunk = await self._service.streams.stream_read_once(
-                                connection_id, stream_name, STREAM_OUTPUT_CHUNK
+                                connection_id, stream_name, STREAM_READ_CHUNK
                             )
                         except ValueError:
                             # Session gone (full close raced us): stop.
@@ -1071,10 +1064,11 @@ class WebSocketInterface(Interface):
                             break
                         if not chunk:
                             break
-                        try:
-                            await sender_queue.put((stream_name, bytes(chunk)))
-                        except asyncio.CancelledError:
-                            raise
+                        while buffered >= STREAM_SENDER_BYTES:
+                            has_room.clear()
+                            await has_room.wait()
+                        await sender_queue.put((stream_name, bytes(chunk)))
+                        buffered += len(chunk)
                 finally:
                     # EOF marker per reader; retry briefly if the sender
                     # queue is momentarily full (sender is alive and
@@ -1096,6 +1090,7 @@ class WebSocketInterface(Interface):
                 instead of one per read. Nothing waits to batch, and arrival
                 order across stdout/stderr is preserved.
                 """
+                nonlocal buffered
                 eofs = 0
                 held: tuple[str, bytes] | None = None
                 while held is not None or eofs < 2:
@@ -1123,6 +1118,9 @@ class WebSocketInterface(Interface):
                         else:
                             held = queued
                             break
+                    buffered -= size
+                    if buffered < STREAM_SENDER_BYTES:
+                        has_room.set()
                     await _emit_stream_output(
                         connection_id=connection_id,
                         workspace_id=workspace_id,
@@ -2236,241 +2234,6 @@ class WebSocketInterface(Interface):
                 )
             except Exception as exc:
                 return {"ok": False, "code": "file_write_failed", "message": str(exc)}
-
-        @sio.on("files:read")
-        async def on_files_read(data: dict) -> None:
-            raw = data if isinstance(data, dict) else {}
-            ws_echo = raw.get("workspace_id", "")
-            ws_echo = ws_echo if isinstance(ws_echo, str) else ""
-            request_id = raw.get("request_id", "")
-            request_id = request_id if isinstance(request_id, str) else ""
-            if not isinstance(raw.get("path", None), str):
-                await sio.emit(
-                    "files:content_result",
-                    {
-                        "workspace_id": ws_echo,
-                        "request_id": request_id,
-                        "path": "/workspace",
-                        "content": "",
-                        "size": 0,
-                        "truncated": False,
-                        "error": "path must be a string",
-                    },
-                )
-                logger.exception("files_read_failed")
-                return
-            path = raw.get("path")
-            max_size = raw.get("max_size")
-            try:
-                workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.files.read_file(
-                    workspace_id,
-                    path,
-                    max_size=max_size,
-                )
-                await emit_chunked_result(
-                    sio.emit,
-                    chunk_event="files:content_chunk",
-                    result_event="files:content_result",
-                    base={
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "path": path,
-                        "size": result.get("size", 0),
-                        "truncated": result.get("truncated", False),
-                        "mime_type": result.get(
-                            "mime_type", "application/octet-stream"
-                        ),
-                    },
-                    content=str(result.get("content", "")),
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "files:content_result",
-                    {
-                        "workspace_id": ws_echo,
-                        "request_id": request_id,
-                        "path": path,
-                        "content": "",
-                        "size": 0,
-                        "truncated": False,
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("files_read_failed")
-
-        @sio.on("files:upload_start")
-        async def on_files_upload_start(data: dict) -> None:
-            ws_echo, request_id, path = _file_request_echo(data)
-            try:
-                workspace_id = uuid.UUID(ws_echo)
-                from ..services.files import FILE_UPLOAD_MAX_SIZE
-
-                self._uploads.prune()
-                total = self._uploads.parse_total_chunks(data.get("total_chunks", -1))
-                from ..services.workspace_helpers import sanitize_path
-
-                if not request_id:
-                    raise ValueError("request_id must not be empty")
-                sanitize_path(path)
-                try:
-                    filename = str(data.get("filename", ""))
-                    is_directory = bool(data.get("is_directory", False))
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("invalid upload fields") from exc
-                from ..services.workspace_helpers import (
-                    sanitize_filename as _sanitize_filename,
-                )
-
-                _sanitize_filename(filename)
-                self._uploads.start(
-                    "browser-upload",
-                    request_id,
-                    target=UploadTarget(
-                        workspace_id=str(workspace_id),
-                        path=path,
-                        filename=filename,
-                        is_directory=is_directory,
-                    ),
-                    total_chunks=total,
-                    max_size=FILE_UPLOAD_MAX_SIZE,
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "files:upload_result",
-                    {
-                        "workspace_id": ws_echo,
-                        "request_id": request_id,
-                        "path": path,
-                        "status": "error",
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("files_upload_failed")
-
-        @sio.on("files:upload_chunk")
-        async def on_files_upload_chunk(data: dict) -> None:
-            ws_echo, request_id, path = _file_request_echo(data, default_path="")
-            if not isinstance(request_id, str) or not request_id:
-                logger.warning("files_upload_chunk_missing_request_id")
-                return
-            try:
-                workspace_id = uuid.UUID(ws_echo)
-                self._uploads.prune()
-                self._uploads.append(
-                    "browser-upload",
-                    request_id,
-                    workspace_id=str(workspace_id),
-                    path=path,
-                    index=data.get("index", -1),
-                    total_chunks=data.get("total_chunks", -1),
-                    content=data.get("content", ""),
-                )
-            except Exception as exc:
-                await _fail_upload(
-                    workspace_id=ws_echo,
-                    request_id=request_id,
-                    path=path,
-                    error=str(exc),
-                    log_msg="files_upload_chunk_failed",
-                )
-
-        @sio.on("files:upload_finish")
-        async def on_files_upload_finish(data: dict) -> None:
-            ws_echo, request_id, path = _file_request_echo(data, default_path="")
-            if not isinstance(request_id, str) or not request_id:
-                logger.warning("files_upload_finish_missing_request_id")
-                return
-            try:
-                workspace_id = uuid.UUID(ws_echo)
-                target, content_b64 = self._uploads.finish(
-                    "browser-upload",
-                    request_id,
-                    workspace_id=str(workspace_id),
-                    path=path,
-                    announcement=data,
-                )
-                await self._service.files.upload_file(
-                    workspace_id,
-                    path=path,
-                    filename=target.filename,
-                    content_b64=content_b64,
-                    is_directory=target.is_directory,
-                )
-                await sio.emit(
-                    "files:upload_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "path": path,
-                        "status": "success",
-                    },
-                )
-            except Exception as exc:
-                await _fail_upload(
-                    workspace_id=ws_echo,
-                    request_id=request_id,
-                    path=path,
-                    error=str(exc),
-                    log_msg="files_upload_finish_failed",
-                )
-
-        @sio.on("files:download")
-        async def on_files_download(data: dict) -> None:
-            raw = data if isinstance(data, dict) else {}
-            ws_echo = raw.get("workspace_id", "")
-            ws_echo = ws_echo if isinstance(ws_echo, str) else ""
-            request_id = raw.get("request_id", "")
-            request_id = request_id if isinstance(request_id, str) else ""
-            if not isinstance(raw.get("path", None), str):
-                await sio.emit(
-                    "files:download_result",
-                    {
-                        "workspace_id": ws_echo,
-                        "request_id": request_id,
-                        "path": "/workspace",
-                        "content": "",
-                        "filename": "",
-                        "is_archive": False,
-                        "size": 0,
-                        "error": "path must be a string",
-                    },
-                )
-                logger.exception("files_download_failed")
-                return
-            path = raw.get("path")
-            try:
-                workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.files.download_file(workspace_id, path)
-                await emit_chunked_result(
-                    sio.emit,
-                    chunk_event="files:download_chunk",
-                    result_event="files:download_result",
-                    base={
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "path": path,
-                        "filename": result.get("filename", ""),
-                        "is_archive": result.get("is_archive", False),
-                        "size": result.get("size", 0),
-                    },
-                    content=str(result.get("content", "")),
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "files:download_result",
-                    {
-                        "workspace_id": ws_echo,
-                        "request_id": request_id,
-                        "path": path,
-                        "content": "",
-                        "filename": "",
-                        "is_archive": False,
-                        "size": 0,
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("files_download_failed")
 
         # -- image artifact events ---------------------------------------------
 

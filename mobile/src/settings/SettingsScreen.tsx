@@ -38,6 +38,8 @@ import { renderModelsRoute } from "./pages/models";
 
 export interface SettingsScreenProps {
   visible: boolean;
+  /** Pages shown above the root when Settings opens, e.g. `["providers"]`. */
+  initialPath?: readonly string[];
   onClose: () => void;
   client: OpenCuriaClient;
   user: AuthUser;
@@ -98,7 +100,7 @@ function unavailablePage(): React.ReactNode {
       empty={{
         title: "Page unavailable",
         description: "This page no longer exists.",
-        symbol: "exclamationmark.triangle.fill",
+        symbol: "exclamationmark.triangle",
       }}
     />
   );
@@ -114,7 +116,9 @@ export function SettingsScreen(
 ): React.JSX.Element | null {
   const { theme } = useTheme();
   const { visible, onClose, client, organizationId } = props;
-  const [path, setPath] = useState<string[]>([]);
+  const [path, setPath] = useState<string[]>(() => [
+    ...(props.initialPath ?? []),
+  ]);
   const [sheet, setSheet] = useState<React.ReactNode>(null);
   // Cached pages belong to one opening, account and organization.
   const resources = useMemo(
@@ -122,12 +126,13 @@ export function SettingsScreen(
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, organizationId, visible],
   );
+  const initialPath = JSON.stringify(props.initialPath ?? []);
   useEffect(() => {
     if (!visible) {
       setPath([]);
       setSheet(null);
-    }
-  }, [visible]);
+    } else setPath(JSON.parse(initialPath) as string[]);
+  }, [visible, initialPath]);
 
   const close = useCallback(() => onClose(), [onClose]);
   // Choice pages keep their options and callback here, keyed by route.

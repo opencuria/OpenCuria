@@ -5,7 +5,6 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useProcessesStore } from '@/stores/processes'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { subscribeToWorkspace, onEvent, onReconnect } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
@@ -32,7 +31,6 @@ const runnerStore = useRunnerStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
-const workspaceImageStore = useWorkspaceImageStore()
 const renamingWorkspace = ref(false)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
@@ -229,7 +227,6 @@ onUnmounted(() => {
   document.removeEventListener('visibilitychange', reconcileOnVisible)
   cleanupSocket()
   processesStore.reset()
-  workspaceImageStore.reset()
   harnessStore.reset()
   workspaceStore.activeWorkspace = null
 })

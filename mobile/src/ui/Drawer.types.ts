@@ -1,6 +1,17 @@
 import type React from "react";
 import type { NativeMenuAction } from "./NativeMenu";
 
+/** A subagent chat: the header becomes a pushed page leading back to its parent. */
+export interface DrawerDetail {
+  /** The subagent's task. */
+  title: string;
+  /** Agent type and state, e.g. "Explorer · Working…". */
+  subtitle: string;
+  /** Parent chat the back button returns to. */
+  backTitle: string;
+  onBack: () => void;
+}
+
 export interface DrawerProps {
   visible: boolean;
   onOpen: () => void;
@@ -19,4 +30,9 @@ export interface DrawerProps {
   /** Actions of the chat header's overflow ("…") menu; none hides it. */
   menuActions: NativeMenuAction[];
   onMenuAction: (id: string) => void;
+  /**
+   * Set inside a subagent chat: Back replaces the sidebar button, the title
+   * names the subagent, and only the overflow menu stays on the trailing side.
+   */
+  detail?: DrawerDetail;
 }

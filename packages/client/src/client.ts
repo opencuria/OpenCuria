@@ -13,10 +13,13 @@ import {
   createRunnersApi,
   createScheduledTasksApi,
   createSkillsApi,
+  createWindowsLicensingApi,
 } from "./settings";
+import { createWorkspaceFilesApi, type WorkspaceFilesApi } from "./files";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
 import { createAppsApi } from "./apps";
 import { createDesktopApi } from "./desktop";
+import { createVoiceApi } from "./voice";
 import { buildDesktopViewerUrl } from "@opencuria/chat-core/desktopSurface";
 import type { DesktopViewerIntent } from "@opencuria/chat-core/desktopViewer";
 import {
@@ -123,6 +126,8 @@ export interface OpenCuriaClient {
   credentialServices: ReturnType<typeof createCredentialServicesApi>;
   /** Organization profile, creation and workspace policy. */
   organizations: ReturnType<typeof createOrganizationsApi>;
+  /** Windows license model, product keys and licensed members (admins only). */
+  windowsLicensing: ReturnType<typeof createWindowsLicensingApi>;
   /** Model provider accounts, selection and ChatGPT device login. */
   providerAccounts: ReturnType<typeof createProviderAccountsApi>;
   /** Subagent depth, Computer Use limits and voice models. */
@@ -157,11 +162,14 @@ export interface OpenCuriaClient {
   terminal: ReturnType<typeof createTerminalApi>;
   /** Personal and organization skills. */
   skills: ReturnType<typeof createSkillsApi>;
+  /** Dictation: workspace voice settings and transcription. */
+  voice: ReturnType<typeof createVoiceApi>;
   realtime: RealtimeClient;
-  files: Pick<
-    RealtimeClient,
-    "findFiles" | "listFiles" | "readFile" | "downloadFile" | "uploadFile"
-  >;
+  /**
+   * Workspace files: signed HTTP links (stream, download, blurred preview),
+   * uploads and partial reads; listing and search over Socket.IO.
+   */
+  files: Pick<RealtimeClient, "findFiles" | "listFiles"> & WorkspaceFilesApi;
 }
 
 function segment(value: string): string {
@@ -296,6 +304,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     credentials: createCredentialsApi(() => api),
     credentialServices: createCredentialServicesApi(() => api),
     organizations: createOrganizationsApi(() => api),
+    windowsLicensing: createWindowsLicensingApi(() => api),
     providerAccounts: createProviderAccountsApi(() => api),
     agentSettings: createAgentSettingsApi(() => api),
     apiKeys: createApiKeysApi(() => api),
@@ -325,7 +334,12 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     })(),
     terminal: createTerminalApi(() => api, realtime),
     skills: createSkillsApi(() => api),
+    voice: createVoiceApi(() => api),
     realtime,
-    files: realtime,
+    files: {
+      listFiles: realtime.listFiles.bind(realtime),
+      findFiles: realtime.findFiles.bind(realtime),
+      ...createWorkspaceFilesApi(() => api, options.fetch),
+    },
   };
 }

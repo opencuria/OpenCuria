@@ -20,9 +20,16 @@ from dataclasses import replace
 
 from apps.credentials.services import CredentialSvc
 from common.exceptions import ConflictError
+from common.guest_os import WINDOWS
 from common.utils import decrypt_value
 
-from .models import PluginCredentialRequirement, PluginMcpServer, PluginSkill
+from .bundled import computer_use
+from .models import (
+    Plugin,
+    PluginCredentialRequirement,
+    PluginMcpServer,
+    PluginSkill,
+)
 from .repositories import (
     OrgPluginActivationRepository,
     PluginCredentialRequirementRepository,
@@ -34,6 +41,7 @@ from .repositories import (
 from .runtime_snapshot import (
     DesktopResourceSnapshot,
     EffectivePluginSnapshot,
+    McpServerGuestOverride,
     PluginMcpServerSnapshot,
     PluginRequirementSnapshot,
     PluginResourcesSnapshot,
@@ -41,10 +49,25 @@ from .runtime_snapshot import (
     PreparedPluginRuntime,
     WorkspacePluginSnapshot,
 )
+from .services import PLAYWRIGHT_MCP_WINDOWS_ARGS, PLAYWRIGHT_PLUGIN_SLUG
 
 logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*credential\.([A-Za-z0-9_.-]{1,128})\s*\}\}")
+
+#: Guest OS deviations of seeded global MCP servers, by (plugin, server) slug.
+GLOBAL_SERVER_GUEST_OVERRIDES: dict[
+    tuple[str, str], dict[str, McpServerGuestOverride]
+] = {
+    (PLAYWRIGHT_PLUGIN_SLUG, "playwright"): {
+        WINDOWS: McpServerGuestOverride(args=tuple(PLAYWRIGHT_MCP_WINDOWS_ARGS))
+    },
+    (computer_use.PLUGIN_SLUG, computer_use.SERVER_SLUG): {
+        WINDOWS: McpServerGuestOverride(
+            unavailable="Computer Use is not available for Windows workspaces"
+        )
+    },
+}
 
 
 class PluginCredentialConfigError(ValueError):
@@ -88,6 +111,15 @@ def _service_visible_to_org(service, org_id: uuid.UUID) -> bool:
     """Return True when *service* is global or owned by *org_id*."""
     service_org = getattr(service, "organization_id", None)
     return service_org is None or str(service_org) == str(org_id)
+
+
+def _guest_overrides(
+    plugin: Plugin, server: PluginMcpServer
+) -> dict[str, McpServerGuestOverride]:
+    """Return the guest OS deviations of a seeded global MCP server."""
+    if plugin.organization_id is not None:
+        return {}
+    return dict(GLOBAL_SERVER_GUEST_OVERRIDES.get((plugin.slug, server.slug), {}))
 
 
 def placeholder_keys(value: str) -> list[str]:
@@ -181,6 +213,7 @@ def build_workspace_plugin_snapshot(
                 request_timeout_seconds=server.request_timeout_seconds,
                 tool_policy=dict(server.tool_policy or {}),
                 runtime_artifact=dict(server.runtime_artifact or {}),
+                guest_overrides=_guest_overrides(plugin, server),
             )
             for server in servers_by_plugin.pop(plugin.id, [])
         )

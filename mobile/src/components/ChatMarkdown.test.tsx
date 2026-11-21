@@ -6,7 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react-native";
-import { Pressable, Text } from "react-native";
+import { Image, Pressable, Text } from "react-native";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ThemeProvider } from "../ui/theme";
 
@@ -284,6 +284,118 @@ describe("ChatMarkdown media handling", () => {
     expect(screen.getByTestId("image-preview")).toBeTruthy();
     tree.unmount();
     expect(releases[1]).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows large media as a blurred preview that loads on tap and stays loaded", async () => {
+    const resolver = Object.assign(
+      jest.fn().mockResolvedValue("file:///private/big.png"),
+      {
+        describe: jest.fn().mockResolvedValue({
+          size: 12 * 1024 * 1024,
+          thumbnailUrl: "https://curia.test/thumbnail/big.png",
+        }),
+      },
+    );
+    const markdown = "![big](/workspace/big.png)";
+    const tree = render(
+      <ThemeProvider>
+        <ChatMarkdown markdown={markdown} resolveMedia={resolver} />
+      </ThemeProvider>,
+    );
+    const placeholder = await screen.findByRole("button", {
+      name: "Load image big, 12.0 MB",
+    });
+    expect(screen.getByText("12.0 MB")).toBeTruthy();
+    expect(
+      screen
+        .UNSAFE_getAllByType(Image)
+        .map(({ props }) => props)
+        .find(({ source }) => source.uri.includes("/thumbnail/")),
+    ).toMatchObject({
+      source: { uri: "https://curia.test/thumbnail/big.png" },
+      blurRadius: expect.any(Number),
+      cachePolicy: "memory",
+    });
+    expect(resolver).not.toHaveBeenCalled();
+    fireEvent.press(placeholder);
+    expect(
+      await screen.findByRole("button", { name: "Open image preview big" }),
+    ).toBeTruthy();
+    expect(resolver).toHaveBeenCalledTimes(1);
+
+    // Scrolled away and back, the requested picture loads without asking.
+    tree.rerender(
+      <ThemeProvider>
+        <ChatMarkdown
+          markdown={markdown}
+          resolveMedia={resolver}
+          mediaVisible={false}
+        />
+      </ThemeProvider>,
+    );
+    tree.rerender(
+      <ThemeProvider>
+        <ChatMarkdown markdown={markdown} resolveMedia={resolver} />
+      </ThemeProvider>,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Open image preview big" }),
+    ).toBeTruthy();
+    expect(resolver).toHaveBeenCalledTimes(2);
+  });
+
+  it("says when media is too large to show and never loads it", async () => {
+    const resolver = Object.assign(jest.fn(), {
+      describe: jest.fn().mockResolvedValue({
+        size: 600 * 1024 * 1024,
+        thumbnailUrl: "",
+      }),
+    });
+    render(
+      <ThemeProvider>
+        <ChatMarkdown
+          markdown={"![huge](/workspace/huge.mp4)"}
+          resolveMedia={resolver}
+        />
+      </ThemeProvider>,
+    );
+    expect(
+      await screen.findByText("Too large to show (max 500 MB)"),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it("streams small videos from their link and offers to play large ones", async () => {
+    const resolver = Object.assign(
+      jest.fn(async (path: string) => `https://curia.test/content${path}`),
+      {
+        describe: jest.fn(async (path: string) => ({
+          size: path.includes("long") ? 80 * 1024 * 1024 : 1024,
+          thumbnailUrl: "",
+        })),
+      },
+    );
+    render(
+      <ThemeProvider>
+        <ChatMarkdown
+          markdown={
+            "![short](/workspace/short.mp4)\n\n![long](/workspace/long.mp4)"
+          }
+          resolveMedia={resolver}
+        />
+      </ThemeProvider>,
+    );
+    const short = await screen.findByLabelText("short");
+    expect(short.props.player.source).toBe(
+      "https://curia.test/content/workspace/short.mp4",
+    );
+    fireEvent.press(
+      screen.getByRole("button", { name: "Play video long, 80.0 MB" }),
+    );
+    expect((await screen.findByLabelText("long")).props.player.source).toBe(
+      "https://curia.test/content/workspace/long.mp4",
+    );
   });
 
   it("renders a workspace video reference as a native video card, not an image", async () => {

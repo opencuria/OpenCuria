@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import json
+import posixpath
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -19,6 +20,7 @@ except ImportError:  # Keep native-engine imports usable before SDK installation
     _SdkTransport = object  # type: ignore[assignment,misc]
 
 from ...access.base import StreamClosedError, WorkspaceAccessor, WorkspaceByteStream
+from ...access.guest import guest_of
 
 MAX_JSON_LINE_BYTES = 8 * 1024 * 1024
 
@@ -110,14 +112,14 @@ class ClaudeWorkspaceTransport(_SdkTransport):
                         raise ValueError("Claude SDK JSON message exceeds size limit")
                     value = self._parse_line(line)
                     if value is not None:
-                        yield value
+                        yield self._workspace_paths(value)
                 if len(pending.encode("utf-8")) > MAX_JSON_LINE_BYTES:
                     raise ValueError("Claude SDK JSON message exceeds size limit")
             pending += decoder.decode(b"", final=True)
             if pending.strip():
                 value = self._parse_line(pending)
                 if value is not None:
-                    yield value
+                    yield self._workspace_paths(value)
             exit_code = await asyncio.wait_for(
                 self._stream.wait_closed(), timeout=self._close_timeout
             )
@@ -137,6 +139,22 @@ class ClaudeWorkspaceTransport(_SdkTransport):
         except Exception:
             await self.close()
             raise
+
+    def _workspace_paths(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Give the SDK workspace paths where native guests report their own.
+
+        The SDK keys mirrored transcripts by ``filePath`` relative to the POSIX
+        ``CLAUDE_CONFIG_DIR/projects``; a native Windows CLI reports
+        ``C:\\workspace\\...`` there. Paths outside the workspace stay as
+        reported, so the SDK drops those frames.
+        """
+        path = message.get("filePath")
+        if message.get("type") != "transcript_mirror" or not isinstance(path, str):
+            return message
+        mapped = guest_of(self._accessor).to_workspace_path(path)
+        if mapped is None or mapped == path:
+            return message
+        return {**message, "filePath": posixpath.normpath(mapped)}
 
     @staticmethod
     def _parse_line(line: str) -> dict[str, Any] | None:

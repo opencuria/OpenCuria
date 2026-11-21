@@ -21,7 +21,7 @@ from ..chunking import (
     split_base64_chunks,
 )
 
-UploadKind = Literal["harness-write", "browser-upload"]
+UploadKind = Literal["harness-write"]
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
@@ -31,8 +31,6 @@ class UploadTarget:
 
     workspace_id: str
     path: str
-    filename: str = ""
-    is_directory: bool = False
     mode: int = 0o644
 
 
@@ -47,7 +45,7 @@ class _PendingUpload:
 
 
 class UploadTransfers:
-    """Own pending uploads shared by browser uploads and harness writes."""
+    """Own pending chunked harness writes (browsers upload over HTTP)."""
 
     def __init__(self) -> None:
         """Create an empty connection-scoped upload buffer."""
@@ -87,8 +85,7 @@ class UploadTransfers:
         """Reserve a validated transfer in the shared 16-upload buffer budget."""
         key = (kind, request_id)
         if key in self._uploads:
-            label = "write" if kind == "harness-write" else "upload"
-            raise ValueError(f"{label} already in progress")
+            raise ValueError("write already in progress")
         if len(self._uploads) >= 16:
             raise ValueError("too many concurrent uploads")
         self._uploads[key] = _PendingUpload(
@@ -153,13 +150,10 @@ class UploadTransfers:
         """Consume a complete upload, preserving namespace-specific wire errors."""
         key = (kind, request_id)
         upload = self._uploads.get(key)
-        label = "write" if kind == "harness-write" else "upload"
+        label = "write"
         if upload is None:
             raise ValueError(f"unknown {label} transfer")
-        # Harness writes check identity before the finish count. Browser uploads
-        # historically check the count first; retain that error precedence.
-        if kind == "harness-write":
-            self._check_target(upload, workspace_id, path, label=label)
+        self._check_target(upload, workspace_id, path, label=label)
         announced = announcement.get("total_chunks", upload.total_chunks)
         try:
             announced_n = int(announced)  # type: ignore[arg-type]
@@ -168,7 +162,6 @@ class UploadTransfers:
         if announced_n != upload.total_chunks:
             raise ValueError(f"total_chunks mismatch for {label}")
         self._uploads.pop(key)
-        self._check_target(upload, workspace_id, path, label="upload")
         total = upload.total_chunks
         missing = [i for i in range(total) if i not in upload.chunks]
         if missing:

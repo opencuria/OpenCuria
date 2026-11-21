@@ -7,7 +7,8 @@ on Android (`@expo/ui`, native menus, native navigation and text editing).
 ## Features
 
 - Workspaces and chats: live output, subtasks, permission/question gates, Markdown,
-  mentions, skills, model choice, photo/camera/document attachments.
+  mentions, skills, model choice, photo/camera/document attachments. Messages sent
+  while the agent works steer its turn; holding Send schedules a message for later.
 - Workspace tools: Git, the KasmVNC desktop (trackpad and keyboard), terminal, files.
 - Apps published by agents (`app_publish`): installed and run inside OpenCuria like
   in Expo Go, also offline, with an app menu (shake, three fingers or menu button)
@@ -15,8 +16,14 @@ on Android (`@expo/ui`, native menus, native navigation and text editing).
   [`modules/opencuria-app-runtime`](modules/opencuria-app-runtime/README.md).
 - Scheduled tasks, push notifications, iOS Live Activities and every webapp setting.
   MCP OAuth connections finish in the browser.
+- Dictation as in the webapp: the microphone takes Send's place while the draft
+  is empty. Recordings are saved on the device first (`src/voice/`), wait there
+  through lost connections and restarts, and their text goes to the draft of
+  the chat they were recorded in. Sign out deletes them.
 - Offline mode: opened chats and their pictures are cached per account
-  (`src/offline/`) and shown read-only when the server is unreachable.
+  (`src/offline/`) and shown read-only when the server is unreachable. Composer
+  drafts (one per chat and engine, as in the webapp) are kept there too, never in
+  AsyncStorage, which installed apps share; sign out deletes both.
 
 ## Local development
 
@@ -33,6 +40,13 @@ npm run dev:mobile                    # Metro for the dev client, not Expo Go
 Use `npx expo run:ios` on a Mac. Rebuild the development client after native
 dependency changes.
 
+Reanimated stays at 4.5.5, above SDK 57's 4.5.1, whose settled animations can snap
+back to stale values. The root `overrides` keep one copy and `expo.install.exclude`
+stops `expo install --fix` from downgrading it; drop both with the next SDK upgrade.
+
+`react-native-enriched-markdown` is configured in `package.json` (`enriched-markdown`),
+not as an Expo plugin. Its video player stays off: chat videos play through `expo-video`.
+
 `EXPO_PUBLIC_DEFAULT_SERVER_URL` only prefills the sign-in screen and is public; never
 put secrets in it. `10.0.2.2` reaches the host from the Android emulator; for a USB
 device use `adb reverse tcp:8000 tcp:8000` and `adb reverse tcp:8081 tcp:8081`
@@ -43,11 +57,16 @@ hosts; public hosts need `https://`.
 
 - `app/`: Expo Router routes only. Screens live in `src/screens/`; never add `src/app/`.
 - `src/state/chatController.ts`: REST hydration, live subscriptions, immutable chat snapshots.
-- `src/components/`, `src/ui/`: chat presentation and native controls.
+- `src/components/`, `src/ui/`: chat presentation and native controls. One design
+  language everywhere: ink on a white/black canvas (`theme.primary` is the text
+  color), color only for status (`ui/statusColors.ts`) and destructive actions,
+  shared list states in `ui/formStates.ts`.
 - `src/tools/`: workspace tools sheet (Git, desktop, terminal, files).
 - `src/settings/`: settings sheet and pages.
 - `src/apps/`: installing and opening published apps. After adding or upgrading a
   native dependency run `node mobile/scripts/sync-app-runtime.mjs`.
+- `src/voice/`: dictation (expo-audio capture, saved recordings, transcription
+  queue from `@opencuria/chat-core/voiceTranscriptions`).
 - `src/scheduledTasks/`, `src/notifications/`, `src/widgets/`, `src/offline/`,
   `src/platform/` (secure storage, pickers, uploads, media cache).
 - `modules/`: local Expo modules (app runtime, terminal, highlighter, PDF, toolbar).

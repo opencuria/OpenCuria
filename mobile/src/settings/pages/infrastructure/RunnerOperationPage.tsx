@@ -1,10 +1,13 @@
 import React, { useState } from "react";
 import { Alert } from "react-native";
 import type { OperationDisposition } from "@opencuria/client";
-import type { NativeFormSection } from "../../../ui/NativeForm.types";
+import type {
+  NativeFormRow,
+  NativeFormSection,
+} from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { DISPOSITION_TITLES } from "./runners";
@@ -58,6 +61,19 @@ export function RunnerOperationPage({
   };
 
   const data = inspection.data;
+  const button = (action: OperationDisposition): NativeFormRow => ({
+    kind: "button",
+    id: action,
+    testID: `dispose-${action}`,
+    title: DISPOSITION_TITLES[action],
+    symbol: action === "retry" ? "arrow.clockwise" : undefined,
+    destructive: action === "acknowledge_interrupted",
+    busy: busy === action,
+    disabled: Boolean(busy),
+    onPress: () => choose(action),
+  });
+  // Closing the operation is destructive: it stands alone, last.
+  const closable = data?.permitted_actions.includes("acknowledge_interrupted");
   const sections: NativeFormSection[] = data
     ? [
         {
@@ -78,16 +94,9 @@ export function RunnerOperationPage({
               label: "Phase",
               value: data.phase.replaceAll("_", " "),
             },
-            ...data.permitted_actions.map((action) => ({
-              kind: "button" as const,
-              id: action,
-              testID: `dispose-${action}`,
-              title: DISPOSITION_TITLES[action],
-              destructive: action === "acknowledge_interrupted",
-              busy: busy === action,
-              disabled: Boolean(busy),
-              onPress: () => choose(action),
-            })),
+            ...data.permitted_actions
+              .filter((action) => action !== "acknowledge_interrupted")
+              .map(button),
           ],
         },
         {
@@ -114,17 +123,20 @@ export function RunnerOperationPage({
             },
           ],
         },
+        ...(closable
+          ? [{ id: "close", rows: [button("acknowledge_interrupted")] }]
+          : []),
       ]
     : [];
+  const failure = data ? undefined : loadFailure("operation", inspection);
 
   return (
     <SettingsPage
       title="Operation"
       sections={
-        inspection.error && !data
-          ? loadErrorSections(inspection.error, () => void inspection.reload())
-          : sections
+        failure ? [] : [...refreshError("operation", inspection), ...sections]
       }
+      empty={failure}
       loading={!data && !inspection.error}
       onRefresh={inspection.reload}
       testID="settings-runner-operation"

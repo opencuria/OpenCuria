@@ -13,6 +13,7 @@ import {
   validatePluginForm,
 } from "@opencuria/chat-core/pluginForms";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
+import { errorRows } from "../../../ui/formStates";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
@@ -49,7 +50,7 @@ export function PluginEditorPage({
         empty={{
           title: "Draft unavailable",
           description: "Open the plugin again to edit it.",
-          symbol: "exclamationmark.triangle.fill",
+          symbol: "exclamationmark.triangle",
         }}
       />
     );
@@ -212,10 +213,8 @@ export function PluginEditorPage({
     {
       id: "requirements",
       title: "Credential requirements",
-      footer: services.error
-        ? `Credential services could not be loaded: ${services.error}`
-        : "Reference a requirement in environment variables and headers as {{credential.KEY}}.",
-      footerTone: services.error ? "danger" : "muted",
+      footer:
+        "Reference a requirement in environment variables and headers as {{credential.KEY}}.",
       rows: [
         ...form.requirements.map((requirement, index) => {
           const problems = entryErrors(
@@ -240,6 +239,14 @@ export function PluginEditorPage({
             route: entryRoute("plugin-requirement", requirement.uid),
           };
         }),
+        ...(services.error
+          ? errorRows(
+              "services",
+              `Couldn’t load credential services: ${services.error}`,
+              () => void services.reload(),
+              services.loading,
+            )
+          : []),
         {
           kind: "button",
           id: "add-requirement",

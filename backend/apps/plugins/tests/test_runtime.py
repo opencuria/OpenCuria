@@ -756,3 +756,64 @@ def test_plugin_runtime_rejects_internal_provider_attachments(
         ConflictError, match="Internal provider secrets cannot be used by plugins"
     ):
         resolve(snapshot, workspace=org_ctx["workspace"])
+
+
+@pytest.mark.django_db
+def test_seeded_servers_carry_their_windows_deviations(org_ctx):
+    """Global Playwright and Computer Use resolve per guest OS; org copies do not."""
+    from apps.plugins.bundled import computer_use
+    from apps.plugins.runtime_snapshot import McpServerUnavailableError
+    from apps.plugins.services import PLAYWRIGHT_MCP_ARGS, PLAYWRIGHT_MCP_WINDOWS_ARGS
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    org, user = org_ctx["org"], org_ctx["user"]
+    playwright = Plugin.objects.get(slug="playwright", organization__isnull=True)
+    copy = PluginService().create_org_plugin(
+        org_id=org.id,
+        user=user,
+        name="Playwright copy",
+        slug="playwright",
+        skills=[],
+        mcp_servers=[
+            {"name": "Playwright", "slug": "playwright", "command": "npx", "args": []}
+        ],
+    )
+    plugin_ids = [playwright.id, computer_use.PLUGIN_ID, uuid.UUID(str(copy["id"]))]
+    for plugin_id in plugin_ids:
+        PluginService().set_org_activation(
+            plugin_id, org_id=org.id, user=user, active=True
+        )
+    WorkspaceConfigurationService().update(
+        workspace_id=org_ctx["workspace"].id,
+        user=user,
+        organization_id=org.id,
+        credentials=[],
+        plugin_ids=plugin_ids,
+    )
+    snapshot = plugin_runtime.build_workspace_plugin_snapshot(
+        workspace=org_ctx["workspace"], org_id=org.id
+    )
+    servers = {
+        (plugin.organization_id is None, plugin.slug): plugin.mcp_servers[0]
+        for plugin in snapshot.plugins
+    }
+    seeded = servers[(True, "playwright")]
+    assert seeded.for_guest("linux") is seeded
+    assert list(seeded.for_guest("linux").args) == PLAYWRIGHT_MCP_ARGS
+    windows = seeded.for_guest("windows")
+    assert list(windows.args) == PLAYWRIGHT_MCP_WINDOWS_ARGS
+    assert windows.command == seeded.command and windows.env == seeded.env
+    assert "--no-sandbox" not in windows.args
+    assert "--executable-path" not in windows.args
+    cua = servers[(True, "computer-use")]
+    assert cua.runs_on("linux") and not cua.runs_on("windows")
+    assert cua.for_guest("linux") is cua
+    with pytest.raises(
+        McpServerUnavailableError, match="not available for Windows workspaces"
+    ):
+        cua.for_guest("windows")
+    org_copy = servers[(False, "playwright")]
+    assert org_copy.guest_overrides == {}
+    assert org_copy.for_guest("windows") is org_copy

@@ -174,6 +174,7 @@ class ImageManager:
         env_vars: dict[str, str] | None = None,
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
+        guest_os: str | None = None,
     ) -> tuple[uuid.UUID, bool]:
         """Fence clone initialization against inventory while retaining leaf API."""
         kwargs = dict(
@@ -186,6 +187,8 @@ class ImageManager:
             files=files,
             ssh_keys=ssh_keys,
         )
+        if guest_os is not None:
+            kwargs["guest_os"] = guest_os
         if self.lifecycle_context is None:
             return await self._create_workspace_from_image_artifact(**kwargs)
         async with self.lifecycle_context(new_workspace_id):
@@ -201,6 +204,7 @@ class ImageManager:
         env_vars: dict[str, str] | None = None,
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
+        guest_os: str | None = None,
     ) -> tuple[uuid.UUID, bool]:
         """Create a workspace from an image artifact and inject credentials.
 
@@ -223,6 +227,7 @@ class ImageManager:
                 qemu_vcpus=qemu_vcpus,
                 qemu_memory_mb=qemu_memory_mb,
                 qemu_disk_size_gb=qemu_disk_size_gb,
+                **({} if guest_os is None else {"guest_os": guest_os}),
             )
         except OperationRejectedError:
             # Refused before allocation: nothing remains to reconcile or remove.

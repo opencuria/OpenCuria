@@ -1,7 +1,8 @@
-"""Workspace file operations and archive helpers.
+"""Workspace file operations for the harness, the editor and the explorer.
 
-:class:`FileManager` owns bounded reads, uploads/downloads, path checks and
-workspace file mutations. Pure find and tar helpers are also defined here.
+:class:`FileManager` owns bounded harness reads/writes, editor documents,
+listings and path checks. Clients stream file contents over HTTP through the
+backend's process streams instead. Pure find and tar helpers live here too.
 """
 
 from __future__ import annotations
@@ -23,9 +24,6 @@ from ..editor_protocol import EDITOR_FILE_SCRIPT, EDITOR_MAX_BYTES, editor_comma
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
-from .directory_archive import DIRECTORY_ARCHIVE_TOO_LARGE, directory_archive_command
-from .file_download import FILE_DOWNLOAD_TOO_LARGE, file_download_command
-from .workspace_helpers import sanitize_filename as _sanitize_filename
 from .workspace_helpers import sanitize_path as _sanitize_path
 
 logger = structlog.get_logger(__name__)
@@ -45,12 +43,7 @@ _FIND_FILES_SUCCESS_EXIT_CODES = {0, 1, 141}
 
 FILE_READ_DEFAULT_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
 FILE_READ_ABSOLUTE_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
-FILE_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
-#: Max raw bytes served by ``download_file``. Matches the absolute read cap
-#: (100 MiB) so a single download can never buffer unbounded memory even
-#: though payloads are chunked on the wire. Oversized downloads fail with a
-#: small structured error instead of a runner disconnect.
-FILE_DOWNLOAD_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
+FILE_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10 MB, chunked harness writes
 
 
 def build_tar_entries(
@@ -76,27 +69,6 @@ def build_single_file_tar(filename: str, content: bytes) -> bytes:
         info.mode = 0o644
         tar.addfile(info, io.BytesIO(content))
     return buffer.getvalue()
-
-
-def convert_archive_to_tar(content: bytes) -> bytes:
-    """Convert an uploaded archive payload to a plain tar stream."""
-    source = io.BytesIO(content)
-    target = io.BytesIO()
-
-    with tarfile.open(fileobj=source, mode="r:*") as src_tar:
-        with tarfile.open(fileobj=target, mode="w") as dst_tar:
-            for member in src_tar.getmembers():
-                if member.name.startswith("/") or ".." in member.name.split("/"):
-                    raise ValueError("Archive contains unsafe paths")
-                if member.issym() or member.islnk():
-                    raise ValueError("Archive contains unsafe links")
-
-                extracted = None
-                if member.isfile():
-                    extracted = src_tar.extractfile(member)
-                dst_tar.addfile(member, extracted)
-
-    return target.getvalue()
 
 
 def sanitize_find_query(query: str) -> str:
@@ -155,9 +127,6 @@ class FileManager:
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
         # keeps peak channel usage well below 10.
         self._file_read_semaphores: dict[uuid.UUID, asyncio.Semaphore] = {}
-        # Keep conversion serial across this runner's workspaces, as it was on
-        # the event loop, without blocking other requests or multiplying workers.
-        self._archive_conversion_lock = asyncio.Lock()
         self._editor_write_lock = asyncio.Lock()
 
     @live_interaction
@@ -232,28 +201,6 @@ class FileManager:
                     info.instance_id, command=["rm", "-f", "--", temporary],
                     workdir="/workspace",
                 )
-
-    async def _convert_upload_archive(self, content: bytes) -> bytes:
-        """Convert off-loop and retain capacity/admission until the worker exits."""
-        async with self._archive_conversion_lock:
-            conversion = asyncio.create_task(
-                asyncio.to_thread(convert_archive_to_tar, content)
-            )
-            try:
-                return await asyncio.shield(conversion)
-            except asyncio.CancelledError:
-                # Threads cannot be cancelled. Drain even on repeated cancel()
-                # calls, keeping capture admission and the worker budget held.
-                while not conversion.done():
-                    try:
-                        await asyncio.shield(conversion)
-                    except asyncio.CancelledError:
-                        continue
-                    except Exception:
-                        break
-                if not conversion.cancelled():
-                    conversion.exception()
-                raise
 
     @staticmethod
     def _file_path(path: str, *, allow_external: bool) -> str:
@@ -516,148 +463,6 @@ class FileManager:
         }
 
     @live_interaction
-    async def upload_file(
-        self,
-        workspace_id: uuid.UUID,
-        path: str,
-        filename: str,
-        content_b64: str,
-        is_directory: bool = False,
-    ) -> None:
-        """Upload a file into the workspace VM.
-
-        Args:
-            workspace_id: Target workspace.
-            path: Directory path to upload into.
-            filename: Name of the file to create.
-            content_b64: Base64-encoded file content.
-            is_directory: If True, content is a tar.gz archive to extract.
-        """
-        safe_path = _sanitize_path(path)
-        safe_filename = _sanitize_filename(filename)
-        assert self._get_cached is not None and self._get_runtime is not None
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
-        )
-
-        cap = FILE_UPLOAD_MAX_SIZE
-        # Exact cap on decoded bytes: decode + validate first, before any
-        # mkdir side effect. A cheap approximate precheck may reject
-        # obvious oversize early, but it must never reject a valid payload
-        # at/below the cap (padding-aware bound, not a lossy estimate).
-        clean = "".join((content_b64 or "").split())
-        if len(clean) > (cap + 2) // 3 * 4 + 4:
-            raise ValueError(f"Upload exceeds maximum size of {cap} bytes")
-        try:
-            decoded_content = base64.b64decode(clean, validate=True)
-        except Exception as exc:
-            raise ValueError("Invalid base64 upload payload") from exc
-        if len(decoded_content) > cap:
-            raise ValueError(f"Upload exceeds maximum size of {cap} bytes")
-
-        # Ensure target directory exists
-        await runtime.exec_command_wait(
-            info.instance_id,
-            command=["mkdir", "-p", safe_path],
-            workdir="/workspace",
-        )
-
-        if is_directory:
-            archive_data = await self._convert_upload_archive(decoded_content)
-            if self.capture_fence is not None:
-                self.capture_fence.check_current(workspace_id)
-        else:
-            archive_data = build_single_file_tar(safe_filename, decoded_content)
-
-        await runtime.put_archive(
-            info.instance_id,
-            safe_path,
-            archive_data,
-        )
-
-        logger.info(
-            "file_uploaded",
-            workspace_id=str(workspace_id),
-            path=safe_path,
-            filename=safe_filename,
-        )
-
-    @live_interaction
-    async def download_file(
-        self,
-        workspace_id: uuid.UUID,
-        path: str,
-    ) -> dict:
-        """Download a file or directory from the workspace VM.
-
-        Returns a dict with ``content`` (base64), ``filename``, ``is_archive``
-        and ``size`` (raw byte count). For directories, the content is a
-        tar.gz archive. Payloads larger than ``FILE_DOWNLOAD_MAX_SIZE``
-        raise ``ValueError`` so callers can return a small structured error
-        instead of buffering unbounded memory.
-        """
-        safe_path = _sanitize_path(path)
-        assert self._get_cached is not None and self._get_runtime is not None
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
-        )
-
-        # Probe directories or download regular files in one guest exec. Keep
-        # containment separate so symlink escapes fail before any file is read.
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=file_download_command(safe_path, FILE_DOWNLOAD_MAX_SIZE),
-            workdir="/workspace",
-        )
-        is_dir = exit_code == 0 and output == "directory\n"
-
-        if is_dir:
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=directory_archive_command(safe_path, FILE_DOWNLOAD_MAX_SIZE),
-                workdir="/workspace",
-            )
-            filename = os.path.basename(safe_path) + ".tar.gz"
-        else:
-            filename = os.path.basename(safe_path)
-
-        if exit_code in (FILE_DOWNLOAD_TOO_LARGE, DIRECTORY_ARCHIVE_TOO_LARGE):
-            raise ValueError(
-                f"Download exceeds maximum size of {FILE_DOWNLOAD_MAX_SIZE} bytes"
-            )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to download: {output}")
-
-        size_output, separator, output = output.partition("\n")
-        try:
-            raw_size = int(size_output)
-            if not separator or raw_size < 0:
-                raise ValueError("Missing download size")
-        except ValueError as exc:
-            raise RuntimeError(
-                f"Failed to download: invalid size {size_output!r}"
-            ) from exc
-        if raw_size > FILE_DOWNLOAD_MAX_SIZE:
-            raise ValueError(
-                f"Download exceeds maximum size of {FILE_DOWNLOAD_MAX_SIZE} bytes"
-            )
-
-        return {
-            "content": output.strip(),
-            "filename": filename,
-            "is_archive": is_dir,
-            "size": raw_size,
-        }
-
-    @live_interaction
     async def write_file_content(
         self,
         workspace_id: uuid.UUID,
@@ -729,7 +534,6 @@ class FileManager:
 __all__ = [
     "FIND_FILES_DEFAULT_LIMIT",
     "FIND_FILES_PRUNE_NAMES",
-    "FILE_DOWNLOAD_MAX_SIZE",
     "FILE_READ_ABSOLUTE_MAX_SIZE",
     "FILE_READ_DEFAULT_MAX_SIZE",
     "FILE_UPLOAD_MAX_SIZE",
@@ -739,6 +543,5 @@ __all__ = [
     "build_find_files_command",
     "build_single_file_tar",
     "build_tar_entries",
-    "convert_archive_to_tar",
     "sanitize_find_query",
 ]

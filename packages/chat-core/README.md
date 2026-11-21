@@ -16,6 +16,18 @@ immutable snapshots; adapters never implement a second cache policy.
   invalidation revoke outstanding requests.
 - A busy snapshot arriving after idle keeps the final answer until the refresh.
 - Eviction writes a new transcript; published native snapshots are never mutated.
+- A sent prompt shows at once as a `local-user-*` row (`optimisticPrompts.ts`).
+  Every snapshot keeps it until the server's copy arrives, which inherits its
+  `client_key`; lists key rows by `messageRenderKey`, so the bubble stays.
+
+## Dictation
+
+`voiceInput.ts` holds the rules both composers share (limits, waveform levels,
+checks before upload, failure kinds, where the text goes in the draft).
+`runVoiceTranscription` retries lost connections until they return and a busy
+service a few times; `VoiceTranscriptionQueue` keeps recordings in client
+storage until their text was delivered or the user discarded them, so nothing
+has to be recorded twice.
 
 ## Desktop viewer
 

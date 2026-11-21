@@ -4,7 +4,7 @@ import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { PROVIDER_ACCOUNTS } from "./catalog";
@@ -96,29 +96,31 @@ export function ProviderAccountsPage({
         },
       ]
     : [];
+  const failure = accounts.data ? undefined : loadFailure("accounts", accounts);
+  const add = {
+    title: "Add account",
+    symbol: "plus" as const,
+    onPress: () =>
+      navigation.push(route("provider-account", provider.id, "new")),
+  };
 
   return (
     <SettingsPage
       title={provider.name}
       sections={
-        accounts.error && !accounts.data
-          ? loadErrorSections(accounts.error, () => void accounts.reload())
-          : sections
+        failure ? [] : [...refreshError("accounts", accounts), ...sections]
       }
       loading={!accounts.data && !accounts.error}
       onRefresh={accounts.reload}
-      empty={{
-        title: "No accounts yet",
-        description: provider.description,
-        symbol: "person",
-      }}
-      primaryAction={{
-        title: "Add account",
-        symbol: "plus",
-        onPress: () =>
-          navigation.push(route("provider-account", provider.id, "new")),
-        testID: "add-provider-account",
-      }}
+      empty={
+        failure ?? {
+          title: "No accounts yet",
+          description: provider.description,
+          symbol: "person",
+          action: { ...add, testID: "empty-add-provider-account" },
+        }
+      }
+      primaryAction={{ ...add, testID: "add-provider-account" }}
       testID="settings-provider-accounts"
     />
   );

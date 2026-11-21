@@ -11,14 +11,17 @@ import {
   Alert,
   Platform,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { KeyboardController } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
-import type { ResolvedChatMedia } from "../components/useWorkspaceMedia";
+import {
+  formatSendTime,
+  sendLaterTaskInput,
+} from "@opencuria/chat-core/sendLater";
+import type { ChatMediaResolver } from "../components/useWorkspaceMedia";
 import {
   filterMentionCandidates,
   mentionFileSearchQuery,
@@ -34,6 +37,7 @@ import {
 } from "@opencuria/chat-core/harnessModels";
 import type {
   HarnessId,
+  HarnessMessage,
   HarnessSession,
   HarnessSessionMode,
 } from "@opencuria/chat-core/harness";
@@ -51,6 +55,9 @@ import {
   ChatMessages,
   type ComposerAttachment,
 } from "../components";
+import type { ComposerSubmission } from "../components/ChatComposer";
+import { subagentHeader } from "../components/subagentHeader";
+import type { ComposerQueue } from "../components/ComposerSheets";
 import {
   ModelSheet,
   modelSheetEngines,
@@ -60,6 +67,8 @@ import {
   ChatController,
   type ChatControllerSnapshot,
 } from "../state/chatController";
+import { useChatDraft } from "../state/useChatDraft";
+import { useVoiceDictation } from "../voice/useVoiceDictation";
 import {
   MediaCache,
   clearPickedPhotoCache,
@@ -67,12 +76,11 @@ import {
   pickPhoto,
   uploadAttachments,
 } from "../platform";
-import { Banner, Button, NativeModal, NativeAction } from "../ui/primitives";
+import { Banner, NativeModal } from "../ui/primitives";
 import { Drawer } from "../ui/Drawer";
 import { useChromeTopInset } from "../ui/chromeInset";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { WorkspaceSidebar } from "../components/WorkspaceSidebar";
-import { NativeTextField } from "../ui/NativeTextField";
 import { useTheme } from "../ui/theme";
 import { useSession } from "./SessionContext";
 import { useNotifications } from "../notifications/NotificationContext";
@@ -113,6 +121,8 @@ const EMPTY: ChatControllerSnapshot = {
   todos: [],
   permissions: [],
   questions: [],
+  steers: [],
+  scheduled: [],
   activeSessionId: null,
   activeSession: null,
   activeSessionLineage: [],
@@ -154,6 +164,13 @@ type NavigationRequest = {
   sessionId?: string;
   newChat?: boolean;
   notificationTarget?: NotificationTarget;
+};
+/** A sent prompt edited in the composer; the chat's own draft waits meanwhile. */
+type PromptEdit = {
+  messageId: string;
+  sessionId: string;
+  text: string;
+  attachments: ComposerAttachment[];
 };
 
 export function MainScreen(): React.JSX.Element {
@@ -240,16 +257,59 @@ export function MainScreen(): React.JSX.Element {
   const sendingRef = useRef(false);
   const workspaceRef = useRef<string | null>(null);
   const [sheet, setSheet] = useState<SheetName>(null);
-  const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [editing, setEditing] = useState<PromptEdit | null>(null);
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [mode, setMode] = useState<HarnessSessionMode>("build");
   const [harness, setHarness] = useState<HarnessId>("native");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  // Each chat, new chat and engine keeps its own draft, as in the webapp.
+  const draftScope = useMemo(
+    () =>
+      chat.workspaceId
+        ? {
+            workspaceId: chat.workspaceId,
+            sessionId: chat.activeSessionId,
+            harnessId: chat.activeSessionId
+              ? (chat.activeSession?.harness_id ?? "native")
+              : harness,
+          }
+        : null,
+    [
+      chat.workspaceId,
+      chat.activeSessionId,
+      chat.activeSession?.harness_id,
+      harness,
+    ],
+  );
+  const {
+    draft,
+    setDraft,
+    followNext: followDraft,
+    editDraft,
+    flush: flushDrafts,
+  } = useChatDraft(saved, draftScope);
+  /** Settings opens on this page next, e.g. to set up voice input. */
+  const [settingsPath, setSettingsPath] = useState<string[]>([]);
+  // Dictation's text goes to the draft of the chat it was recorded in.
+  const voice = useVoiceDictation({
+    client,
+    account: hasUser ? accountScope : null,
+    offline,
+    scope: draftScope,
+    editDraft,
+    flushDrafts,
+    onOpenSettings: () => {
+      setSettingsPath(["providers"]);
+      setSheet("profile");
+    },
+  });
   const [error, setError] = useState<string | null>(null);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Why the workspace list could not load; cleared by the next success. */
+  const [workspacesError, setWorkspacesError] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -306,6 +366,11 @@ export function MainScreen(): React.JSX.Element {
   );
   /** The chat cannot take a message, as opposed to one being on its way. */
   const chatUnavailable = !navigationReady || !ready || activeIsSubtask;
+  /** The agent is working: a message goes into its running turn. */
+  const steering =
+    navigationReady &&
+    !activeIsSubtask &&
+    chat.activeSession?.status === "busy";
   const runOptions = () => ({
     harnessId: harness,
     mode,
@@ -313,6 +378,36 @@ export function MainScreen(): React.JSX.Element {
     reasoningEffort: effort,
     skillIds,
   });
+  /**
+   * The prompt edit on screen. It ends with its chat, offline, or once its
+   * prompt is gone, e.g. edited elsewhere.
+   */
+  const activeEdit =
+    editing &&
+    !offline &&
+    editing.sessionId === chat.activeSessionId &&
+    (!navigationReady ||
+      chat.messages.some((message) => message.id === editing.messageId))
+      ? editing
+      : null;
+  useEffect(() => {
+    if (editing && !activeEdit) setEditing(null);
+  }, [activeEdit, editing]);
+  /** Text typed into the composer: the edit on screen or the chat's draft. */
+  const setComposerText = (update: string | ((current: string) => string)) => {
+    if (!activeEdit) return setDraft(update);
+    setEditing(
+      (current) =>
+        current && {
+          ...current,
+          text: typeof update === "function" ? update(current.text) : update,
+        },
+    );
+  };
+  const setComposerAttachments = (files: ComposerAttachment[]) => {
+    if (!activeEdit) return setAttachments(files);
+    setEditing((current) => current && { ...current, attachments: files });
+  };
 
   // Terminal shells and Git state outlive the tools sheet, not the client.
   useEffect(() => {
@@ -366,18 +461,25 @@ export function MainScreen(): React.JSX.Element {
   activeSessionRef.current = chat.activeSessionId;
   /**
    * Pictures come from the workspace and are saved with the chat; offline,
-   * or while the workspace is stopped, the saved copy shows.
+   * or while the workspace is stopped, the saved copy shows. Large media wait
+   * for a tap (`describe`).
    */
-  const resolveMedia = useCallback(
-    async (path: string): Promise<ResolvedChatMedia> => {
+  const resolveMedia = useMemo<ChatMediaResolver>(() => {
+    /** Finds the copy saved with the chat shown when it was called. */
+    const savedCopy = (path: string) => {
       const sessionId = activeSessionRef.current;
       const account = savedRef.current;
-      const savedCopy = () =>
+      return () =>
         sessionId && account
           ? account.media(sessionId, path).catch(() => null)
           : Promise.resolve(null);
+    };
+    const resolve = async (path: string) => {
+      const sessionId = activeSessionRef.current;
+      const account = savedRef.current;
+      const saved = savedCopy(path);
       if (offlineRef.current) {
-        const uri = await savedCopy();
+        const uri = await saved();
         if (uri) return uri;
         throw Object.assign(
           new Error("This picture is not saved on this device."),
@@ -393,13 +495,25 @@ export function MainScreen(): React.JSX.Element {
             .catch(() => undefined);
         return pinned;
       } catch (cause) {
-        const uri = await savedCopy();
+        const uri = await saved();
         if (uri) return uri;
         throw cause;
       }
-    },
-    [media],
-  );
+    };
+    // Without the workspace, saved copies show as they are.
+    const describe = async (path: string) => {
+      const saved = savedCopy(path);
+      if (offlineRef.current) return null;
+      if (!media) throw new Error("No workspace selected");
+      try {
+        return await media.describe(path);
+      } catch (cause) {
+        if (await saved()) return null;
+        throw cause;
+      }
+    };
+    return Object.assign(resolve, { describe });
+  }, [media]);
 
   const loadOverview = useCallback(
     async (background = false) => {
@@ -424,6 +538,7 @@ export function MainScreen(): React.JSX.Element {
         )
           return;
         setWorkspaces(ws);
+        setWorkspacesError(null);
         setConversations(rows);
         setSkills(loadedSkills);
         void savedRef.current?.saveOverview(ws, rows).catch(() => undefined);
@@ -467,8 +582,12 @@ export function MainScreen(): React.JSX.Element {
         if (
           mountedRef.current &&
           requestGeneration === overviewGeneration.current
-        )
+        ) {
           setError(errorMessage(cause, "Could not load workspace data."));
+          setWorkspacesError(
+            errorMessage(cause, "Check your connection and try again."),
+          );
+        }
       } finally {
         if (
           mountedRef.current &&
@@ -501,6 +620,7 @@ export function MainScreen(): React.JSX.Element {
       (overview?.conversations ?? []).map((row) => [row.session_id, row]),
     );
     setWorkspaces(overview?.workspaces ?? []);
+    setWorkspacesError(null);
     setConversations(
       savedConversations(
         chats.map((chat) => ({
@@ -609,11 +729,11 @@ export function MainScreen(): React.JSX.Element {
     selectedWorkspaceRef.current = null;
     setWorkspaceId(null);
     setNavigation(null);
-    setDraft("");
     setAttachments([]);
     setSkillIds([]);
     setConversations([]);
     setWorkspaces([]);
+    setWorkspacesError(null);
     setCatalogError(null);
     setEngines([]);
     setModels([]);
@@ -861,6 +981,10 @@ export function MainScreen(): React.JSX.Element {
     )
       return;
     selectionDirty.current = false;
+    // The draft on screen stays, as in the webapp.
+    followDraft(
+      (from, to) => !from.sessionId && !to.sessionId && to.harnessId === next,
+    );
     setHarness(next);
     setMode(nextMode);
     const defaults = harnessAgentDefaults(next, nextMode, {
@@ -927,15 +1051,34 @@ export function MainScreen(): React.JSX.Element {
         throw new Error(
           "Choose an available, running workspace before sending a message.",
         );
-      if (files.length && !client.realtime.isConnected)
-        throw new Error(
-          "Connect to the workspace before uploading attachments.",
-        );
       sendingRef.current = true;
       const ownerGeneration = generation.current;
       const ownerWorkspace = workspace.id;
       const ownerSession = chat.activeSessionId;
       const submittedDraft = draft;
+      const options = {
+        harnessId: harness,
+        mode,
+        model,
+        reasoningEffort: effort,
+        skillIds: usedSkills,
+      };
+      // The text shows while attachments upload; their mentions follow. A
+      // steer goes to the queue instead.
+      const dropPreview =
+        files.length &&
+        controller.getSnapshot().activeSession?.status !== "busy"
+          ? controller.previewPrompt(text, options)
+          : undefined;
+      // What is typed while a new chat is created stays with that chat.
+      const stopFollowing = ownerSession
+        ? undefined
+        : followDraft(
+            (from, to) =>
+              !from.sessionId &&
+              Boolean(to.sessionId) &&
+              to.workspaceId === ownerWorkspace,
+          );
       try {
         const paths = files.length
           ? await uploadAttachments(client, ownerWorkspace, files)
@@ -952,13 +1095,24 @@ export function MainScreen(): React.JSX.Element {
         const prompt = appendUploadMentions(text, paths);
         if (!prompt.trim())
           throw new Error("Attach a file or enter a message first.");
-        const accepted = await controller.send(prompt, {
-          harnessId: harness,
-          mode,
-          model,
-          reasoningEffort: effort,
-          skillIds: usedSkills,
-        });
+        // A running agent receives the message in its current turn.
+        if (controller.getSnapshot().activeSession?.status === "busy") {
+          await controller.steer(prompt, options);
+          if (
+            ownerGeneration === generation.current &&
+            selectedWorkspaceRef.current === ownerWorkspace
+          ) {
+            setDraft((current) =>
+              current === submittedDraft || current.trim() === text
+                ? ""
+                : current,
+            );
+            setAttachments([]);
+            setError(null);
+          }
+          return;
+        }
+        const accepted = await controller.send(prompt, options);
         if (
           ownerGeneration !== generation.current ||
           selectedWorkspaceRef.current !== ownerWorkspace
@@ -975,6 +1129,9 @@ export function MainScreen(): React.JSX.Element {
           loadOverview(true),
         ]);
       } finally {
+        // Sent prompts were taken over; this only takes back an unsent one.
+        dropPreview?.();
+        stopFollowing?.();
         sendingRef.current = false;
       }
     },
@@ -990,10 +1147,214 @@ export function MainScreen(): React.JSX.Element {
       model,
       effort,
       draft,
+      setDraft,
+      followDraft,
       loadOverview,
       navigationReady,
     ],
   );
+
+  /** Moves a sent prompt into the composer; the transcript ends with it. */
+  const startEdit = (message: HarnessMessage) => {
+    if (!chat.activeSessionId) return;
+    setEditing({
+      messageId: message.id,
+      sessionId: chat.activeSessionId,
+      text: message.content,
+      attachments: [],
+    });
+  };
+
+  /** Sends the edited prompt: the chat restarts from it. */
+  const submitEdit = async ({
+    text,
+    skillIds: usedSkills,
+    attachments: files,
+  }: ComposerSubmission) => {
+    const target = activeEdit;
+    if (!client || !controller || !workspace || !target || chatUnavailable)
+      throw new Error(
+        "Choose an available, running workspace before editing a message.",
+      );
+    const ownerGeneration = generation.current;
+    const paths = files.length
+      ? await uploadAttachments(client, workspace.id, files)
+      : [];
+    if (
+      ownerGeneration !== generation.current ||
+      controller.getSnapshot().activeSessionId !== target.sessionId
+    )
+      throw new Error(
+        "The conversation changed before sending. Please try again.",
+      );
+    const prompt = appendUploadMentions(text, paths);
+    if (!prompt.trim())
+      throw new Error("Attach a file or enter a message first.");
+    await controller.edit(
+      target.messageId,
+      prompt,
+      { ...runOptions(), skillIds: usedSkills },
+      target.sessionId,
+    );
+    setEditing((current) =>
+      current?.messageId === target.messageId ? null : current,
+    );
+    setError(null);
+    await Promise.allSettled([
+      client.harness.saveRecentModel(model, effort),
+      loadOverview(true),
+    ]);
+  };
+
+  const upsertSchedule = schedules.upsert;
+  /**
+   * "Send later": an open chat gets a scheduled message; a new chat becomes a
+   * one-time scheduled task that starts it.
+   */
+  const scheduleDraft = useCallback(
+    async (
+      { text, skillIds: usedSkills, attachments: files }: ComposerSubmission,
+      sendAt: Date,
+    ) => {
+      if (
+        !client ||
+        !controller ||
+        !workspace ||
+        !navigationReady ||
+        !ready ||
+        activeIsSubtask
+      )
+        throw new Error(
+          "Choose an available, running workspace before scheduling a message.",
+        );
+      const ownerGeneration = generation.current;
+      const ownerWorkspace = workspace.id;
+      const ownerSession = chat.activeSessionId;
+      const paths = files.length
+        ? await uploadAttachments(client, ownerWorkspace, files)
+        : [];
+      if (
+        ownerGeneration !== generation.current ||
+        selectedWorkspaceRef.current !== ownerWorkspace ||
+        controller.getSnapshot().activeSessionId !== ownerSession
+      )
+        throw new Error(
+          "The workspace or conversation changed before scheduling. Please try again.",
+        );
+      const prompt = appendUploadMentions(text, paths);
+      if (!prompt.trim())
+        throw new Error("Attach a file or enter a message first.");
+      if (ownerSession) {
+        await controller.schedule(prompt, sendAt, {
+          harnessId: harness,
+          mode,
+          model,
+          reasoningEffort: effort,
+          skillIds: usedSkills,
+        });
+      } else {
+        const task = await client.scheduledTasks.create(
+          sendLaterTaskInput({
+            workspaceId: ownerWorkspace,
+            prompt,
+            at: sendAt,
+            mode,
+            harnessId: harness,
+            model,
+            reasoningEffort: effort,
+            skillIds: usedSkills,
+          }),
+        );
+        upsertSchedule(task);
+        showToast({
+          title: "New chat scheduled",
+          message: formatSendTime(sendAt),
+          tone: "success",
+        });
+      }
+      if (ownerGeneration === generation.current) {
+        setAttachments([]);
+        setError(null);
+      }
+    },
+    [
+      client,
+      controller,
+      workspace,
+      ready,
+      activeIsSubtask,
+      chat.activeSessionId,
+      harness,
+      mode,
+      model,
+      effort,
+      navigationReady,
+      upsertSchedule,
+    ],
+  );
+
+  /** Puts withdrawn text back below what the user is typing. */
+  const restoreToDraft = useCallback((texts: string[], skills?: string[]) => {
+    const restored = texts.filter((text) => text.trim()).join("\n\n");
+    if (restored)
+      setDraft((current) =>
+        current.trim()
+          ? `${current.replace(/\s+$/, "")}\n\n${restored}`
+          : restored,
+      );
+    if (skills?.length)
+      setSkillIds((current) => [
+        ...current,
+        ...skills.filter((id) => !current.includes(id)),
+      ]);
+  }, []);
+
+  /** Runs an outgoing-message action; a failure becomes a toast. */
+  const queueAction = useCallback(
+    async (title: string, action: () => Promise<void>) => {
+      try {
+        await action();
+      } catch (cause) {
+        showToast({
+          title,
+          message: errorMessage(cause, "Please try again."),
+          tone: "error",
+        });
+      }
+    },
+    [],
+  );
+
+  const outgoing: ComposerQueue | undefined =
+    controller && navigationReady && !offline
+      ? {
+          steers: chat.steers,
+          scheduled: chat.scheduled,
+          canSendNow: !chatUnavailable,
+          onWithdrawSteer: (id) =>
+            queueAction("Couldn’t withdraw the message", async () => {
+              const text = await controller.withdrawSteer(id);
+              if (text) restoreToDraft([text]);
+            }),
+          onSendNow: (id) =>
+            queueAction("Couldn’t send the message", () =>
+              controller.sendScheduledNow(id),
+            ),
+          onReschedule: (id, sendAt) =>
+            queueAction("Couldn’t change the time", () =>
+              controller.reschedule(id, sendAt),
+            ),
+          onEdit: (id) =>
+            queueAction("Couldn’t edit the message", async () => {
+              const message = await controller.withdrawScheduled(id);
+              if (message) restoreToDraft([message.content], message.skill_ids);
+            }),
+          onDelete: (id) =>
+            queueAction("Couldn’t delete the message", async () => {
+              await controller.withdrawScheduled(id);
+            }),
+        }
+      : undefined;
 
   const requestNavigation = (
     workspaceId: string,
@@ -1004,6 +1365,9 @@ export function MainScreen(): React.JSX.Element {
     } = {},
   ) => {
     if (!options.notificationTarget) notifications.controller?.consumeTarget();
+    // The chat opened next shows its own draft.
+    followDraft(null);
+    setEditing(null);
     const revision = ++navigationRevision.current;
     generation.current += 1;
     selectedWorkspaceRef.current = workspaceId;
@@ -1054,7 +1418,6 @@ export function MainScreen(): React.JSX.Element {
           rows.some((item) => item.id === owner.id) ? rows : [...rows, owner],
         );
         setSheet(null);
-        setDraft("");
         setAttachments([]);
         requestNavigation(owner.id, {
           sessionId: target.sessionId,
@@ -1099,7 +1462,6 @@ export function MainScreen(): React.JSX.Element {
       setDrawerError("This conversation’s workspace is no longer available.");
       return;
     }
-    setDraft("");
     setAttachments([]);
     setSheet(null);
     setDrawerError(null);
@@ -1117,7 +1479,6 @@ export function MainScreen(): React.JSX.Element {
       });
       return;
     }
-    setDraft("");
     setAttachments([]);
     setSheet(null);
     setError(null);
@@ -1136,7 +1497,6 @@ export function MainScreen(): React.JSX.Element {
   };
 
   const chooseWorkspace = (chosen: Workspace) => {
-    setDraft("");
     setAttachments([]);
     setSkillIds([]);
     setSheet(null);
@@ -1149,11 +1509,14 @@ export function MainScreen(): React.JSX.Element {
     if (!chosen || chosen.id === workspaceId) return;
     keepSelection.current = true;
     openWorkspace(chosen);
+    followDraft(
+      (from, to) =>
+        !from.sessionId && !to.sessionId && to.workspaceId === chosen.id,
+    );
   };
 
   const newChat = () => {
     if (!workspace || !ready) return;
-    setDraft("");
     setAttachments([]);
     setSkillIds([]);
     setError(null);
@@ -1314,47 +1677,76 @@ export function MainScreen(): React.JSX.Element {
     workspace.runner_online &&
     !isTransitioning,
   );
+  /** A subagent's conversation opens like a page pushed onto its parent chat. */
+  const subagent = subagentHeader(
+    chat.activeSession,
+    chat.activeSessionLineage,
+  );
+  const openRelatedChat = (sessionId: string) => {
+    if (workspaceId) requestNavigation(workspaceId, { sessionId });
+  };
+  const switchWorkspaceAction: NativeMenuAction = {
+    id: "workspace",
+    title: "Switch workspace",
+    symbol: "square.stack.3d.up",
+  };
   const chatMenuActions: NativeMenuAction[] = offline
     ? []
-    : [
-        {
-          id: "workspace",
-          title: "Switch workspace",
-          symbol: "square.stack.3d.up",
-        },
-        ...(chat.activeSession && !activeIsSubtask
-          ? [
-              {
-                id: "rename",
-                title: "Rename chat",
-                symbol: "pencil",
-                disabled: isTransitioning,
-              },
-            ]
-          : []),
-        ...(workspace && !activeIsSubtask
-          ? [
-              {
-                id: "schedule",
-                title: draft.trim()
-                  ? "Schedule this prompt"
-                  : "New scheduled task",
-                symbol: "calendar.badge.clock",
-              },
-            ]
-          : []),
-        ...(activeConversation
-          ? [
-              {
-                id: "delete",
-                title: "Delete chat",
-                symbol: "trash",
-                destructive: true,
-                disabled: isTransitioning || actionBusy,
-              },
-            ]
-          : []),
-      ];
+    : subagent
+      ? [
+          // The subagent header has no tools button of its own.
+          {
+            id: "tools",
+            title: "Git, Desktop, Terminal & Files",
+            symbol: "arrow.triangle.branch",
+            disabled: !toolsAvailable,
+          },
+          ...(subagent.rootId
+            ? [
+                {
+                  id: "root",
+                  title: "Back to main chat",
+                  symbol: "arrow.uturn.backward",
+                },
+              ]
+            : []),
+          switchWorkspaceAction,
+        ]
+      : [
+          switchWorkspaceAction,
+          ...(chat.activeSession
+            ? [
+                {
+                  id: "rename",
+                  title: "Rename chat",
+                  symbol: "pencil",
+                  disabled: isTransitioning,
+                },
+              ]
+            : []),
+          ...(workspace
+            ? [
+                {
+                  id: "schedule",
+                  title: draft.trim()
+                    ? "Schedule this prompt"
+                    : "New scheduled task",
+                  symbol: "calendar.badge.clock",
+                },
+              ]
+            : []),
+          ...(activeConversation
+            ? [
+                {
+                  id: "delete",
+                  title: "Delete chat",
+                  symbol: "trash",
+                  destructive: true,
+                  disabled: isTransitioning || actionBusy,
+                },
+              ]
+            : []),
+        ];
   /** Sheets cover the chat, so the keyboard closes before one opens. */
   const openSheet = (name: Exclude<SheetName, null>) => {
     void KeyboardController.dismiss().catch(() => undefined);
@@ -1363,7 +1755,7 @@ export function MainScreen(): React.JSX.Element {
   const insertIntoChat = chatUnavailable
     ? undefined
     : (text: string) => {
-        setDraft((current) =>
+        setComposerText((current) =>
           !current || /\s$/.test(current)
             ? `${current}${text}`
             : `${current} ${text}`,
@@ -1374,6 +1766,10 @@ export function MainScreen(): React.JSX.Element {
   const chatMenuAction = (id: string) => {
     if (id === "workspace") {
       openSheet("workspaces");
+    } else if (id === "tools") {
+      openSheet("tools");
+    } else if (id === "root" && subagent?.rootId) {
+      openRelatedChat(subagent.rootId);
     } else if (id === "schedule") {
       openSheet("schedule-prompt");
     } else if (id === "rename" && chat.activeSession) {
@@ -1405,6 +1801,16 @@ export function MainScreen(): React.JSX.Element {
         canOpenTools={toolsAvailable}
         menuActions={chatMenuActions}
         onMenuAction={chatMenuAction}
+        detail={
+          subagent
+            ? {
+                title: subagent.title,
+                subtitle: subagent.subtitle,
+                backTitle: subagent.backTitle,
+                onBack: () => openRelatedChat(subagent.parentId),
+              }
+            : undefined
+        }
         navigation={
           <WorkspaceSidebar
             workspaces={workspaces}
@@ -1448,17 +1854,32 @@ export function MainScreen(): React.JSX.Element {
         <ChatLayout
           composer={
             <ChatComposer
-              draft={draft}
-              onDraftChange={(value) => setDraft(value)}
-              onSend={send}
+              draft={activeEdit ? activeEdit.text : draft}
+              onDraftChange={(value) => setComposerText(value)}
+              onSend={activeEdit ? submitEdit : send}
+              onSchedule={offline || activeEdit ? undefined : scheduleDraft}
+              editing={
+                activeEdit
+                  ? {
+                      id: activeEdit.messageId,
+                      onCancel: () => setEditing(null),
+                    }
+                  : undefined
+              }
               onStop={async () => {
-                await controller?.abort();
+                // Stopping drops queued messages; give them back to the draft.
+                const restored = (await controller?.stop()) ?? [];
+                restoreToDraft(restored);
               }}
               busy={navigationReady && chat.busy}
+              // An edit restarts the chat; it never steers a running turn.
+              steering={steering && !activeEdit}
               // Offline a prompt can be written, not sent.
               disabled={offline ? false : chatUnavailable}
               canSend={!offline}
-              placeholder="Ask OpenCuria"
+              placeholder={
+                steering && !activeEdit ? "Steer the agent…" : "Ask OpenCuria"
+              }
               workspace={newChatWorkspace}
               settings={
                 offline
@@ -1477,13 +1898,14 @@ export function MainScreen(): React.JSX.Element {
               }))}
               selectedSkillIds={skillIds}
               onSelectedSkillIdsChange={setSkillIds}
-              attachments={attachments}
-              onAttachmentsChange={setAttachments}
+              attachments={activeEdit ? activeEdit.attachments : attachments}
+              onAttachmentsChange={setComposerAttachments}
               onSearchMentions={offline ? undefined : searchMentions}
               onTakePhoto={async () => pickPhoto("camera")}
               onChoosePhotos={async () => pickPhoto("library")}
               onChooseFiles={async () => pickDocuments()}
               contextKey={contextKey}
+              voice={voice}
               gates={{
                 questions: navigationReady ? chat.questions : EMPTY.questions,
                 permissions: navigationReady
@@ -1508,6 +1930,7 @@ export function MainScreen(): React.JSX.Element {
                     controller!.resolvePermission(id, response),
                   ),
               }}
+              queue={outgoing}
               testID="chat-composer"
             />
           }
@@ -1537,44 +1960,12 @@ export function MainScreen(): React.JSX.Element {
                       onAction={() => {
                         void refresh();
                       }}
-                      onDismiss={() => setError(null)}
+                      onDismiss={() => {
+                        setError(null);
+                        controller?.dismissError();
+                      }}
                       testID="chat-error"
                     />
-                  </View>
-                ) : null}
-                {navigationReady && chat.activeSessionLineage.length > 1 ? (
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      flexWrap: "wrap",
-                      paddingHorizontal: 18,
-                      gap: 4,
-                      backgroundColor: theme.background,
-                    }}
-                  >
-                    {chat.activeSessionLineage.map((ancestor, index) => (
-                      <NativeAction
-                        key={ancestor.id}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Open parent conversation ${ancestor.title}`}
-                        onPress={() => {
-                          if (workspaceId)
-                            requestNavigation(workspaceId, {
-                              sessionId: ancestor.id,
-                            });
-                        }}
-                        style={{
-                          minHeight: 44,
-                          justifyContent: "center",
-                          paddingHorizontal: 6,
-                        }}
-                      >
-                        <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-                          {index ? "› " : "‹ "}
-                          {ancestor.title || ancestor.agent_name}
-                        </Text>
-                      </NativeAction>
-                    ))}
                   </View>
                 ) : null}
               </ChromeOverlay>
@@ -1608,18 +1999,9 @@ export function MainScreen(): React.JSX.Element {
                   : "No chats are saved on this device yet."
                 : undefined
             }
-            onEdit={
-              offline
-                ? undefined
-                : async (messageId, text) => {
-                    await controller!.edit(
-                      messageId,
-                      text,
-                      runOptions(),
-                      chat.activeSessionId,
-                    );
-                  }
-            }
+            // Subtasks take no prompts from the user.
+            onEdit={offline || activeIsSubtask ? undefined : startEdit}
+            editingMessageId={activeEdit?.messageId ?? null}
             onFork={
               offline
                 ? undefined
@@ -1629,7 +2011,6 @@ export function MainScreen(): React.JSX.Element {
                   }
             }
             onOpenSubtask={(id) => {
-              setDraft("");
               setAttachments([]);
               setSkillIds([]);
               if (workspaceId)
@@ -1684,6 +2065,8 @@ export function MainScreen(): React.JSX.Element {
         client={client}
         organizationId={session?.organizationId ?? null}
         workspaces={workspaces}
+        loading={loading}
+        error={workspacesError}
         activeWorkspaceId={workspaceId}
         onOpenWorkspace={chooseWorkspace}
         onRefresh={() => loadOverview(true)}
@@ -1739,9 +2122,11 @@ export function MainScreen(): React.JSX.Element {
 
       <SettingsScreen
         visible={sheet === "profile"}
-        onClose={() =>
-          setSheet((current) => (current === "profile" ? null : current))
-        }
+        initialPath={settingsPath}
+        onClose={() => {
+          setSettingsPath([]);
+          setSheet((current) => (current === "profile" ? null : current));
+        }}
         client={client}
         user={user}
         organizations={organizations}
@@ -1795,24 +2180,36 @@ export function MainScreen(): React.JSX.Element {
         onClose={() => setSheet(null)}
         title="Rename conversation"
         testID="rename-session-sheet"
-      >
-        <NativeTextField
-          label="Conversation name"
-          value={renameText}
-          onChangeText={setRenameText}
-          autoFocus
-        />
-        <Button
-          title="Save name"
-          variant="primary"
-          onPress={() => {
+        primaryAction={{
+          title: "Save",
+          onPress: () => {
             void saveRename();
-          }}
-          disabled={!renameText.trim()}
-          busy={renaming}
-          style={{ alignSelf: "stretch" }}
-        />
-      </NativeModal>
+          },
+          disabled: !renameText.trim(),
+          busy: renaming,
+          testID: "rename-save",
+        }}
+        form={{
+          sections: [
+            {
+              id: "rename",
+              rows: [
+                {
+                  kind: "text",
+                  id: "rename-title",
+                  label: "Name",
+                  value: renameText,
+                  onChange: setRenameText,
+                  autoFocus: true,
+                  onSubmit: () => {
+                    void saveRename();
+                  },
+                },
+              ],
+            },
+          ],
+        }}
+      />
       {workspace && sheet === "file" ? (
         <FileViewerSheet
           key={contextKey}

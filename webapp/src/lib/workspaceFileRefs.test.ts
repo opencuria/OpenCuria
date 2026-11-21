@@ -3,6 +3,7 @@ import {
   buildWorkspaceReferenceMarkdown,
   classifyWorkspaceFile,
   extractWorkspacePathReferences,
+  resolveWorkspaceFilePath,
   resolveWorkspaceLinkPath,
   resolveWorkspaceMediaPath,
 } from '@opencuria/chat-core/workspaceFileRefs'
@@ -36,6 +37,23 @@ describe('workspaceFileRefs', () => {
     expect(resolveWorkspaceMediaPath('<screenshots/login.png>')).toBe(
       '/workspace/screenshots/login.png',
     )
+  })
+
+  it('decodes markdown dests once but keeps literal file paths as they are', () => {
+    expect(resolveWorkspaceMediaPath('screenshots/my%20shot.png')).toBe(
+      '/workspace/screenshots/my shot.png',
+    )
+    expect(resolveWorkspaceMediaPath('<screenshots/my shot.png> "title"')).toBe(
+      '/workspace/screenshots/my shot.png',
+    )
+    expect(resolveWorkspaceMediaPath('a%252e.png')).toBe('/workspace/a%2e.png')
+    expect(resolveWorkspaceMediaPath('%2e%2e/etc/passwd.png')).toBeNull()
+    expect(resolveWorkspaceFilePath('/workspace/my shot.png')).toBe('/workspace/my shot.png')
+    expect(resolveWorkspaceFilePath('/workspace/100%25 #1?.png')).toBe(
+      '/workspace/100%25 #1?.png',
+    )
+    expect(resolveWorkspaceFilePath('/workspace/../etc/passwd.png')).toBeNull()
+    expect(resolveWorkspaceFilePath('/workspace/a\u0000.png')).toBeNull()
   })
 
   it('rejects remote URLs and sandbox escapes', () => {

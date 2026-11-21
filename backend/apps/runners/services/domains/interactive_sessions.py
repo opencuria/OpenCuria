@@ -567,6 +567,7 @@ class InteractiveSessionsService:
             "runner_id": str(workspace.runner_id),
             "runner_sid": workspace.runner.sid,
             "desktop_info": desktop_info,
+            "guest_os": workspace.guest_os,
         }
 
     async def renew_desktop(

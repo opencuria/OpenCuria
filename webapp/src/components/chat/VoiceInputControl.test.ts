@@ -20,6 +20,7 @@ function makeVoice() {
   const state = ref<'idle' | 'requesting' | 'recording' | 'processing' | 'error'>('idle')
   return {
     state, error: ref(''), warning: ref(''), audioLevels: ref<number[]>([]), pointingFailed: ref(false),
+    waiting: ref(false),
     busy: computed(() => state.value !== 'idle'),
     start: vi.fn(async () => { state.value = 'recording' }),
     stop: vi.fn(async () => { state.value = 'processing' }),
@@ -362,6 +363,10 @@ describe('VoiceCaptureBar', () => {
     await nextTick()
     expect(wrapper.text()).toContain('Transcribing')
     expect(wrapper.get<HTMLButtonElement>('[aria-label="Stop and edit"]').element.disabled).toBe(true)
+    expect(wrapper.find('[aria-label="Discard recording"]').exists()).toBe(true)
+    voiceCaptureControls.value = controls({ state: 'processing', waiting: true })
+    await nextTick()
+    expect(wrapper.get('[data-testid="voice-waiting"]').text()).toMatch(/Waiting for connection/)
     expect(wrapper.find('[aria-label="Discard recording"]').exists()).toBe(true)
     voiceCaptureControls.value = controls({ state: 'error' })
     await nextTick()

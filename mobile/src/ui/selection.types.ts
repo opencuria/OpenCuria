@@ -29,3 +29,18 @@ export interface NativeOptionProps {
   disabled?: boolean;
   onPress: () => void;
 }
+
+/** Geometry of a `NativeOption` row, for rows that line up with it. */
+export interface OptionRowMetrics {
+  /** From the row's leading edge to its indicator. */
+  inset: number;
+  /** Width of the radio or checkbox indicator. */
+  indicator: number;
+  /** Between the indicator and the label. */
+  gap: number;
+  /** Height of a row with a one-line label. */
+  minHeight: number;
+  /** The label's text size and line height. */
+  fontSize: number;
+  lineHeight: number;
+}

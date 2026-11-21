@@ -17,7 +17,7 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import HarnessMentionImages from '../HarnessMentionImages.vue'
 import ImageLightbox from '../ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { resolveWorkspaceMediaPath } from '@opencuria/chat-core/workspaceFileRefs'
+import { resolveWorkspaceFilePath } from '@opencuria/chat-core/workspaceFileRefs'
 
 const props = defineProps<{
   part: HarnessPart
@@ -59,7 +59,7 @@ const argsPath = computed(() => {
 
 const path = computed(() => metaPath.value || argsPath.value)
 const pointingPath = computed(() =>
-  path.value.startsWith('/workspace/') && resolveWorkspaceMediaPath(path.value) === path.value
+  path.value.startsWith('/workspace/') && resolveWorkspaceFilePath(path.value) === path.value
     ? path.value
     : undefined,
 )

@@ -1,20 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ref } from 'vue'
 
 import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { readWorkspaceFile } from '@/services/socket'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
+import {
+  makeFileLink,
+  resetWorkspaceFiles,
+  workspaceFiles,
+} from '@/services/workspaceFiles.fixtures'
 import ToolDetailDefault from './ToolDetailDefault.vue'
 import ToolDetailRead from './ToolDetailRead.vue'
 
 const openPath = vi.fn()
 
-vi.mock('@/services/socket', () => ({
-  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
-}))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
 vi.mock('@/stores/fileExplorer', () => ({
   useFileExplorerStore: () => ({ openPath }),
 }))
@@ -49,32 +50,41 @@ function mountDetail(component: typeof ToolDetailRead, part: HarnessPart, worksp
 describe('workspace tool media', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    vi.mocked(readWorkspaceFile).mockClear()
+    resetWorkspaceFiles()
     openPath.mockClear()
   })
-
-  afterEach(() => useWorkspaceImageStore().reset())
 
   it('loads Read images from the workspace and labels them with the source file', async () => {
     const wrapper = mountDetail(
       ToolDetailRead,
       readPart([{ type: 'file', mime: 'image/png', path: IMAGE }]),
     )
-    expect(readWorkspaceFile).toHaveBeenCalledWith(
-      'ws-1',
-      IMAGE,
-      20 * 1024 * 1024,
-      expect.any(AbortSignal),
-    )
+    expect(workspaceFiles().link).toHaveBeenCalledWith('ws-1', IMAGE, expect.any(AbortSignal))
     expect(wrapper.find('[data-testid="tool-detail-read-image"]').exists()).toBe(false)
 
-    useWorkspaceImageStore().imageCache[IMAGE] = 'data:image/png;base64,abc'
     await flushPromises()
-    const image = wrapper.get('[data-testid="mention-image"]')
-    expect(image.attributes('src')).toBe('data:image/png;base64,abc')
+    const image = wrapper.get('[data-testid="workspace-media-image"]')
+    expect(image.attributes('src')).toBe(`https://files.test/content${IMAGE}`)
     expect(image.attributes('alt')).toBe('cat.png')
     expect(image.attributes('data-voice-image-path')).toBe(IMAGE)
     expect(image.attributes('data-voice-workspace')).toBe('ws-1')
+  })
+
+  it('loads generated images above the autoload limit only on tap', async () => {
+    vi.mocked(workspaceFiles().link).mockResolvedValue(
+      makeFileLink(IMAGE, { size: 12 * 1024 * 1024 }),
+    )
+    const wrapper = mountDetail(
+      ToolDetailDefault,
+      readPart([{ type: 'file', mime: 'image/png', path: IMAGE }]),
+    )
+    await flushPromises()
+    expect(wrapper.get('[data-testid="workspace-media-placeholder"]').text()).toContain('12.0 MB')
+
+    await wrapper.get('[data-testid="workspace-media-load"]').trigger('click')
+    expect(wrapper.get('[data-testid="workspace-media-image"]').attributes('src')).toBe(
+      `https://files.test/content${IMAGE}`,
+    )
   })
 
   it('opens workspace PDFs in the editor instead of linking a data URL', async () => {
@@ -95,7 +105,7 @@ describe('workspace tool media', () => {
       readPart([{ type: 'file', mime: 'image/png', path: IMAGE }]),
       '',
     )
-    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(workspaceFiles().link).not.toHaveBeenCalled()
     expect(wrapper.get('[data-testid="mention-image-fallback"]').text()).toBe('Image attachment 1')
   })
 })

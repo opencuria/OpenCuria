@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import dataclasses
 import hashlib
 import io
 import json
@@ -20,6 +22,27 @@ from src.runtime import codex_artifact as codex
 from src.runtime.artifacts import ArtifactProvisionError, RuntimeArtifactManager
 
 TARGET = "x86_64-unknown-linux-musl"
+WINDOWS_TARGET = "x86_64-pc-windows-msvc"
+# Independent oracle of the official package layouts (inspected release assets).
+LINUX_FILES = {
+    "bin/codex-app-server",
+    "bin/codex-code-mode-host",
+    "bin/codex-exec-server",
+    "codex-package.json",
+    "codex-path/rg",
+    "codex-resources/bwrap",
+}
+WINDOWS_FILES = {
+    "bin/codex-app-server.exe",
+    "bin/codex-code-mode-host.exe",
+    "bin/codex-exec-server.exe",
+    "codex-package.json",
+    "codex-path/rg.exe",
+    "codex-resources/codex-command-runner.exe",
+    "codex-resources/codex-windows-sandbox-setup.exe",
+}
+# Sum of the file sizes in the official Windows archive.
+WINDOWS_PACKAGE_BYTES = 479695627
 REAL_PACKAGE = Path(
     os.environ.get(
         "OPENCURIA_TEST_CODEX_PACKAGE",
@@ -29,20 +52,25 @@ REAL_PACKAGE = Path(
 )
 
 
-def package_bytes(*, target=TARGET, extra=None, omit=None):
-    metadata = {
+def expected_metadata(target):
+    suffix = ".exe" if target == WINDOWS_TARGET else ""
+    return {
         "layoutVersion": 1,
         "version": codex.VERSION,
         "target": target,
         "variant": "codex-app-server",
-        "entrypoint": "bin/codex-app-server",
-        "execServer": "bin/codex-exec-server",
+        "entrypoint": "bin/codex-app-server" + suffix,
+        "execServer": "bin/codex-exec-server" + suffix,
         "resourcesDir": "codex-resources",
         "pathDir": "codex-path",
     }
+
+
+def package_bytes(*, target=TARGET, extra=None, omit=None, layout=None):
+    metadata = expected_metadata(target)
     files = {
         name: b"#!/bin/sh\nprintf 'codex-app-server 0.166.0\\n'\n"
-        for name in codex.FILES
+        for name in codex.TARGETS[layout or target].files
     }
     files["codex-package.json"] = json.dumps(metadata).encode()
     output = io.BytesIO()
@@ -65,7 +93,8 @@ def package_bytes(*, target=TARGET, extra=None, omit=None):
 class LocalPackageRuntime:
     """Execute the real guest installer and transport wrapper using local files."""
 
-    def __init__(self):
+    def __init__(self, platform="linux-x64"):
+        self.platform = platform
         self.uploads = []
         self.commands = []
         self.upload_gate = None
@@ -75,7 +104,7 @@ class LocalPackageRuntime:
     async def exec_command_wait(self, instance, command):
         self.commands.append(command)
         if "uname -s" in command[2]:
-            return 0, "linux-x64\n"
+            return 0, self.platform + "\n"
         if command[:2] == ["sh", "-c"]:
             self.cleaned.set()
         proc = await asyncio.create_subprocess_exec(
@@ -101,11 +130,15 @@ class LocalPackageRuntime:
                 shutil.copyfileobj(archive.extractfile(members[0]), output)
 
 
-@pytest.fixture
-def setup_codex(tmp_path, monkeypatch):
-    payload = package_bytes()
+def make_codex_setup(tmp_path, monkeypatch, platform="linux-x64"):
+    target = codex.target_for_platform(platform)
+    payload = package_bytes(target=target)
     digest = hashlib.sha256(payload).hexdigest()
-    monkeypatch.setitem(codex.PINS, TARGET, (digest, len(payload)))
+    monkeypatch.setitem(
+        codex.TARGETS,
+        target,
+        dataclasses.replace(codex.TARGETS[target], sha256=digest, size=len(payload)),
+    )
     manifest = json.loads(artifacts.ARTIFACT_MANIFEST_PATH.read_text())
     manifest["artifacts"]["codex-agent"] = codex.manifest_entry()
     manifest["artifacts"]["claude-agent"]["manifest_sha256"] = "x"
@@ -116,7 +149,7 @@ def setup_codex(tmp_path, monkeypatch):
     manifest["artifacts"]["claude-agent"]["manifest_sha256"] = canonical_hash
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
-    runtime = LocalPackageRuntime()
+    runtime = LocalPackageRuntime(platform)
     info = SimpleNamespace(instance_id="local-guest")
     manager = RuntimeArtifactManager(
         runtime,
@@ -128,12 +161,17 @@ def setup_codex(tmp_path, monkeypatch):
     )
 
     async def download(url, size, sha, destination):
-        assert url == codex.manifest_entry()["platforms"]["linux-x64"]["url"]
+        assert url == codex.manifest_entry()["platforms"][platform]["url"]
         assert (sha, size) == (digest, len(payload))
         destination.write_bytes(payload)
 
     manager._download = AsyncMock(side_effect=download)
     return manager, runtime, info
+
+
+@pytest.fixture
+def setup_codex(tmp_path, monkeypatch):
+    return make_codex_setup(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
@@ -154,7 +192,7 @@ async def test_codex_package_install_cache_verify_and_poison_rejection(setup_cod
         == result
     )
     manager._download.assert_awaited_once()
-    assert len(list(installed.rglob("*"))) == len(codex.FILES | codex.DIRECTORIES)
+    assert len(list(installed.rglob("*"))) == len(LINUX_FILES | codex.DIRECTORIES)
     hashes = codex.inspect_package(
         next(manager._cache_root.rglob("package.tar.gz")), TARGET
     )
@@ -280,15 +318,19 @@ def test_codex_manifest_poison_rejected(tmp_path, key):
         ("linux-x64-musl", TARGET),
         ("linux-arm64", "aarch64-unknown-linux-musl"),
         ("linux-arm64-musl", "aarch64-unknown-linux-musl"),
+        ("win32-x64", WINDOWS_TARGET),
     ],
 )
 def test_codex_official_platform_pins(platform, target):
     entry = codex.manifest_entry()["platforms"][platform]
+    spec = codex.TARGETS[target]
+    assert codex.target_for_platform(platform) == target
     assert entry["url"].endswith(
         f"rust-v0.166.0/codex-app-server-package-{target}.tar.gz"
     )
-    assert (entry["sha256"], entry["size"]) == codex.PINS[target]
-    assert entry["size"] < codex.MAX_ARCHIVE_SIZE
+    assert (entry["sha256"], entry["size"]) == (spec.sha256, spec.size)
+    assert entry["size"] <= spec.max_archive_size
+    assert entry["size"] <= artifacts.ARTIFACT_MAX_DOWNLOAD_SIZE
 
 
 @pytest.mark.parametrize(
@@ -329,7 +371,11 @@ def test_codex_rejects_wrong_layout_target_and_bombs(tmp_path, monkeypatch, chan
     if change == "missing_executor":
         kwargs["omit"] = "bin/codex-exec-server"
     if change == "size":
-        monkeypatch.setattr(codex, "MAX_PACKAGE_SIZE", 10)
+        monkeypatch.setitem(
+            codex.TARGETS,
+            TARGET,
+            dataclasses.replace(codex.TARGETS[TARGET], max_package_size=10),
+        )
     payload = package_bytes(**kwargs)
     if change == "metadata":
         # A regular helper cannot replace the mandatory package metadata.
@@ -346,9 +392,9 @@ def test_codex_rejects_wrong_layout_target_and_bombs(tmp_path, monkeypatch, chan
 )
 async def test_real_codex_package_local_installer_contract(tmp_path):
     """Use all actual pinned release bytes, not a lone binary or mocked installer."""
-    digest, size = codex.PINS[TARGET]
-    assert REAL_PACKAGE.stat().st_size == size
-    assert await asyncio.to_thread(codex.sha_file, REAL_PACKAGE) == digest
+    spec = codex.TARGETS[TARGET]
+    assert REAL_PACKAGE.stat().st_size == spec.size
+    assert await asyncio.to_thread(codex.sha_file, REAL_PACKAGE) == spec.sha256
     runtime = LocalPackageRuntime()
     info = SimpleNamespace(instance_id="real-local-guest")
     manager = RuntimeArtifactManager(
@@ -476,7 +522,7 @@ async def test_codex_download_trust_caps_and_atomic_failure(
     elif failure == "size":
         size -= 1
     elif failure == "oversize":
-        size = codex.MAX_ARCHIVE_SIZE + 1
+        size = codex.TARGETS[TARGET].max_archive_size + 1
     elif failure == "redirect":
         responses = [
             DownloadResponse(
@@ -632,3 +678,283 @@ async def test_codex_rejects_extra_installed_entries_and_hardlinks(
     os.link(installed / "codex-path/rg", tmp_path / "unexpected-hardlink")
     with pytest.raises(ArtifactProvisionError):
         await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
+
+
+WINDOWS_REAL_PACKAGE = os.environ.get("OPENCURIA_TEST_CODEX_WINDOWS_PACKAGE")
+
+
+def test_codex_target_table_layouts_entrypoints_and_limits():
+    mib = 1024 * 1024
+    assert set(codex.TARGETS) == {
+        TARGET,
+        "aarch64-unknown-linux-musl",
+        WINDOWS_TARGET,
+    }
+    for target, spec in codex.TARGETS.items():
+        windows = target == WINDOWS_TARGET
+        assert spec.files == (WINDOWS_FILES if windows else LINUX_FILES)
+        assert spec.entrypoint in spec.files
+        assert codex.package_metadata(target) == expected_metadata(target)
+        assert codex.package_url(target) in codex.archive_size_limits()
+        assert spec.size <= spec.max_archive_size
+    assert codex.TARGETS[WINDOWS_TARGET].entrypoint == "bin/codex-app-server.exe"
+    # Linux limits are unchanged; the larger Windows package has its own.
+    for target in (TARGET, "aarch64-unknown-linux-musl"):
+        spec = codex.TARGETS[target]
+        assert (spec.max_archive_size, spec.max_package_size) == (150 * mib, 400 * mib)
+    windows = codex.TARGETS[WINDOWS_TARGET]
+    assert windows.size > codex.TARGETS[TARGET].max_archive_size
+    assert codex.TARGETS[TARGET].max_package_size < WINDOWS_PACKAGE_BYTES
+    assert WINDOWS_PACKAGE_BYTES <= windows.max_package_size
+    assert windows.max_archive_size + 1 <= artifacts.ARTIFACT_MAX_DOWNLOAD_SIZE
+    with pytest.raises(ValueError, match="Unsupported Codex"):
+        codex.target_for_platform("win32-arm64")
+    with pytest.raises(ValueError, match="Unsupported Codex"):
+        codex.target_spec("x86_64-apple-darwin")
+
+
+def test_isolated_codex_path_is_the_package_path_dir_of_every_target():
+    from src.runtime.managed_process import ISOLATED_CODEX_PATH
+
+    path_dir = ISOLATED_CODEX_PATH.split(":", 1)[0]
+    assert path_dir == (
+        f"{artifacts.ARTIFACT_GUEST_ROOT}/codex-agent/{codex.VERSION}/codex-path"
+    )
+    for target, spec in codex.TARGETS.items():
+        assert codex.package_metadata(target)["pathDir"] == "codex-path"
+        assert f"codex-path/rg{spec.executable_suffix}" in spec.files
+
+
+@pytest.mark.parametrize(
+    "target,layout",
+    [(WINDOWS_TARGET, TARGET), (TARGET, WINDOWS_TARGET), (WINDOWS_TARGET, None)],
+)
+def test_codex_package_layout_must_match_its_target(tmp_path, target, layout):
+    path = tmp_path / "package.tar.gz"
+    path.write_bytes(package_bytes(target=target, layout=layout))
+    if layout is None:
+        assert set(codex.inspect_package(path, target)) == WINDOWS_FILES
+        with pytest.raises(ValueError):
+            codex.inspect_package(path, TARGET)
+    else:
+        with pytest.raises(ValueError):
+            codex.inspect_package(path, target)
+
+
+def test_codex_windows_package_size_limit_is_enforced(tmp_path, monkeypatch):
+    path = tmp_path / "package.tar.gz"
+    path.write_bytes(package_bytes(target=WINDOWS_TARGET))
+    monkeypatch.setitem(
+        codex.TARGETS,
+        WINDOWS_TARGET,
+        dataclasses.replace(codex.TARGETS[WINDOWS_TARGET], max_package_size=10),
+    )
+    with pytest.raises(ValueError, match="size limit"):
+        codex.inspect_package(path, WINDOWS_TARGET)
+    monkeypatch.setitem(
+        codex.TARGETS,
+        WINDOWS_TARGET,
+        dataclasses.replace(codex.TARGETS[WINDOWS_TARGET], max_archive_size=10),
+    )
+    with pytest.raises(ValueError, match="Unsafe Codex archive"):
+        codex.inspect_package(path, WINDOWS_TARGET)
+
+
+@pytest.mark.skipif(
+    not WINDOWS_REAL_PACKAGE, reason="official Windows package not available locally"
+)
+def test_real_windows_codex_package_matches_pin_and_layout():
+    path = Path(WINDOWS_REAL_PACKAGE)
+    spec = codex.TARGETS[WINDOWS_TARGET]
+    assert path.stat().st_size == spec.size
+    assert codex.sha_file(path) == spec.sha256
+    assert set(codex.inspect_package(path, WINDOWS_TARGET)) == WINDOWS_FILES
+    with tarfile.open(path, "r:gz") as archive:
+        sizes = sum(member.size for member in archive if member.isfile())
+    assert sizes == WINDOWS_PACKAGE_BYTES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url_target,size_target,allowed",
+    [
+        (WINDOWS_TARGET, WINDOWS_TARGET, True),
+        (WINDOWS_TARGET, "limit", False),
+        (TARGET, WINDOWS_TARGET, False),
+    ],
+)
+async def test_codex_download_cap_is_per_target(
+    tmp_path, monkeypatch, url_target, size_target, allowed
+):
+    url = codex.package_url(url_target)
+    size = (
+        codex.TARGETS[WINDOWS_TARGET].max_archive_size + 1
+        if size_target == "limit"
+        else codex.TARGETS[size_target].size
+    )
+    manager = RuntimeArtifactManager(
+        {}, lambda _: None, lambda _: None, tmp_path / "state"
+    )
+    reached = []
+
+    def session(**_kwargs):
+        reached.append(True)
+        raise RuntimeError("network not available in tests")
+
+    monkeypatch.setattr(artifacts.aiohttp, "ClientSession", session)
+    with pytest.raises(ArtifactProvisionError) as failure:
+        await manager._download(url, size, "0" * 64, tmp_path / "download")
+    assert bool(reached) is allowed
+    if not allowed:
+        assert "outside the allowed limit" in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_codex_windows_package_installs_with_exe_entrypoint(
+    tmp_path, monkeypatch
+):
+    manager, runtime, _ = make_codex_setup(tmp_path, monkeypatch, "win32-x64")
+    result = await manager.ensure_runtime_artifact(
+        uuid.uuid4(), "codex-agent", "0.166.0"
+    )
+    assert result == {
+        "ok": True,
+        "path": f"{manager._guest_runtime_root}/codex-agent/0.166.0/"
+        "bin/codex-app-server.exe",
+        "version": "0.166.0",
+        "platform": "win32-x64",
+    }
+    installed = Path(result["path"]).parent.parent
+    files = {
+        p.relative_to(installed).as_posix() for p in installed.rglob("*") if p.is_file()
+    }
+    assert files == WINDOWS_FILES
+    install = next(c for c in runtime.commands if c[0] == "python3")
+    assert install[3] == "install" and install[7] == WINDOWS_TARGET
+    assert set(json.loads(install[8])) == WINDOWS_FILES
+    assert all(not source.exists() for source in runtime.uploads)
+
+
+def test_codex_version_environment_keeps_profile_temporary():
+    home = "/tmp/opencuria-codex-version-x"
+    linux = {"HOME": home, "CODEX_HOME": home, "PATH": "/usr/bin:/bin"}
+    assert codex.version_environment(TARGET, home) == linux
+    windows = codex.version_environment(WINDOWS_TARGET, home)
+    assert windows == {
+        **linux,
+        "USERPROFILE": home,
+        "APPDATA": home,
+        "LOCALAPPDATA": home,
+        "TEMP": home,
+        "TMP": home,
+    }
+
+
+@pytest.fixture
+def cygwin_runtime(monkeypatch):
+    """Simulate MSYS2 Python: runtime DLL lookup, -2 AT_FDCWD, NTFS modes."""
+    loaded = []
+    real = ctypes.CDLL
+
+    def cdll(name, *args, **kwargs):
+        loaded.append(name)
+        if name == "msys-2.0.dll":
+            return real(None, *args, **kwargs)
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    monkeypatch.setattr(codex.ctypes, "CDLL", cdll)
+    return loaded
+
+
+def test_cygwin_publication_uses_the_runtime_dll_renameat2(tmp_path, cygwin_runtime):
+    stage, final = tmp_path / "stage", tmp_path / "final"
+    stage.mkdir()
+    (stage / "new").write_text("new")
+    codex.publish_directory(stage, final)
+    assert cygwin_runtime == ["msys-2.0.dll"]
+    assert (final / "new").read_text() == "new" and not stage.exists()
+
+
+@pytest.mark.parametrize("existing", ["empty", "poisoned"])
+def test_cygwin_publication_never_replaces_existing_directory(
+    tmp_path, cygwin_runtime, existing
+):
+    final = tmp_path / "final"
+    final.mkdir()
+    if existing == "poisoned":
+        (final / "poison").write_text("keep")
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "new").write_text("new")
+    with pytest.raises(ValueError, match="already exists"):
+        codex.publish_directory(stage, final)
+    assert (stage / "new").exists()
+    assert not (final / "new").exists()
+
+
+def test_cygwin_publication_fails_closed_without_renameat2(tmp_path, monkeypatch):
+    def cdll(name, *args, **kwargs):
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    monkeypatch.setattr(codex.ctypes, "CDLL", cdll)
+    stage, final = tmp_path / "stage", tmp_path / "final"
+    stage.mkdir()
+    with pytest.raises(OSError):
+        codex.publish_directory(stage, final)
+    assert stage.exists() and not final.exists()
+
+
+def _ntfs_like_install(tmp_path):
+    """A correct install as NTFS reports it: writable dirs, no exec bits."""
+    root = tmp_path / "installed"
+    hashes = {}
+    for directory in codex.DIRECTORIES:
+        (root / directory).mkdir(parents=True)
+    for name in sorted(WINDOWS_FILES):
+        data = name.encode()
+        (root / name).write_bytes(data)
+        (root / name).chmod(0o444)
+        hashes[name] = hashlib.sha256(data).hexdigest()
+    return root, hashes
+
+
+def test_ntfs_verification_accepts_synthesized_modes_but_not_changes(
+    tmp_path, monkeypatch
+):
+    root, hashes = _ntfs_like_install(tmp_path)
+    with pytest.raises(ValueError):
+        codex.verify_tree(root, hashes)  # Strict POSIX modes on Linux.
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    codex.verify_tree(root, hashes)
+    helper = root / "codex-path/rg.exe"
+    helper.chmod(0o644)
+    with pytest.raises(ValueError, match="Changed"):
+        codex.verify_tree(root, hashes)
+    helper.chmod(0o444)
+    os.link(helper, tmp_path / "second-link")
+    with pytest.raises(ValueError, match="Changed"):
+        codex.verify_tree(root, hashes)
+    (tmp_path / "second-link").unlink()
+    (root / "bin" / "extra.exe").write_bytes(b"x")
+    with pytest.raises(ValueError):
+        codex.verify_tree(root, hashes)
+    (root / "bin" / "extra.exe").unlink()
+    helper.chmod(0o644)
+    helper.write_bytes(b"poisoned")
+    helper.chmod(0o444)
+    with pytest.raises(ValueError, match="Changed"):
+        codex.verify_tree(root, hashes)
+
+
+def test_verify_tree_requires_hashes_of_a_complete_target_layout(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    root, hashes = _ntfs_like_install(tmp_path)
+    helper = root / "codex-resources/codex-windows-sandbox-setup.exe"
+    helper.unlink()
+    del hashes["codex-resources/codex-windows-sandbox-setup.exe"]
+    with pytest.raises(ValueError, match="Incomplete"):
+        codex.verify_tree(root, hashes)

@@ -1,14 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { Platform } from "react-native";
 import type { OpenCuriaClient, Workspace } from "@opencuria/client";
-import { NativeForm } from "../ui/NativeForm";
 import type {
   NativeFormItemRow,
   NativeFormSection,
   NativeFormSwipeAction,
 } from "../ui/NativeForm.types";
+import { errorRows, loadErrorState } from "../ui/formStates";
 import { NativeModal } from "../ui/primitives";
-import { useTheme } from "../ui/theme";
 import { CaptureImageSheet } from "./CaptureImageSheet";
 import { CreateWorkspaceSheet } from "./CreateWorkspaceSheet";
 import { WorkspaceDetailSheet } from "./WorkspaceDetailSheet";
@@ -23,9 +22,9 @@ import {
   groupWorkspaces,
   workspaceMenuActions,
   workspaceState,
+  workspaceStatus,
   workspaceSubtitle,
   workspaceSymbol,
-  workspaceTint,
 } from "./workspacePresentation";
 
 /** Room for Android's "New workspace" button; iOS shows it in the navigation bar. */
@@ -37,6 +36,10 @@ export interface WorkspacesSheetProps {
   client: OpenCuriaClient;
   organizationId: string | null;
   workspaces: Workspace[];
+  /** The first load of the workspaces is still running. */
+  loading: boolean;
+  /** Why the workspaces could not be loaded, until a load succeeds. */
+  error: string | null;
   activeWorkspaceId: string | null;
   /** Open the workspace's chats (a new chat when it can take one). */
   onOpenWorkspace: (workspace: Workspace) => void;
@@ -61,12 +64,14 @@ export function WorkspacesSheet({
   client,
   organizationId,
   workspaces,
+  loading,
+  error,
   activeWorkspaceId,
   onOpenWorkspace,
   onRefresh,
 }: WorkspacesSheetProps): React.JSX.Element | null {
-  const { theme } = useTheme();
   const [query, setQuery] = useState("");
+  const [retrying, setRetrying] = useState(false);
   const [showRemoved, setShowRemoved] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [captureId, setCaptureId] = useState<string | null>(null);
@@ -86,6 +91,10 @@ export function WorkspacesSheet({
   const open = (workspace: Workspace) => {
     setQuery("");
     onOpenWorkspace(workspace);
+  };
+  const retry = () => {
+    setRetrying(true);
+    void onRefresh().finally(() => setRetrying(false));
   };
   const changed = (ok: boolean) => {
     if (ok) void onRefresh();
@@ -151,8 +160,9 @@ export function WorkspacesSheet({
       title: workspace.name,
       subtitle: subtitle.text,
       subtitleTone: subtitle.tone,
+      status: workspaceStatus(state.tone),
       symbol: workspaceSymbol(state.tone),
-      tint: workspaceTint(state.tone, theme),
+      tile: true,
       selected: workspace.id === activeWorkspaceId,
       busy: state.busy,
       // An update cannot start while the workspace is busy.
@@ -173,18 +183,24 @@ export function WorkspacesSheet({
     };
   };
 
-  const sections: NativeFormSection[] = groups.map((group) => ({
-    id: group.id,
-    title: `${group.title} · ${group.workspaces.length}`,
-    rows: group.workspaces.map(row),
-  }));
+  const sections: NativeFormSection[] = [
+    // A failed refresh keeps the last list and says so above it.
+    ...(error && workspaces.length
+      ? [{ id: "error", rows: errorRows("workspaces", error, retry, retrying) }]
+      : []),
+    ...groups.map((group) => ({
+      id: group.id,
+      title: group.title,
+      rows: group.workspaces.map(row),
+    })),
+  ];
 
   return (
     <NativeModal
       visible
       onClose={onClose}
       title="Workspaces"
-      scrollable={false}
+      largeTitle
       search={{
         value: query,
         onChange: setQuery,
@@ -211,29 +227,37 @@ export function WorkspacesSheet({
         if (id === "removed") setShowRemoved((value) => !value);
       }}
       testID="workspace-picker-sheet"
-    >
-      <NativeForm
-        sections={sections}
-        onRefresh={async () => {
+      form={{
+        sections,
+        loading: loading && !workspaces.length,
+        onRefresh: async () => {
           await Promise.allSettled([onRefresh(), catalog.reload()]);
-        }}
-        empty={
-          query.trim()
-            ? {
-                title: "No results",
-                description: `No workspace matches “${query.trim()}”.`,
-                symbol: "magnifyingglass",
-              }
-            : {
-                title: "No workspaces",
-                description:
-                  "Create a workspace to start working with an agent.",
-                symbol: "server.rack",
-              }
-        }
-        contentInsetBottom={NEW_WORKSPACE_INSET}
-        testID="workspace-list"
-      />
+        },
+        empty:
+          error && !workspaces.length
+            ? loadErrorState("workspaces", error, retry, retrying)
+            : query.trim()
+              ? {
+                  title: "No results",
+                  description: `Nothing matches “${query.trim()}”.`,
+                  symbol: "magnifyingglass",
+                }
+              : {
+                  title: "No workspaces yet",
+                  description:
+                    "Create a workspace to start working with an agent.",
+                  symbol: "server.rack",
+                  action: {
+                    title: "New workspace",
+                    symbol: "plus",
+                    onPress: () => setCreating(true),
+                    testID: "empty-new-workspace",
+                  },
+                },
+        contentInsetBottom: NEW_WORKSPACE_INSET,
+        testID: "workspace-list",
+      }}
+    >
       <WorkspaceDetailSheet
         workspace={detail}
         client={client}

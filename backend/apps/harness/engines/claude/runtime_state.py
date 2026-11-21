@@ -33,6 +33,20 @@ path = os.path.abspath(sys.argv[2])
 if os.path.commonpath((root, path)) != root:
     raise SystemExit(2)
 flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def restrict(parent, name, child):
+    try:
+        os.fchmod(child, 0o700)
+    except PermissionError:
+        # Cygwin (Windows guests) refuses fchmod on directory descriptors; set
+        # the mode through the parent instead. On noacl mounts such as
+        # /workspace the mode is not stored and Windows ACLs govern access.
+        if sys.platform != "cygwin":
+            raise
+        os.chmod(name, 0o700, dir_fd=parent, follow_symlinks=False)
+
+
 fd = os.open(os.sep, flags)
 try:
     parts = root.lstrip(os.sep).split(os.sep)
@@ -45,10 +59,10 @@ try:
             except FileExistsError:
                 pass
             child = os.open(part, flags, dir_fd=fd)
+        if index == len(parts) - 1:
+            restrict(fd, part, child)
         os.close(fd)
         fd = child
-        if index == len(parts) - 1:
-            os.fchmod(fd, 0o700)
     relative = os.path.relpath(path, root)
     if relative != ".":
         for part in relative.split(os.sep):
@@ -60,9 +74,9 @@ try:
                 except FileExistsError:
                     pass
                 child = os.open(part, flags, dir_fd=fd)
+            restrict(fd, part, child)
             os.close(fd)
             fd = child
-            os.fchmod(fd, 0o700)
 finally:
     os.close(fd)
 """

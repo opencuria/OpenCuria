@@ -23,11 +23,12 @@ import type {
   NativeFormRow,
   NativeFormSection,
 } from "../../../ui/NativeForm.types";
+import { loadErrorState } from "../../../ui/formStates";
 import { useResource } from "../../resources";
-import { loadErrorSections } from "../../sections";
+import { autosaveSection } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
-import { autosaveText, useAutosave, type Autosave } from "../../useAutosave";
+import { useAutosave, type Autosave } from "../../useAutosave";
 import {
   NATIVE_MODELS,
   effortGroups,
@@ -338,39 +339,24 @@ export function AgentsPage(): React.JSX.Element {
             },
           ],
         },
-        {
-          id: "save-status",
-          footer: autosaveText(status),
-          footerTone: status.status === "error" ? "danger" : "muted",
-          rows:
-            status.status === "error"
-              ? [
-                  {
-                    kind: "button",
-                    id: "retry",
-                    title: "Retry",
-                    symbol: "arrow.clockwise",
-                    onPress: status.retry,
-                  },
-                ]
-              : [],
-        },
+        autosaveSection(status),
       ]
     : [];
 
   const error = configs.error ?? depth.error ?? computerUse.error;
+  const failure =
+    error && !ready
+      ? loadErrorState("agent settings", error, () => {
+          void configs.reload();
+          void depth.reload();
+          void computerUse.reload();
+        })
+      : undefined;
   return (
     <SettingsPage
       title="Agents"
-      sections={
-        error && !ready
-          ? loadErrorSections(error, () => {
-              void configs.reload();
-              void depth.reload();
-              void computerUse.reload();
-            })
-          : sections
-      }
+      sections={failure ? [] : sections}
+      empty={failure}
       loading={!ready && !error}
       testID="settings-agents"
     />

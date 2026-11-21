@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "react-native";
 import type {
   DeletionGraph,
@@ -10,6 +10,7 @@ import type {
   NativeFormRow,
   NativeFormSection,
 } from "../../ui/NativeForm.types";
+import { errorRows } from "../../ui/formStates";
 import { showToast } from "../../ui/toast";
 import { errorMessage } from "../resources";
 import { route } from "../routes";
@@ -70,47 +71,67 @@ export function DeletionPage({
 }): React.JSX.Element {
   const { client, isAdmin, resources } = useSettings();
   const [request, setRequest] = useState<DeletionRequest | null>(null);
+  /** The pending request of the target has been looked up. */
+  const [known, setKnown] = useState(false);
   const [graph, setGraph] = useState<DeletionGraph | null>(null);
   const [approved, setApproved] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const mounted = useRef(true);
 
-  const preview = useCallback(async () => {
-    if (!isAdmin) return;
+  /** The forced deletion's preview (admins); returns why it failed. */
+  const preview = useCallback(async (): Promise<string | null> => {
+    if (!isAdmin) return null;
     setApproved(false);
     try {
-      setGraph(await client.deletions.preview(target));
+      const next = await client.deletions.preview(target);
+      if (mounted.current) setGraph(next);
+      return null;
     } catch (cause) {
-      setGraph(null);
-      setError(errorMessage(cause, "Could not preview this deletion."));
+      if (mounted.current) setGraph(null);
+      return errorMessage(cause, "Could not preview this deletion.");
     }
   }, [client, isAdmin, target]);
 
+  const revalidate = async () => {
+    const problem = await preview();
+    if (problem && mounted.current) setError(problem);
+  };
+
+  /** Looks up a pending request and the preview; Retry runs it again. */
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [problem, previewProblem] = await Promise.all([
+      client.deletions.list().then(
+        (requests) => {
+          if (!mounted.current) return null;
+          setRequest(
+            requests.find(
+              (entry) =>
+                entry.target_type === target.target_type &&
+                entry.target_id === target.target_id &&
+                !DONE.has(entry.phase),
+            ) ?? null,
+          );
+          setKnown(true);
+          return null;
+        },
+        (cause: unknown) =>
+          errorMessage(cause, "Could not load deletion requests."),
+      ),
+      preview(),
+    ]);
+    if (!mounted.current) return;
+    setError(problem ?? previewProblem);
+    setLoading(false);
+  }, [client, preview, target]);
+
   useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const requests = await client.deletions.list();
-        if (!active) return;
-        setRequest(
-          requests.find(
-            (entry) =>
-              entry.target_type === target.target_type &&
-              entry.target_id === target.target_id &&
-              !DONE.has(entry.phase),
-          ) ?? null,
-        );
-      } catch (cause) {
-        if (active)
-          setError(errorMessage(cause, "Could not load deletion requests."));
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
-    void preview();
+    mounted.current = true;
+    void load();
     return () => {
-      active = false;
+      mounted.current = false;
     };
     // The target is fixed for this page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -133,10 +154,10 @@ export function DeletionPage({
       setRequest(DONE.has(result.phase) ? null : result);
       changed();
       showToast({ title: success, tone: "success" });
-      if (result.phase === "reconfirmation_required") await preview();
+      if (result.phase === "reconfirmation_required") await revalidate();
     } catch (cause) {
       setError(errorMessage(cause, "The deletion request failed."));
-      if (id === "force") await preview();
+      if (id === "force") await revalidate();
     } finally {
       setBusy(null);
     }
@@ -224,9 +245,7 @@ export function DeletionPage({
       ? [
           {
             id: "error",
-            footer: error,
-            footerTone: "danger" as const,
-            rows: [],
+            rows: errorRows("deletion", error, () => void load(), loading),
           },
         ]
       : []),
@@ -284,7 +303,7 @@ export function DeletionPage({
                 title: "Revalidate preview",
                 symbol: "arrow.clockwise" as const,
                 disabled: Boolean(busy),
-                onPress: () => void preview(),
+                onPress: () => void revalidate(),
               },
               {
                 kind: "button" as const,
@@ -314,7 +333,8 @@ export function DeletionPage({
               title: "Request",
               onPress: requestDeferred,
               busy: busy === "deferred",
-              disabled: Boolean(busy),
+              // A pending request may exist until the lookup succeeds.
+              disabled: Boolean(busy) || !known,
               testID: "request-deletion",
             }
       }

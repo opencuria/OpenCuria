@@ -9,10 +9,12 @@ import type {
   NativeFormRow,
   NativeFormSection,
 } from "../../../ui/NativeForm.types";
+import { errorRows } from "../../../ui/formStates";
 import { showToast } from "../../../ui/toast";
 import { count, formatRelative } from "../../format";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { usePolling } from "../../usePolling";
@@ -79,11 +81,13 @@ export function RunnerPage({
         title="Runner"
         sections={[]}
         loading={!runners.data && !runners.error}
-        empty={{
-          title: "Runner unavailable",
-          description: runners.error ?? "This runner no longer exists.",
-          symbol: "exclamationmark.triangle.fill",
-        }}
+        empty={
+          loadFailure("runner", runners) ?? {
+            title: "Runner unavailable",
+            description: "This runner no longer exists.",
+            symbol: "exclamationmark.triangle",
+          }
+        }
         testID="settings-runner"
       />
     );
@@ -380,15 +384,20 @@ export function RunnerPage({
     {
       id: "inventory",
       title: "Inventory",
-      footer: storage.error
-        ? storage.error
-        : scanning
-          ? "Scan queued · waiting for a new complete inventory."
-          : storage.data
-            ? `${storage.data.latest_complete ? "Complete" : "Partial or unavailable"} inventory${collected ? ` · collected ${formatRelative(collected).toLowerCase()}` : ""}. Image sizes are not filesystem usage.`
-            : undefined,
-      footerTone: storage.error ? "danger" : "muted",
+      footer: scanning
+        ? "Scan queued · waiting for a new complete inventory."
+        : storage.data
+          ? `${storage.data.latest_complete ? "Complete" : "Partial or unavailable"} inventory${collected ? ` · collected ${formatRelative(collected).toLowerCase()}` : ""}. Image sizes are not filesystem usage.`
+          : undefined,
       rows: [
+        ...(storage.error
+          ? errorRows(
+              "inventory",
+              storage.error,
+              () => void storage.reload(),
+              storage.loading,
+            )
+          : []),
         ...filesystems.map(
           (filesystem, index): NativeFormRow => ({
             kind: "gauge",

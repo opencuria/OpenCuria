@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from "react";
 import {
   BASE_DISTRO_PRESETS,
+  baseDistroLabel,
   envVarsTextValid,
+  formBaseDistro,
   imageDefinitionForm,
   imageDefinitionPayload,
   isImageDefinitionFormValid,
+  recipeFieldHints,
   type ImageDefinitionForm,
   visibleImageDefinitions,
 } from "@opencuria/chat-core/imageDefinitionLifecycle";
@@ -12,6 +15,7 @@ import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { IMAGE_DEFINITIONS } from "./ImageDefinitionsPage";
@@ -79,12 +83,14 @@ export function ImageDefinitionEditorPage({
   };
 
   const envValid = form ? envVarsTextValid(form.envVars) : true;
+  // Package and script hints follow the selected OS (apt/bash or winget/PowerShell).
+  const hints = recipeFieldHints(form ? formBaseDistro(form) : "");
   const sections: NativeFormSection[] = form
     ? [
         {
           id: "definition",
           footer:
-            "QEMU image builds currently support Ubuntu cloud images only.",
+            "QEMU image builds start from Ubuntu cloud images or Windows 11.",
           rows: [
             {
               kind: "text",
@@ -116,7 +122,7 @@ export function ImageDefinitionEditorPage({
                   options: [
                     ...BASE_DISTRO_PRESETS.map((value) => ({
                       value,
-                      label: value,
+                      label: baseDistroLabel(value),
                     })),
                     { value: "custom", label: "Custom…" },
                   ],
@@ -144,7 +150,7 @@ export function ImageDefinitionEditorPage({
           id: "packages",
           title: "Packages and environment",
           footer: envValid
-            ? "Packages are comma-separated. One KEY=VALUE per line for the environment."
+            ? `${hints.packagesHint} One KEY=VALUE per line for the environment.`
             : "Each environment line needs a KEY before its “=”.",
           footerTone: envValid ? "muted" : "danger",
           rows: [
@@ -152,7 +158,7 @@ export function ImageDefinitionEditorPage({
               kind: "text",
               id: "packages",
               label: "Pre-installed packages",
-              placeholder: "python3, nodejs, ffmpeg",
+              placeholder: hints.packages,
               value: form.packages,
               onChange: (packages) => edit({ packages }),
             },
@@ -178,7 +184,7 @@ export function ImageDefinitionEditorPage({
               kind: "text",
               id: "init-script",
               label: "Custom init script",
-              placeholder: "#!/bin/bash",
+              placeholder: hints.initScript,
               multiline: true,
               monospace: true,
               lines: [4, 14],
@@ -195,11 +201,13 @@ export function ImageDefinitionEditorPage({
       title={definition ? "Edit definition" : "New definition"}
       sections={sections}
       loading={!form && !definitions.data && !definitions.error}
-      empty={{
-        title: "Definition unavailable",
-        description: definitions.error ?? "This definition no longer exists.",
-        symbol: "exclamationmark.triangle.fill",
-      }}
+      empty={
+        (form ? undefined : loadFailure("image definition", definitions)) ?? {
+          title: "Definition unavailable",
+          description: "This definition no longer exists.",
+          symbol: "exclamationmark.triangle",
+        }
+      }
       primaryAction={{
         title: definition ? "Save" : "Create",
         onPress: () => void save(),

@@ -7,8 +7,8 @@
  *   as returned by `parseComposerSegments` / `imageMentionTokens` in
  *   `@opencuria/chat-core/composerTokens`). Only safe `/workspace/...` image
  *   paths render; escapes and non-images are ignored.
- * - `workspaceId`: workspace used for `store.fetchImage`. Empty/absent
- *   disables fetching (fallback tiles only, never a stuck spinner).
+ * - `workspaceId`: workspace the images load from. Empty/absent shows
+ *   fallback tiles only, never a stuck spinner.
  * - `removable`: show an X per thumbnail that emits `remove` (composer
  *   preview). History always leaves this false (no X in history).
  * - `onPrimary`: adjust fallback/border tones for dark primary bubbles.
@@ -18,17 +18,15 @@
  * Emits:
  * - `remove(start, end)`: token offsets for `removeComposerToken(text,start,end)`.
  *
- * Uses `store.fetchImage` / `getImageUrl` / `isFetchingImage`; click opens
- * the existing `ImageLightbox`.
+ * Each thumbnail is a `WorkspaceMedia` tile (tap-to-load for large images,
+ * lightbox on click).
  */
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { X } from '@lucide/vue'
-import { Skeleton } from '@/components/ui/skeleton'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
-import ImageLightbox from './ImageLightbox.vue'
+import WorkspaceMedia from './WorkspaceMedia.vue'
 import { classifyWorkspaceFile } from '@opencuria/chat-core/workspaceFileRefs'
 import { workspaceRelativePath } from '@opencuria/chat-core/harnessMentions'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 
 export interface MentionFileToken {
   kind: string
@@ -58,8 +56,6 @@ const props = withDefaults(
 const emit = defineEmits<{
   remove: [start: number, end: number]
 }>()
-
-const imageStore = useWorkspaceImageStore()
 
 function posixNormalize(path: string): string {
   const absolute = path.startsWith('/')
@@ -104,129 +100,6 @@ function displayName(path: string, label?: string): string {
   }
 }
 
-function imageUrl(path: string): string | null {
-  try {
-    return imageStore.getImageUrl(path)
-  } catch {
-    return null
-  }
-}
-
-function isLoading(path: string): boolean {
-  if (!props.workspaceId) return false
-  try {
-    return imageStore.isFetchingImage(path)
-  } catch {
-    return false
-  }
-}
-
-const pinnedPaths = new Set<string>()
-let pinnedMediaGeneration = imageStore.mediaGeneration
-let pinnedWorkspaceId = props.workspaceId
-const lightbox = ref<{ src: string; alt: string; path: string } | null>(null)
-let lightboxPath: string | null = null
-let lightboxMediaGeneration = imageStore.mediaGeneration
-
-watch(
-  () =>
-    [
-      safeImages.value.map((token) => token.path),
-      props.workspaceId,
-      imageStore.mediaGeneration,
-    ] as const,
-  ([paths, workspaceId, generation]) => {
-    const nextPaths = new Set(paths)
-    const generationChanged = generation !== pinnedMediaGeneration
-    const workspaceChanged = workspaceId !== pinnedWorkspaceId
-    if (generationChanged) {
-      // reset() cleared the store's pins; never release old ownership into the
-      // newly reset pin table.
-      pinnedPaths.clear()
-      pinnedMediaGeneration = generation
-    } else if (workspaceChanged) {
-      imageStore.releaseMedia(pinnedPaths)
-      pinnedPaths.clear()
-    } else {
-      const releasedPaths: string[] = []
-      for (const path of pinnedPaths) {
-        if (!nextPaths.has(path)) {
-          releasedPaths.push(path)
-          pinnedPaths.delete(path)
-        }
-      }
-      if (releasedPaths.length > 0) imageStore.releaseMedia(releasedPaths)
-    }
-    pinnedWorkspaceId = workspaceId
-    if (lightboxPath && lightboxMediaGeneration !== generation) {
-      lightbox.value = null
-      lightboxPath = null
-      lightboxMediaGeneration = generation
-    }
-    for (const path of nextPaths) {
-      if (!pinnedPaths.has(path)) {
-        imageStore.pinMedia(path, true)
-        pinnedPaths.add(path)
-      }
-    }
-  },
-  { immediate: true, flush: 'sync' },
-)
-
-watch(
-  () =>
-    [
-      safeImages.value.map((token) => token.path),
-      props.workspaceId,
-      imageStore.mediaGeneration,
-    ] as const,
-  () => {
-    const id = props.workspaceId
-    if (!id) return
-    for (const token of safeImages.value) {
-      try {
-        imageStore.fetchImage(id, token.path)
-      } catch {
-        // Never let a fetch failure break history rendering.
-      }
-    }
-  },
-  { immediate: true },
-)
-
-onUnmounted(() => {
-  if (pinnedMediaGeneration === imageStore.mediaGeneration) {
-    imageStore.releaseMedia(pinnedPaths)
-  }
-  pinnedPaths.clear()
-  if (lightboxPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
-    imageStore.pinMedia(lightboxPath, false)
-  }
-  lightboxPath = null
-})
-
-function openLightbox(path: string, label?: string): void {
-  const url = imageUrl(path)
-  if (!url) return
-  if (lightboxPath !== path) {
-    if (lightboxPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
-      imageStore.pinMedia(lightboxPath, false)
-    }
-    imageStore.pinMedia(path, true)
-    lightboxPath = path
-    lightboxMediaGeneration = imageStore.mediaGeneration
-  }
-  lightbox.value = { src: url, alt: displayName(path, label), path }
-}
-
-function closeLightbox(): void {
-  lightbox.value = null
-  if (lightboxPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
-    imageStore.pinMedia(lightboxPath, false)
-  }
-  lightboxPath = null
-}
-
 function requestRemove(token: MentionFileToken): void {
   emit('remove', token.start, token.end)
 }
@@ -244,46 +117,33 @@ function requestRemove(token: MentionFileToken): void {
       :key="`${token.path}-${token.start}`"
       class="relative w-20 shrink-0"
     >
-      <button
-        v-if="imageUrl(token.path)"
-        type="button"
-        data-testid="mention-image-button"
-        :aria-label="`Open image preview ${displayName(token.path, token.label)}`"
-        class="flex h-14 w-full items-center justify-center overflow-hidden rounded-lg border bg-muted/30 shadow-sm transition-colors hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="onPrimary ? 'border-primary-foreground/30' : 'border-border'"
-        @click="openLightbox(token.path, token.label)"
+      <WorkspaceMedia
+        :workspace-id="workspaceId"
+        :path="token.path"
+        kind="image"
+        :alt="displayName(token.path, token.label)"
+        variant="tile"
+        :on-primary="onPrimary"
       >
-        <img
-          :src="imageUrl(token.path)!"
-          :alt="displayName(token.path, token.label)"
-          :data-path="token.path"
-          :data-voice-image-path="workspaceId ? token.path : undefined"
-          :data-voice-workspace="workspaceId || undefined"
-          data-testid="mention-image"
-          class="h-full w-full cursor-zoom-in object-contain"
-          draggable="false"
-        />
-      </button>
-      <Skeleton
-        v-else-if="isLoading(token.path)"
-        data-testid="mention-image-loading"
-        class="h-14 w-full rounded-lg"
-      />
-      <span
-        v-else
-        data-testid="mention-image-fallback"
-        :data-path="token.path"
-        class="flex h-14 w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-lg border px-1.5 text-[10px]"
-        :class="
-          onPrimary
-            ? 'border-primary-foreground/30 bg-primary-foreground/10 text-primary-foreground'
-            : 'border-border bg-muted/40 text-muted-foreground'
-        "
-        :title="token.path"
-      >
-        <WorkspaceFileIcon :path="token.path" :size="14" />
-        <span class="w-full truncate text-center">{{ displayName(token.path, token.label) }}</span>
-      </span>
+        <template #fallback>
+          <span
+            data-testid="mention-image-fallback"
+            :data-path="token.path"
+            class="flex h-14 w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-lg border px-1.5 text-[10px]"
+            :class="
+              onPrimary
+                ? 'border-primary-foreground/30 bg-primary-foreground/10 text-primary-foreground'
+                : 'border-border bg-muted/40 text-muted-foreground'
+            "
+            :title="token.path"
+          >
+            <WorkspaceFileIcon :path="token.path" :size="14" />
+            <span class="w-full truncate text-center">{{
+              displayName(token.path, token.label)
+            }}</span>
+          </span>
+        </template>
+      </WorkspaceMedia>
       <button
         v-if="removable"
         type="button"
@@ -301,12 +161,4 @@ function requestRemove(token: MentionFileToken): void {
       </button>
     </div>
   </div>
-  <ImageLightbox
-    v-if="lightbox"
-    :src="lightbox.src"
-    :alt="lightbox.alt"
-    :path="lightbox.path"
-    :workspace-id="workspaceId"
-    @close="closeLightbox"
-  />
 </template>

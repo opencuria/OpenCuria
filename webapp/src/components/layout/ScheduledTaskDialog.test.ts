@@ -39,7 +39,6 @@ vi.mock('@/lib/recentModels', () => ({
   recentCatalogModels: () => [],
 }))
 vi.mock('@/services/socket', () => ({
-  sendFilesUpload: vi.fn(),
   listWorkspaceFiles: vi.fn(async () => ({ entries: [] })),
   findWorkspaceFiles: vi.fn(),
   onEvent: vi.fn(() => () => {}),

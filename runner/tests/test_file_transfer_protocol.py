@@ -1,4 +1,8 @@
-"""Characterize upload protocol limits and cleanup through registered RPCs."""
+"""Characterize chunked harness write limits and cleanup through registered RPCs.
+
+Browsers upload over HTTP (backend ``workspace_files``); only harness writes
+still use the chunked Socket.IO framing.
+"""
 
 from __future__ import annotations
 
@@ -12,13 +16,13 @@ from src.chunking import CHUNK_B64_SIZE
 from tests.command_support import make_interface as WebSocketInterface
 from tests.test_file_chunking import FakeChunkService, _emits_of, _interface, _payload
 
-PREFIXES = ("files:upload", "harness:write_file")
+PREFIXES = ("harness:write_file",)
 Transfer = tuple[FakeChunkService, WebSocketInterface, str, dict[str, Any]]
 
 
 @pytest.fixture(params=PREFIXES)
 def transfer(request: pytest.FixtureRequest) -> Transfer:
-    """Build the same upload conversation for either wire namespace."""
+    """Build one chunked write conversation."""
     service = FakeChunkService()
     interface = _interface(service)
     payload = _payload(
@@ -57,7 +61,7 @@ async def test_invalid_chunk_drops_transfer(
     assert _emits_of(interface, f"{prefix}_result")[-1]["error"] == (
         f"unknown {label} transfer"
     )
-    assert service.write_calls == service.upload_calls == []
+    assert service.write_calls == []
 
 
 @pytest.mark.asyncio
@@ -81,7 +85,7 @@ async def test_invalid_finish_count_drops_transfer(
     assert _emits_of(interface, f"{prefix}_result")[-1]["error"] == (
         f"unknown {label} transfer"
     )
-    assert service.write_calls == service.upload_calls == []
+    assert service.write_calls == []
 
 
 @pytest.mark.asyncio
@@ -103,35 +107,34 @@ async def test_buffer_budget_counts_normalized_chunks(
     assert results[-1]["error"] == "Upload exceeds maximum size of 3 bytes"
     await handlers[f"{prefix}_finish"](payload)
     assert "unknown" in _emits_of(interface, f"{prefix}_result")[-1]["error"]
-    assert service.write_calls == service.upload_calls == []
+    assert service.write_calls == []
 
 
 @pytest.mark.asyncio
-async def test_upload_capacity_is_shared_and_completion_releases_a_slot() -> None:
-    """Browser uploads and harness writes share the existing 16-transfer cap."""
+async def test_write_capacity_and_completion_releases_a_slot() -> None:
+    """At most 16 writes buffer at once; completing one frees a slot."""
     service = FakeChunkService()
     interface = _interface(service)
     handlers = interface._sio.handlers["/"]
     payload = _payload(uuid.uuid4(), "", path="/workspace/a.txt", filename="a.txt")
     for index in range(16):
-        prefix = PREFIXES[index % 2]
-        await handlers[f"{prefix}_start"](
+        await handlers["harness:write_file_start"](
             {**payload, "request_id": str(index), "total_chunks": 0}
         )
     assert interface._sio.emit.await_count == 0
-    await handlers["files:upload_start"](
+    await handlers["harness:write_file_start"](
         {**payload, "request_id": "overflow", "total_chunks": 0}
     )
-    assert _emits_of(interface, "files:upload_result")[-1]["error"] == (
+    assert _emits_of(interface, "harness:write_file_result")[-1]["error"] == (
         "too many concurrent uploads"
     )
     await handlers["harness:write_file_finish"]({**payload, "request_id": "1"})
-    await handlers["files:upload_start"](
+    await handlers["harness:write_file_start"](
         {**payload, "request_id": "overflow", "total_chunks": 0}
     )
-    await handlers["files:upload_finish"]({**payload, "request_id": "overflow"})
-    assert _emits_of(interface, "files:upload_result")[-1]["status"] == "success"
-    assert len(service.write_calls) == len(service.upload_calls) == 1
+    await handlers["harness:write_file_finish"]({**payload, "request_id": "overflow"})
+    assert "error" not in _emits_of(interface, "harness:write_file_result")[-1]
+    assert len(service.write_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -158,7 +161,7 @@ async def test_expiry_uses_creation_time_and_strict_120_second_limit(
     assert _emits_of(interface, f"{prefix}_result")[-1]["error"] == (
         "unknown upload transfer"
     )
-    assert service.write_calls == service.upload_calls == []
+    assert service.write_calls == []
 
 
 @pytest.mark.asyncio
@@ -173,7 +176,7 @@ async def test_disconnect_drops_both_upload_kinds(transfer: Transfer) -> None:
     assert _emits_of(interface, f"{prefix}_result")[-1]["error"] == (
         f"unknown {label} transfer"
     )
-    assert service.write_calls == service.upload_calls == []
+    assert service.write_calls == []
 
 
 @pytest.mark.asyncio
@@ -193,7 +196,7 @@ async def test_duplicate_start_preserves_the_original_transfer(
         f"{label} already in progress"
     )
     await handlers[f"{prefix}_finish"](payload)
-    calls = service.write_calls or service.upload_calls
+    calls = service.write_calls
     assert len(calls) == 1
     assert calls[0]["content_b64"] == "QUJD"
     if prefix.startswith("harness:"):
@@ -205,7 +208,7 @@ async def test_duplicate_start_preserves_the_original_transfer(
 async def test_finish_keeps_namespace_specific_error_precedence(
     transfer: Transfer, field: str
 ) -> None:
-    """Harness identity errors precede counts; browser count errors come first."""
+    """Identity errors precede count errors."""
     service, interface, prefix, payload = transfer
     handlers = interface._sio.handlers["/"]
     await handlers[f"{prefix}_start"]({**payload, "total_chunks": 0})
@@ -213,13 +216,9 @@ async def test_finish_keeps_namespace_specific_error_precedence(
     await handlers[f"{prefix}_finish"](
         {**payload, field: invalid[field], "total_chunks": None}
     )
-    expected = (
-        f"{'workspace' if field == 'workspace_id' else 'path'} mismatch for write"
-        if prefix.startswith("harness:")
-        else "invalid total_chunks for upload"
-    )
+    expected = f"{'workspace' if field == 'workspace_id' else 'path'} mismatch for write"
     assert _emits_of(interface, f"{prefix}_result")[-1]["error"] == expected
-    assert service.write_calls == service.upload_calls == []
+    assert service.write_calls == []
 
 
 @pytest.mark.asyncio
@@ -235,16 +234,14 @@ async def test_finish_does_not_itself_trigger_lazy_expiry(
     now[0] += 121
     await handlers[f"{prefix}_finish"](payload)
     assert "error" not in _emits_of(interface, f"{prefix}_result")[-1]
-    assert len(service.write_calls or service.upload_calls) == 1
+    assert len(service.write_calls) == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("event", "chunk_event", "result_event"),
     [
-        ("files:read", "files:content_chunk", "files:content_result"),
         ("harness:read_file", "harness:read_file_chunk", "harness:read_file_result"),
-        ("files:download", "files:download_chunk", "files:download_result"),
     ],
 )
 @pytest.mark.parametrize("size", [0, CHUNK_B64_SIZE, CHUNK_B64_SIZE + 4])
@@ -254,7 +251,7 @@ async def test_reply_framing_at_chunk_threshold(
     """Every reply kind normalizes content and shares the exact inline threshold."""
     content = "QUJD" * (size // 4)
     noisy = f" \n{content}\t "
-    service = FakeChunkService(read_content=noisy, download_content=noisy)
+    service = FakeChunkService(read_content=noisy)
     interface = _interface(service)
     payload = _payload(uuid.uuid4(), "reply", path="/workspace/a.txt")
     await interface._sio.handlers["/"][event](payload)

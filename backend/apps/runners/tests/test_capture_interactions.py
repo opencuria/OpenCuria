@@ -97,15 +97,7 @@ async def test_capture_blocks_interactive_dispatch(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "event",
-    [
-        "files:read",
-        "files:list",
-        "files:find",
-        "files:upload_start",
-        "files:upload_chunk",
-        "files:upload_finish",
-        "files:download",
-    ],
+    ["files:list", "files:find"],
 )
 async def test_capture_blocks_every_file_dispatch(interaction_service, event):
     service, workspace = interaction_service
@@ -339,12 +331,12 @@ async def test_file_normal_dispatch_and_offline_error(
     emit = AsyncMock()
     monkeypatch.setattr("common.realtime.emit_to_frontend", emit)
     await service.file_transfer.forward_files_event(
-        str(workspace.id), "files:download", {"request_id": "read", "path": "/x"}
+        str(workspace.id), "files:list", {"request_id": "list", "path": "/x"}
     )
     if online:
         service.runner_transport.emit_to_runner.assert_awaited_once()
         emit.assert_not_awaited()
     else:
         service.runner_transport.emit_to_runner.assert_not_awaited()
-        assert emit.await_args.args[0] == "files:download_result"
+        assert emit.await_args.args[0] == "files:list_result"
         assert emit.await_args.args[1]["error"] == "Runner is offline"

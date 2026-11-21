@@ -1,0 +1,8 @@
+# Bundled reverse proxy for compose.yml (profile "proxy"). An https:// PUBLIC_URL
+# gets a Let's Encrypt certificate; http:// serves plain HTTP on port 80.
+# Caddy streams request bodies and upgrades WebSockets without extra settings.
+{$PUBLIC_URL}
+
+@backend path /api/* /ws/*
+reverse_proxy @backend backend:8000
+reverse_proxy webapp:80

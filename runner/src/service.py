@@ -28,6 +28,7 @@ from .services.sessions.background import BackgroundProcessManager
 from .services.sessions.desktop import DesktopManager
 from .services.sessions.streams import StreamManager
 from .services.sessions.terminals import TerminalManager
+from .services.windows_activation import WindowsActivationService
 from .services.workspace_helpers import sanitize_exec_workdir
 from .services.workspace_lifecycle import WorkspaceLifecycle
 from .services.workspace_registry import LifecycleMark, WorkspaceRegistry
@@ -92,6 +93,7 @@ class WorkspaceService:
         )
         self.git = GitService(get_cached, get_runtime)
         self.desktop = DesktopManager(runtime, get_cached, get_runtime)
+        self.windows_activation = WindowsActivationService(get_cached, get_runtime)
         self.lifecycle = WorkspaceLifecycle(
             self.registry,
             runtime,
@@ -125,6 +127,7 @@ class WorkspaceService:
             self.desktop,
             self.lifecycle,
             self.runtime_artifacts,
+            self.windows_activation,
         ):
             manager.capture_fence = self.capture_fence
 
@@ -332,6 +335,11 @@ class WorkspaceService:
             if recover is not None:
                 await recover(identity["operation_id"])
         elif failure in {"workspace:error", "image_artifact:failed"}:
+            if failure == "image_artifact:failed":
+                # A capture may have left its disposable generalize copy.
+                recover_copy = getattr(self._runtime, "recover_interrupted_capture", None)
+                if recover_copy is not None and identity.get("operation_id"):
+                    await recover_copy(identity["operation_id"])
             workspace_id = identity.get("workspace_id")
             recover = getattr(self._runtime, "quiesce_interrupted_workspace", None)
             if workspace_id and recover is not None:

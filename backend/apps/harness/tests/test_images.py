@@ -94,6 +94,41 @@ def test_resolve_workspace_image_path_relative_and_absolute() -> None:
     assert resolve_workspace_image_path("/workspace/clip.mp4") is None
 
 
+def test_resolve_workspace_image_path_decodes_percent_escapes_once() -> None:
+    """Dests are URLs: ``%20`` names a space, and escapes cannot leave."""
+    expected = "/workspace/shots/my shot.png"
+    assert resolve_workspace_image_path("/workspace/shots/my%20shot.png") == expected
+    assert resolve_workspace_image_path("<shots/my shot.png>") == expected
+    assert resolve_workspace_image_path("shots/my%20shot.png?v=2") == expected
+    assert (
+        resolve_workspace_image_path("100%25%20done%231.png")
+        == "/workspace/100% done#1.png"
+    )
+    assert resolve_workspace_image_path("a%252e.png") == "/workspace/a%2e.png"
+    assert resolve_workspace_image_path("%2e%2e/etc/passwd.png") is None
+    assert resolve_workspace_image_path("%2Ftmp/x.png") is None
+    assert resolve_workspace_image_path("bad%ZZ.png") is None
+    assert resolve_workspace_image_path("bad%00.png") is None
+
+
+@pytest.mark.asyncio
+async def test_hydrate_percent_encoded_image_path() -> None:
+    """``![](a%20b.png)`` reads the file ``a b.png`` and keeps the text."""
+    accessor = FakeAccessor(files={"/workspace/shots/my shot.png": TINY_PNG})
+    content = "see ![shot](/workspace/shots/my%20shot.png)"
+    hydrated = (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content=content)], accessor
+        )
+    )[0].content
+    assert isinstance(hydrated, list)
+    assert hydrated[1] == {
+        "type": "text",
+        "text": "![shot](/workspace/shots/my%20shot.png)",
+    }
+    assert hydrated[2]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 @pytest.mark.asyncio
 async def test_hydrate_relative_image_path() -> None:
     """Relative markdown images hydrate from /workspace."""

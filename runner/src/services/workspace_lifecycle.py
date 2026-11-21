@@ -175,6 +175,7 @@ class WorkspaceLifecycle:
         ssh_keys: list[str] | None = None,
         workspace_id: uuid.UUID | None = None,
         base_image_path: str | None = None,
+        guest_os: str | None = None,
     ) -> tuple[uuid.UUID, bool]:
         """Create a new workspace, inject credentials, and clone repos.
 
@@ -210,6 +211,7 @@ class WorkspaceLifecycle:
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            guest_os=guest_os,
         )
 
         # Register a "creating" cache entry *before* calling

@@ -22,7 +22,19 @@ import {
   weight,
 } from "@expo/ui/jetpack-compose/modifiers";
 import type { NativeListProps, NativeListRow } from "./NativeList.types";
-import { useTheme } from "./theme";
+import { useTheme, type OpenCuriaTheme } from "./theme";
+
+const TRANSPARENT = "#00000000";
+
+/** Ink icon buttons; the content color also tints the ripple. */
+function iconButtonColors(theme: OpenCuriaTheme) {
+  return {
+    containerColor: TRANSPARENT,
+    contentColor: theme.text,
+    disabledContainerColor: TRANSPARENT,
+    disabledContentColor: theme.subtleText,
+  };
+}
 
 function ListRow({ row }: { row: NativeListRow }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
@@ -30,7 +42,11 @@ function ListRow({ row }: { row: NativeListRow }): React.JSX.Element {
   return (
     <ListItem
       colors={{
-        containerColor: row.selected ? theme.surfaceMuted : "transparent",
+        containerColor: row.selected ? theme.controlFill : TRANSPARENT,
+        contentColor: row.disabled ? theme.subtleText : theme.text,
+        supportingContentColor: theme.mutedText,
+        leadingContentColor: theme.text,
+        trailingContentColor: theme.text,
       }}
       modifiers={[
         fillMaxWidth(),
@@ -55,21 +71,28 @@ function ListRow({ row }: { row: NativeListRow }): React.JSX.Element {
       <ListItem.TrailingContent>
         <Row verticalAlignment="center">
           {row.busy ? (
-            <CircularProgressIndicator modifiers={[size(18, 18)]} />
+            <CircularProgressIndicator
+              color={theme.mutedText}
+              strokeWidth={2}
+              modifiers={[size(18, 18)]}
+            />
           ) : row.selected ? (
             <Icon
               source={require("../../assets/native-icons/check.xml")}
+              tint={theme.text}
               size={18}
             />
           ) : null}
           {row.actions?.length ? (
             <DropdownMenu
               expanded={expanded}
+              color={theme.raised}
               onDismissRequest={() => setExpanded(false)}
             >
               <DropdownMenu.Trigger>
                 <IconButton
                   onClick={() => setExpanded(true)}
+                  colors={iconButtonColors(theme)}
                   modifiers={[
                     semantics({
                       contentDescription: `Actions for ${row.title}`,
@@ -87,11 +110,10 @@ function ListRow({ row }: { row: NativeListRow }): React.JSX.Element {
                   <DropdownMenuItem
                     key={action.id}
                     enabled={!action.disabled}
-                    elementColors={
-                      action.destructive
-                        ? { textColor: theme.danger }
-                        : undefined
-                    }
+                    elementColors={{
+                      textColor: action.destructive ? theme.danger : theme.text,
+                      disabledTextColor: theme.subtleText,
+                    }}
                     onClick={() => {
                       setExpanded(false);
                       row.onAction?.(action.id);
@@ -118,7 +140,7 @@ export function NativeList({ sections }: NativeListProps): React.JSX.Element {
     <Host
       style={{ flex: 1 }}
       colorScheme={theme.scheme}
-      seedColor={theme.primary}
+      seedColor={theme.seed}
       ignoreSafeAreaKeyboardInsets
     >
       <LazyColumn modifiers={[fillMaxSize()]} contentPadding={{ bottom: 16 }}>
@@ -133,6 +155,10 @@ export function NativeList({ sections }: NativeListProps): React.JSX.Element {
                   {section.onPress ? (
                     <TextButton
                       onClick={section.onPress}
+                      colors={{
+                        containerColor: TRANSPARENT,
+                        contentColor: theme.text,
+                      }}
                       modifiers={[
                         weight(1),
                         semantics({
@@ -141,13 +167,14 @@ export function NativeList({ sections }: NativeListProps): React.JSX.Element {
                       ]}
                     >
                       <Row modifiers={[fillMaxWidth()]}>
-                        <Text style={{ fontWeight: "600" }}>
+                        <Text color={theme.text} style={{ fontWeight: "600" }}>
                           {section.title}
                         </Text>
                       </Row>
                     </TextButton>
                   ) : (
                     <Text
+                      color={theme.text}
                       modifiers={[weight(1), padding(8, 8, 8, 8)]}
                       style={{ fontWeight: "600" }}
                     >
@@ -155,13 +182,18 @@ export function NativeList({ sections }: NativeListProps): React.JSX.Element {
                     </Text>
                   )}
                   {section.busy ? (
-                    <CircularProgressIndicator modifiers={[size(18, 18)]} />
+                    <CircularProgressIndicator
+                      color={theme.mutedText}
+                      strokeWidth={2}
+                      modifiers={[size(18, 18)]}
+                    />
                   ) : null}
                   {section.onExpandedChange ? (
                     <IconButton
                       onClick={() =>
                         section.onExpandedChange?.(!section.expanded)
                       }
+                      colors={iconButtonColors(theme)}
                       modifiers={[
                         semantics({
                           contentDescription: `${section.expanded ? "Collapse" : "Expand"} workspace ${section.title}`,

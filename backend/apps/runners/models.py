@@ -22,6 +22,7 @@ from .enums import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from .guest_os import GUEST_OS_CHOICES, LINUX
 
 
 class Runner(models.Model):
@@ -261,6 +262,12 @@ class Workspace(models.Model):
         if self.intervention_required:
             return self.current_task.error
         return self.lifecycle_error
+
+    @property
+    def guest_os(self) -> str:
+        """Operating system of the guest, inherited from the workspace image."""
+        image = self.base_image_instance
+        return image.guest_os if image is not None else LINUX
 
     def __str__(self) -> str:
         return f"Workspace({self.name}, {self.status})"
@@ -824,6 +831,13 @@ class ImageInstance(models.Model):
         blank=True,
         help_text="Smallest workspace disk (GiB) that can hold this captured version.",
     )
+    guest_os = models.CharField(
+        max_length=16,
+        choices=GUEST_OS_CHOICES,
+        default=LINUX,
+        db_default=LINUX,
+        help_text="Operating system of the guest; fixed when the version is created.",
+    )
     is_legacy = models.BooleanField(default=False)
     legacy_task_references = models.JSONField(default=dict, blank=True)
 
@@ -949,6 +963,7 @@ class ImageInstance(models.Model):
                 "captured_image_id",
                 "revision_id",
                 "generation",
+                "guest_os",
                 "is_legacy",
             )
             previous = (

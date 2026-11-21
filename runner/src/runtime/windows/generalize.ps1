@@ -1,0 +1,82 @@
+# Generalize this Windows guest and power off.
+#
+# Removes everything that identifies one workspace (SSH host keys, the runner
+# key, the installed product key, the bootstrap identity), then runs sysprep so
+# every guest created from the published disk gets its own machine SID and
+# licensing identity. The result is reported on COM1 because the guest has no
+# network while it is generalized for a capture.
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$StateDir = 'C:\ProgramData\opencuria'
+
+function Write-Serial([string] $Line) {
+    try {
+        $port = New-Object System.IO.Ports.SerialPort 'COM1', 115200
+        $port.Open()
+        $port.Write($Line + "`r`n")
+        # Closing discards unsent bytes: drain the driver buffer and the UART.
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while ($port.BytesToWrite -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 20
+        }
+        Start-Sleep -Milliseconds 100
+        $port.Close()
+    } catch { }
+}
+
+try {
+    Stop-Service sshd -Force -ErrorAction SilentlyContinue
+    Remove-Item -Force -ErrorAction SilentlyContinue `
+        'C:\ProgramData\ssh\ssh_host_*', 'C:\ProgramData\ssh\administrators_authorized_keys', `
+        "$StateDir\instance-id", "$StateDir\bootstrap.json", "$StateDir\license.json"
+
+    # Product keys belong to one workspace and never travel with an image.
+    $slmgr = Join-Path $env:SystemRoot 'System32\slmgr.vbs'
+    cscript.exe //Nologo $slmgr /upk | Out-Null
+    cscript.exe //Nologo $slmgr /cpky | Out-Null
+    cscript.exe //Nologo $slmgr /ckms | Out-Null
+
+    # Per-user Store packages that are not provisioned make sysprep fail. Some
+    # refuse removal for all users (0x80073CFA); those are removed for this
+    # user, and packages that stay are named if sysprep fails.
+    $provisioned = @(Get-AppxProvisionedPackage -Online | ForEach-Object { $_.PackageName })
+    $removable = @(Get-AppxPackage -AllUsers | Where-Object {
+        -not $_.IsFramework -and -not $_.NonRemovable -and
+        $_.SignatureKind -eq 'Store' -and $_.PackageFullName -notin $provisioned
+    })
+    $kept = @()
+    foreach ($package in $removable) {
+        try {
+            Remove-AppxPackage -Package $package.PackageFullName -AllUsers
+        } catch {
+            try {
+                Remove-AppxPackage -Package $package.PackageFullName
+            } catch {
+                $kept += $package.Name
+            }
+        }
+    }
+
+    # Windows runs SetupComplete.cmd again after every sysprep OOBE: the base
+    # installation's script must never run on a workspace.
+    Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 'C:\Windows\Setup\Scripts'
+    Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 'C:\Windows\System32\Sysprep\Panther'
+    # Freed clusters become holes in the published qcow2 disk (discard=unmap).
+    Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue | Out-Null
+    $sysprep = Join-Path $env:SystemRoot 'System32\Sysprep\sysprep.exe'
+    $process = Start-Process -FilePath $sysprep -Wait -PassThru -ArgumentList @(
+        '/generalize', '/oobe', '/quit', '/mode:vm', '/quiet',
+        "/unattend:$StateDir\generalize-unattend.xml"
+    )
+    $tag = 'C:\Windows\System32\Sysprep\Sysprep_succeeded.tag'
+    if ($process.ExitCode -ne 0 -or -not (Test-Path $tag)) {
+        $errors = Get-Content -ErrorAction SilentlyContinue 'C:\Windows\System32\Sysprep\Panther\setuperr.log' |
+            Select-Object -Last 5
+        $keptNote = if ($kept) { "; kept: $($kept -join ', ')" } else { '' }
+        throw "sysprep failed ($($process.ExitCode)$keptNote): $($errors -join ' | ')"
+    }
+    Write-Serial 'OPENCURIA_GENERALIZE_OK'
+} catch {
+    Write-Serial "OPENCURIA_GENERALIZE_FAILED $($_.Exception.Message)"
+}
+Stop-Computer -Force

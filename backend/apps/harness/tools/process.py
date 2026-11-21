@@ -15,6 +15,7 @@ from ..access.base import (
     sanitize_exec_workdir,
     validate_harness_env,
 )
+from ..access.guest import LINUX_GUEST, GuestPlatform, guest_of
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
 
@@ -139,7 +140,9 @@ class ProcessStartTool(Tool):
         if not name:
             raise ToolError("name must not be empty", tool=self.name)
         try:
-            workdir = sanitize_exec_workdir(args.workdir or ctx.directory)
+            workdir = sanitize_exec_workdir(
+                args.workdir or ctx.directory, guest_of(ctx.accessor)
+            )
         except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         try:
@@ -277,16 +280,18 @@ class ProcessGetTool(Tool):
 
 
 class ProcessStopTool(Tool):
-    """Stop a background process (SIGTERM, then SIGKILL after grace)."""
+    """Stop a background process the way the workspace guest OS ends it."""
 
     name = "process_stop"
-    description = (
-        "Stop a background process (SIGTERM, then SIGKILL after a short "
-        "grace period). Takes the process UUID or its exact name. "
-        "Already-finished processes are returned unchanged."
-    )
     args_schema: type[BaseModel] = ProcessStopArgs
     permission_key = "process"
+
+    def __init__(self, guest: GuestPlatform = LINUX_GUEST) -> None:
+        self.description = (
+            f"Stop a background process ({guest.process_stop}). "
+            "Takes the process UUID or its exact name. "
+            "Already-finished processes are returned unchanged."
+        )
 
     def title(self, args: BaseModel) -> str:
         """Return a short title for a process_stop invocation."""

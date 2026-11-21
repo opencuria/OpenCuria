@@ -1,16 +1,43 @@
 /** Bounded, cancellable microphone lifecycle shared by the voice composer UI. */
 import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
+import {
+  VOICE_BITS_PER_SECOND,
+  VOICE_LEVEL_INTERVAL_MS,
+  VOICE_MAX_AUDIO_BYTES,
+  VOICE_MAX_DURATION_MS,
+  appendVoiceLevel,
+  voiceRecordingLimits,
+  voiceRecordingProblem,
+} from '@opencuria/chat-core/voiceInput'
+import {
+  VoiceTranscriptionError,
+  runVoiceTranscription,
+  type VoiceConnectivity,
+} from '@opencuria/chat-core/voiceTranscriptions'
 import { fileToBase64 } from '@/lib/chatUpload'
 import { createSecureUuid } from '@/lib/secureUuid'
 import { monitorVoiceAudio, type VoiceAudioMonitor } from '@/lib/voiceAudio'
-import { VOICE_LEVEL_HISTORY } from '@/lib/voiceCaptureControls'
-import { VOICE_MAX_AUDIO_BYTES, VOICE_MAX_DURATION_MS } from '@/lib/voiceLimits'
 import { startPointing, type PointingResult } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
 // The meter scales RMS by 12; ignore low background energy when pacing visuals.
 const VISUAL_AUDIO_ACTIVITY_LEVEL = 0.03
 let microphoneOwner: symbol | null = null
+
+/** The browser's network state; a recording waits for it instead of failing. */
+const browserConnectivity: VoiceConnectivity = {
+  online: () => globalThis.navigator?.onLine !== false,
+  watch(listener) {
+    const online = () => listener(true)
+    const offline = () => listener(false)
+    globalThis.addEventListener?.('online', online)
+    globalThis.addEventListener?.('offline', offline)
+    return () => {
+      globalThis.removeEventListener?.('online', online)
+      globalThis.removeEventListener?.('offline', offline)
+    }
+  },
+}
 
 export function voiceSupported(): boolean {
   return (
@@ -40,6 +67,8 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
   const audioLevels = shallowRef<readonly number[]>([])
   const audio = shallowRef<Blob | null>(null)
   const pointingFailed = ref(false)
+  /** Processing waits for the connection; the recording stays in memory. */
+  const waiting = ref(false)
   let visualError: Error | null = null
   const busy = computed(() => state.value !== 'idle')
   const owner = Symbol('voice')
@@ -80,7 +109,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
 
   function sampleAudio(): void {
     audioLevel.value = audioMonitor?.sample() ?? 0
-    audioLevels.value = [...audioLevels.value.slice(1 - VOICE_LEVEL_HISTORY), audioLevel.value]
+    audioLevels.value = appendVoiceLevel(audioLevels.value, audioLevel.value)
     // Unknown audio must not be interpreted as silence. This only controls
     // screenshot cadence; the complete microphone waveform is always retained.
     if (
@@ -116,6 +145,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     pointingResult = null
     visualError = null
     pointingFailed.value = false
+    waiting.value = false
     state.value = 'idle'
     error.value = ''
     warning.value = ''
@@ -151,8 +181,12 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     microphoneOwner = owner
     workspaceId = options.workspaceId
     model = options.model
-    limitDuration = Math.min(options.maxDurationMs || VOICE_MAX_DURATION_MS, VOICE_MAX_DURATION_MS)
-    limitBytes = Math.min(options.maxAudioBytes || VOICE_MAX_AUDIO_BYTES, VOICE_MAX_AUDIO_BYTES)
+    const limits = voiceRecordingLimits({
+      max_duration_ms: options.maxDurationMs,
+      max_audio_bytes: options.maxAudioBytes,
+    })
+    limitDuration = limits.maxDurationMs
+    limitBytes = limits.maxAudioBytes
     state.value = 'requesting'
     try {
       const acquired = await navigator.mediaDevices.getUserMedia({
@@ -177,7 +211,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
       ].find((mime) => MediaRecorder.isTypeSupported(mime))
       recorder = new MediaRecorder(acquired, {
         ...(mimeType ? { mimeType } : {}),
-        audioBitsPerSecond: 64_000,
+        audioBitsPerSecond: VOICE_BITS_PER_SECOND,
       })
       recordingId = id
       origin = performance.now()
@@ -224,7 +258,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
         sampleAudio()
         elapsedMs.value = Math.min(Math.round(performance.now() - origin), limitDuration)
         if (elapsedMs.value >= limitDuration) void stop()
-      }, 100)
+      }, VOICE_LEVEL_INTERVAL_MS)
     } catch (cause) {
       if (current !== generation) return
       cancel()
@@ -242,23 +276,32 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     error.value = ''
     const request = new AbortController()
     controller = request
-    const requestTimer = setTimeout(() => request.abort(), 300_000)
     try {
       if (!transcript) {
+        const recording = audio.value
         const encoded = await fileToBase64(
-          new File([audio.value], 'dictation', { type: audio.value.type }),
+          new File([recording], 'dictation', { type: recording.type }),
         )
         if (current !== generation) return
-        const result = await transcribeVoice(
-          workspaceId,
-          {
-            audio_base64: encoded,
-            mime_type: audio.value.type,
-            model,
-            duration_ms: durationMs,
+        // Lost connections are retried once the browser is online again.
+        const result = await runVoiceTranscription({
+          transcribe: (signal) =>
+            transcribeVoice(
+              workspaceId,
+              {
+                audio_base64: encoded,
+                mime_type: recording.type,
+                model,
+                duration_ms: durationMs,
+              },
+              signal,
+            ),
+          signal: request.signal,
+          connectivity: browserConnectivity,
+          onWait: (wait) => {
+            if (current === generation) waiting.value = Boolean(wait)
           },
-          request.signal,
-        )
+        })
         if (current !== generation) return
         transcript = result
       }
@@ -294,13 +337,13 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     } catch (cause) {
       if (current !== generation) return
       state.value = 'error'
-      error.value = request.signal.aborted
-        ? 'Voice input processing timed out. Retry or discard the recording.'
-        : cause instanceof Error
-          ? cause.message
-          : 'Voice input could not be processed. Retry or discard the recording.'
-    } finally {
-      clearTimeout(requestTimer)
+      waiting.value = false
+      error.value =
+        cause instanceof VoiceTranscriptionError
+          ? cause.failure.message
+          : cause instanceof Error
+            ? cause.message
+            : 'Voice input could not be processed. Retry or discard the recording.'
     }
   }
 
@@ -343,14 +386,15 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
       audio.value = new Blob(chunks, { type: mime })
       chunks = []
       recorder = null
-      if (!audio.value.size || durationMs < 200) {
+      const problem = voiceRecordingProblem({
+        durationMs,
+        bytes: audio.value.size,
+        hasSignal: hasAudioSignal ?? null,
+        maxAudioBytes: limitBytes,
+      })
+      if (problem) {
         cancel()
-        error.value = 'The recording was too short. Please try again.'
-        return
-      }
-      if (hasAudioSignal === false) {
-        cancel()
-        error.value = 'No microphone audio was detected. Check your input device and try again.'
+        error.value = problem
         return
       }
       await process()
@@ -391,6 +435,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     audio,
     busy,
     pointingFailed,
+    waiting,
     start,
     stop,
     retry,

@@ -10,6 +10,8 @@ import { Image } from "expo-image";
 import {
   ArrowUp,
   FileText,
+  Mic,
+  Pencil,
   Plus,
   Sparkles,
   Square,
@@ -35,13 +37,35 @@ import {
   type MentionCandidate,
 } from "@opencuria/chat-core/harnessMentions";
 import { buildComposerSheets } from "@opencuria/chat-core/composerSheets";
-import { Banner, NativeAction } from "../ui/primitives";
+import type { HarnessScheduledMessage } from "@opencuria/chat-core/harness";
+import { sendLaterOptions } from "@opencuria/chat-core/sendLater";
+import { appendDictation } from "@opencuria/chat-core/voiceInput";
+import { Banner, IconButton, NativeAction } from "../ui/primitives";
+import { NativeContextMenu } from "../ui/ContextMenu";
 import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
 import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerAction, ComposerActionContent } from "../ui/ComposerAction";
 import { ComposerEditor } from "./ComposerEditor";
-import { ComposerSheetStack, type ComposerGates } from "./ComposerSheets";
+import { armPromptFlight } from "./PromptFlight";
+import {
+  applyDisplayEdit,
+  composerDisplay,
+  displayOffset,
+  draftSelection,
+  type ComposerDisplay,
+} from "./composerDisplay";
+import {
+  ComposerSheetStack,
+  type ComposerGates,
+  type ComposerQueue,
+} from "./ComposerSheets";
+import { SendLaterSheet } from "./SendLaterSheet";
+import {
+  VoiceClipRows,
+  VoiceRecordingBar,
+  type ComposerVoice,
+} from "./ComposerVoice";
 import {
   COMPOSER_INPUT_NATIVE_ID,
   ComposerDismissArea,
@@ -76,19 +100,43 @@ export interface ComposerWorkspace {
   onSelect: (id: string) => void;
 }
 
+/** A sent prompt the field holds for editing. */
+export interface ComposerEditing {
+  /** The edited message; a new id focuses the field again. */
+  id: string;
+  onCancel: () => void;
+}
+
+/** What the composer hands to its host when sending or scheduling. */
+export interface ComposerSubmission {
+  text: string;
+  skillIds: string[];
+  attachments: ComposerAttachment[];
+}
+
 export interface ChatComposerProps {
   draft: string;
   onDraftChange: (
     draft: string,
     selection: { start: number; end: number },
   ) => void;
-  onSend: (value: {
-    text: string;
-    skillIds: string[];
-    attachments: ComposerAttachment[];
-  }) => void | Promise<void>;
+  onSend: (value: ComposerSubmission) => void | Promise<void>;
+  /**
+   * Schedules the draft like `onSend` sends it. Enables "Send later" on a
+   * long press of the send button.
+   */
+  onSchedule?: (
+    value: ComposerSubmission,
+    sendAt: Date,
+  ) => void | Promise<void>;
   onStop?: () => void | Promise<void>;
+  /** A run or a send is in progress: Stop is available. */
   busy?: boolean;
+  /**
+   * The agent is working: a message steers the running turn, so the composer
+   * offers Send next to a compact Stop while there is a draft.
+   */
+  steering?: boolean;
   disabled?: boolean;
   /**
    * False keeps the draft editable but neither sends it nor adds attachments,
@@ -122,8 +170,27 @@ export interface ChatComposerProps {
   >;
   /** Pending questions and permissions, shown as sheets above the editor. */
   gates?: ComposerGates;
+  /** Queued steers and scheduled messages, shown as a sheet above the editor. */
+  queue?: ComposerQueue;
+  /**
+   * The draft is a sent prompt being edited: a banner above the field cancels
+   * it, and `onSend` receives the edit.
+   */
+  editing?: ComposerEditing;
+  /**
+   * Dictation: a microphone takes the send button's place while the draft is
+   * empty. Transcripts of this chat arrive at the end of the draft.
+   */
+  voice?: ComposerVoice;
   testID?: string;
 }
+
+/** Native symbols of the "Send later" presets. */
+const SEND_LATER_SYMBOLS: Record<string, string> = {
+  "in-1-hour": "clock",
+  tomorrow: "sunrise",
+  monday: "calendar",
+};
 
 interface ActiveQuery {
   kind: "mention" | "skill";
@@ -143,8 +210,10 @@ export function ChatComposer({
   draft,
   onDraftChange,
   onSend,
+  onSchedule,
   onStop,
   busy = false,
+  steering = false,
   disabled = false,
   canSend = true,
   placeholder = "Ask OpenCuria",
@@ -163,6 +232,9 @@ export function ChatComposer({
   onChoosePhotos,
   onChooseFiles,
   gates,
+  queue,
+  editing,
+  voice,
   testID = "chat-composer",
 }: ChatComposerProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -182,6 +254,8 @@ export function ChatComposer({
   const selectionRef = useRef({ start: draft.length, end: draft.length });
   const nativeSelectionRef = useRef(false);
   const nativeEditTextRef = useRef<string | null>(null);
+  // The last native selection, in the coordinates of the shown text.
+  const nativeShownSelectionRef = useRef({ start: 0, end: 0 });
   const draftRef = useRef(draft);
   const attachmentsRef = useRef(attachments);
   const pickerInFlight = useRef(false);
@@ -193,8 +267,23 @@ export function ChatComposer({
   // Text the mounted editor shows natively, and its mount generation.
   const editorTextRef = useRef(draft);
   const [editorKey, setEditorKey] = useState(0);
+  // The draft or a scheduled message waiting for a custom send time.
+  const [timePicker, setTimePicker] = useState<
+    | { kind: "draft" }
+    | { kind: "reschedule"; message: HarnessScheduledMessage }
+    | null
+  >(null);
 
   attachmentsRef.current = attachments;
+
+  // The field shows file mentions by name; the draft keeps their tokens.
+  const display = useMemo(() => composerDisplay(draft), [draft]);
+  const displayCache = useRef(display);
+  const displayOf = useCallback((text: string): ComposerDisplay => {
+    if (displayCache.current.source !== text)
+      displayCache.current = composerDisplay(text);
+    return displayCache.current;
+  }, []);
 
   const activeSkills = useMemo(
     () =>
@@ -226,8 +315,17 @@ export function ChatComposer({
             : null,
         questions: gates?.questions,
         permissions: gates?.permissions,
+        queue: queue?.steers,
+        scheduled: queue?.scheduled,
       }),
-    [candidates, gates?.permissions, gates?.questions, query],
+    [
+      candidates,
+      gates?.permissions,
+      gates?.questions,
+      query,
+      queue?.scheduled,
+      queue?.steers,
+    ],
   );
 
   const cancelSearch = useCallback(() => {
@@ -260,7 +358,8 @@ export function ChatComposer({
         }
         return;
       }
-      const slash = detectSlashQuery(text, cursor);
+      // Skills apply when a turn starts; a steer cannot carry them.
+      const slash = steering ? null : detectSlashQuery(text, cursor);
       if (slash !== null) {
         setSearched(NO_CANDIDATES);
         setQuery({ kind: "skill", query: slash });
@@ -269,31 +368,46 @@ export function ChatComposer({
         setSearched(NO_CANDIDATES);
       }
     },
-    [cancelSearch, onSearchMentions],
+    [cancelSearch, onSearchMentions, steering],
   );
 
   const changeText = useCallback(
-    (text: string) => {
+    (shown: string) => {
+      const previous = displayOf(draftRef.current);
+      const edit = applyDisplayEdit(
+        draftRef.current,
+        shown,
+        displayOffset(previous, selectionRef.current.start),
+      );
+      const next = displayOf(edit.draft);
+      // Android reports the caret before the text, so it already belongs to
+      // this edit; otherwise the caret follows the edited range.
       const nativeSelectionIsForThisEdit =
         nativeSelectionRef.current &&
-        nativeEditTextRef.current === draftRef.current;
+        nativeEditTextRef.current === draftRef.current &&
+        next.text === shown;
+      const native = nativeShownSelectionRef.current;
       const nextSelection = nativeSelectionIsForThisEdit
-        ? selectionRef.current
-        : estimateSelectionAfterEdit(
-            draftRef.current,
-            text,
-            selectionRef.current,
-          );
+        ? draftSelection(next, native)
+        : { start: edit.cursor, end: edit.cursor };
       nativeSelectionRef.current = false;
       nativeEditTextRef.current = null;
-      draftRef.current = text;
-      editorTextRef.current = text;
+      draftRef.current = edit.draft;
+      editorTextRef.current = edit.draft;
       selectionRef.current = nextSelection;
       setError(null);
-      onDraftChange(text, nextSelection);
-      refreshQuery(text, nextSelection.end);
+      onDraftChange(edit.draft, nextSelection);
+      refreshQuery(edit.draft, nextSelection.end);
+      if (next.text !== shown) {
+        // A mention went away whole or got a separator: the field shows the
+        // draft again, with the caret where the edit left it.
+        const caret = displayOffset(next, edit.cursor);
+        requestAnimationFrame(() =>
+          inputRef.current?.setSelection(caret, caret),
+        );
+      }
     },
-    [onDraftChange, refreshQuery],
+    [displayOf, onDraftChange, refreshQuery],
   );
 
   const selectCandidate = useCallback(
@@ -326,13 +440,17 @@ export function ChatComposer({
       setError(null);
       cancelSearch();
       onDraftChange(result.text, nextSelection);
+      const caret = displayOffset(displayOf(result.text), result.cursor);
+      // A command, not `setNativeProps`: Fabric would keep re-applying a
+      // selection prop on every later render and pull the caret back.
       requestAnimationFrame(() => {
         inputRef.current?.focus();
-        inputRef.current?.setNativeProps({ selection: nextSelection });
+        inputRef.current?.setSelection(caret, caret);
       });
     },
     [
       cancelSearch,
+      displayOf,
       onDraftChange,
       onSelectedSkillIdsChange,
       query,
@@ -353,6 +471,7 @@ export function ChatComposer({
     setQuery(null);
     setSearched(NO_CANDIDATES);
     setError(null);
+    setTimePicker(null);
     cancelSearch();
   }, [cancelSearch, contextKey]);
 
@@ -392,6 +511,21 @@ export function ChatComposer({
     setEditorKey((key) => key + 1);
   }, [draft]);
 
+  // A prompt taken in for editing opens the keyboard, the caret at its end.
+  // The frame lets the editor that measures the new draft mount first.
+  const editingId = editing?.id;
+  useEffect(() => {
+    if (!editingId) return;
+    const frame = requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input) return;
+      const end = displayOf(draftRef.current).text.length;
+      input.focus();
+      input.setSelection(end, end);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [displayOf, editingId]);
+
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -405,13 +539,15 @@ export function ChatComposer({
 
   const onSelectionChange = useCallback(
     (event: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
-      const next = event.nativeEvent.selection;
+      const shown = event.nativeEvent.selection;
       nativeSelectionRef.current = true;
       nativeEditTextRef.current = draftRef.current;
+      nativeShownSelectionRef.current = shown;
+      const next = draftSelection(displayOf(draftRef.current), shown);
       selectionRef.current = next;
       refreshQuery(draftRef.current, next.end);
     },
-    [refreshQuery],
+    [displayOf, refreshQuery],
   );
 
   const addAttachments = useCallback(
@@ -455,100 +591,189 @@ export function ChatComposer({
     [canSend, disabled, onAttachmentsChange],
   );
 
-  const send = useCallback(async () => {
-    // Stop is an independent control, not a variant of sending. It must work
-    // even when the draft is empty or the host has temporarily disabled input.
-    if (busy) {
-      if (!onStop || stopInFlight.current) return;
-      const generation = operationGeneration.current;
-      stopInFlight.current = true;
-      setStopping(true);
-      setError(null);
-      try {
-        await onStop();
-      } catch {
-        if (mounted.current && generation === operationGeneration.current)
-          setError("Could not stop the current run. Please try again.");
-      } finally {
-        stopInFlight.current = false;
-        if (mounted.current && generation === operationGeneration.current)
-          setStopping(false);
-      }
-      return;
-    }
-    if (sendingRef.current) return;
-    const originalDraft = draftRef.current;
-    const text = originalDraft.trim();
-    const currentAttachments = [...attachmentsRef.current];
-    if (
-      disabled ||
-      !canSend ||
-      pickerInFlight.current ||
-      (!text && currentAttachments.length === 0)
-    )
-      return;
+  // Stop is an independent control, not a variant of sending. It must work
+  // even when the draft is empty or the host has temporarily disabled input.
+  const stop = useCallback(async () => {
+    if (!onStop || stopInFlight.current) return;
     const generation = operationGeneration.current;
-    nativeSelectionRef.current = false;
-    nativeEditTextRef.current = null;
-    const originalSelection = selectionRef.current;
-    dismissKeyboard({ revealLatest: true });
-    sendingRef.current = true;
-    setSending(true);
+    stopInFlight.current = true;
+    setStopping(true);
     setError(null);
-    // Clear at once, as messengers do; a failed send restores the draft.
-    const cleared = { start: 0, end: 0 };
-    draftRef.current = "";
-    selectionRef.current = cleared;
-    setQuery(null);
-    setSearched(NO_CANDIDATES);
-    cancelSearch();
-    onDraftChange("", cleared);
     try {
-      await onSend({
-        text,
-        skillIds: [...selectedSkillIds],
-        attachments: currentAttachments,
-      });
+      await onStop();
     } catch {
-      if (
-        mounted.current &&
-        generation === operationGeneration.current &&
-        (draftRef.current === "" || draftRef.current === originalDraft)
-      ) {
-        const restoredSelection = {
-          start: Math.min(originalSelection.start, originalDraft.length),
-          end: Math.min(originalSelection.end, originalDraft.length),
-        };
-        nativeSelectionRef.current = false;
-        nativeEditTextRef.current = null;
-        draftRef.current = originalDraft;
-        selectionRef.current = restoredSelection;
-        onDraftChange(originalDraft, restoredSelection);
-        setError(
-          "Your message could not be sent. Your draft is still here. Please try again.",
-        );
-      }
-    } finally {
-      if (generation === operationGeneration.current)
-        sendingRef.current = false;
       if (mounted.current && generation === operationGeneration.current)
-        setSending(false);
+        setError("Could not stop the current run. Please try again.");
+    } finally {
+      stopInFlight.current = false;
+      if (mounted.current && generation === operationGeneration.current)
+        setStopping(false);
     }
-  }, [
-    busy,
-    canSend,
-    cancelSearch,
-    disabled,
-    dismissKeyboard,
-    onDraftChange,
-    onSend,
-    onStop,
-    selectedSkillIds,
-  ]);
+  }, [onStop]);
+
+  /** Hands the draft to `deliver`; a failure gives the draft back. */
+  const submit = useCallback(
+    async (
+      deliver: (value: ComposerSubmission) => void | Promise<void>,
+      failure: string,
+    ) => {
+      if (sendingRef.current) return;
+      const originalDraft = draftRef.current;
+      const text = originalDraft.trim();
+      const currentAttachments = [...attachmentsRef.current];
+      if (
+        disabled ||
+        !canSend ||
+        (busy && !steering) ||
+        pickerInFlight.current ||
+        (!text && currentAttachments.length === 0)
+      )
+        return;
+      const generation = operationGeneration.current;
+      nativeSelectionRef.current = false;
+      nativeEditTextRef.current = null;
+      const originalSelection = selectionRef.current;
+      dismissKeyboard({ revealLatest: true });
+      sendingRef.current = true;
+      setSending(true);
+      setError(null);
+      // Clear at once, as messengers do; a failed send restores the draft.
+      const cleared = { start: 0, end: 0 };
+      draftRef.current = "";
+      selectionRef.current = cleared;
+      setQuery(null);
+      setSearched(NO_CANDIDATES);
+      cancelSearch();
+      onDraftChange("", cleared);
+      // Attachments leave with the text; a failed send gives both back.
+      if (currentAttachments.length) {
+        attachmentsRef.current = [];
+        onAttachmentsChange?.([]);
+      }
+      try {
+        await deliver({
+          text,
+          skillIds: [...selectedSkillIds],
+          attachments: currentAttachments,
+        });
+      } catch {
+        if (
+          mounted.current &&
+          generation === operationGeneration.current &&
+          (draftRef.current === "" || draftRef.current === originalDraft)
+        ) {
+          const restoredSelection = {
+            start: Math.min(originalSelection.start, originalDraft.length),
+            end: Math.min(originalSelection.end, originalDraft.length),
+          };
+          nativeSelectionRef.current = false;
+          nativeEditTextRef.current = null;
+          draftRef.current = originalDraft;
+          selectionRef.current = restoredSelection;
+          onDraftChange(originalDraft, restoredSelection);
+          // Keep anything picked meanwhile.
+          const missing = currentAttachments.filter(
+            (file) =>
+              !attachmentsRef.current.some((item) => item.id === file.id),
+          );
+          if (missing.length) {
+            const next = [...missing, ...attachmentsRef.current];
+            attachmentsRef.current = next;
+            onAttachmentsChange?.(next);
+          }
+          setError(failure);
+        }
+      } finally {
+        if (generation === operationGeneration.current)
+          sendingRef.current = false;
+        if (mounted.current && generation === operationGeneration.current)
+          setSending(false);
+      }
+    },
+    [
+      busy,
+      canSend,
+      cancelSearch,
+      disabled,
+      dismissKeyboard,
+      onAttachmentsChange,
+      onDraftChange,
+      selectedSkillIds,
+      steering,
+    ],
+  );
+
+  const isEditing = Boolean(editing);
+  const send = useCallback(() => {
+    // A prompt's bubble rises from where its text is now; a steer goes to the
+    // queue above the composer instead, and an edit replaces its prompt.
+    if (!steering && !isEditing)
+      armPromptFlight((report) => {
+        const input = inputRef.current;
+        if (!input) return report(null);
+        input.measureInWindow((_x, y) => report(y));
+      });
+    return submit(
+      onSend,
+      "Your message could not be sent. Your draft is still here. Please try again.",
+    );
+  }, [isEditing, onSend, steering, submit]);
+
+  // Dictation arrives at the end of the draft; "Stop and send" sends it.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+  const receiveVoice = voice?.receive;
+  useEffect(() => {
+    if (!receiveVoice) return;
+    return receiveVoice((text, sendNow) => {
+      const next = appendDictation(draftRef.current, text);
+      const end = { start: next.length, end: next.length };
+      nativeSelectionRef.current = false;
+      nativeEditTextRef.current = null;
+      draftRef.current = next;
+      selectionRef.current = end;
+      setError(null);
+      onDraftChangeRef.current(next, end);
+      // After the draft reached the host and the field shows it.
+      if (sendNow)
+        requestAnimationFrame(() => {
+          if (mounted.current) void sendRef.current();
+        });
+    });
+  }, [receiveVoice]);
+
+  const schedule = useCallback(
+    (sendAt: Date) => {
+      if (!onSchedule) return;
+      void submit(
+        (value) => onSchedule(value, sendAt),
+        "Your message could not be scheduled. Your draft is still here. Please try again.",
+      );
+    },
+    [onSchedule, submit],
+  );
+
+  const chooseSendLater = useCallback(
+    (id: string) => {
+      if (id === "custom") {
+        dismissKeyboard();
+        setTimePicker({ kind: "draft" });
+        return;
+      }
+      // Recomputed on selection, so "In 1 hour" counts from now.
+      const option = sendLaterOptions().find((item) => item.id === id);
+      if (option) schedule(option.at);
+    },
+    [dismissKeyboard, schedule],
+  );
 
   const hasPicker = Boolean(onTakePhoto || onChoosePhotos || onChooseFiles);
-  const canSubmit =
-    !disabled && canSend && (draft.trim().length > 0 || attachments.length > 0);
+  const hasDraft = draft.trim().length > 0 || attachments.length > 0;
+  // While the agent works a draft steers it; a send still on its way blocks.
+  const canSubmit = !disabled && canSend && hasDraft && (!busy || steering);
+  const primaryIsStop = busy && !(steering && hasDraft);
   const attachDisabled = disabled || !canSend;
   const attachmentButton = hasPicker ? (
     <NativeMenu
@@ -640,20 +865,79 @@ export function ChatComposer({
       />
     </View>
   ) : null;
-  const sendDisabled = busy ? !onStop || stopping : !canSubmit || sending;
-  const sendButton = (
+  const stopDisabled = !onStop || stopping;
+  const stopButton = (
     <ComposerAction
-      label={busy ? "Stop OpenCuria" : "Send message"}
-      icon={busy ? Square : ArrowUp}
+      label="Stop OpenCuria"
+      icon={Square}
+      primary={primaryIsStop}
+      iconSize={primaryIsStop ? 14 : 13}
+      filledIcon
+      busy={!primaryIsStop && stopping}
+      disabled={stopDisabled}
+      onPress={() => {
+        void stop();
+      }}
+      testID="chat-composer-stop"
+    />
+  );
+  const sendDisabled = !canSubmit || sending;
+  const canSchedule = Boolean(onSchedule) && !sendDisabled;
+  const sendAction = (showMenu?: () => void) => (
+    <ComposerAction
+      label="Send message"
+      icon={ArrowUp}
       primary
-      iconSize={busy ? 14 : 22}
-      filledIcon={busy}
+      iconSize={22}
       disabled={sendDisabled}
       onPress={() => {
         void send();
       }}
-      testID={busy ? "chat-composer-stop" : "chat-composer-send"}
+      onLongPress={showMenu}
+      accessibilityHint={canSchedule ? "Hold to send later" : undefined}
+      testID="chat-composer-send"
     />
+  );
+  const canDictate = Boolean(voice) && !disabled;
+  const voiceButton = (primary: boolean) => (
+    <ComposerAction
+      label="Dictate a message"
+      icon={Mic}
+      primary={primary}
+      iconSize={primary ? 20 : 19}
+      onPress={() => voice?.start()}
+      testID="chat-composer-voice"
+    />
+  );
+  const sendButton = primaryIsStop ? (
+    stopButton
+  ) : canDictate && !hasDraft ? (
+    voiceButton(true)
+  ) : canSchedule ? (
+    <NativeContextMenu
+      label="Send later"
+      fitContent
+      actions={[
+        ...sendLaterOptions().map((option) => ({
+          id: option.id,
+          title:
+            option.id === "in-1-hour"
+              ? option.label
+              : `${option.label}, ${option.detail}`,
+          symbol: SEND_LATER_SYMBOLS[option.id],
+        })),
+        {
+          id: "custom",
+          title: "Choose date & time…",
+          symbol: "calendar.badge.clock",
+        },
+      ]}
+      onSelect={chooseSendLater}
+    >
+      {sendAction}
+    </NativeContextMenu>
+  ) : (
+    sendAction()
   );
 
   return (
@@ -667,9 +951,25 @@ export function ChatComposer({
           style={{ marginBottom: 8 }}
         />
       ) : null}
+      {voice?.notice ? (
+        <Banner
+          tone={voice.notice.tone === "error" ? "error" : "neutral"}
+          message={voice.notice.message}
+          actionLabel={voice.notice.action?.label}
+          onAction={voice.notice.action?.onPress}
+          onDismiss={voice.dismissNotice}
+          testID="chat-composer-voice-notice"
+          style={{ marginBottom: 8 }}
+        />
+      ) : null}
       <ComposerSheetStack
         sheets={sheets}
         gates={gates}
+        queue={queue}
+        onChangeTime={(message) => {
+          dismissKeyboard();
+          setTimePicker({ kind: "reschedule", message });
+        }}
         onSelectCandidate={selectCandidate}
       />
       <ComposerDismissArea enabled={!inputScrolls}>
@@ -679,6 +979,28 @@ export function ChatComposer({
           style={styles.core}
         >
           <ComposerSurface>
+            {editing ? (
+              <View
+                testID="chat-composer-editing"
+                style={[styles.editing, { backgroundColor: theme.controlFill }]}
+              >
+                <Pencil size={18} strokeWidth={1.8} color={theme.mutedText} />
+                <Text
+                  numberOfLines={1}
+                  style={[styles.editingLabel, { color: theme.mutedText }]}
+                >
+                  Editing message
+                </Text>
+                <IconButton
+                  symbol="xmark"
+                  icon={<X size={18} color={theme.mutedText} />}
+                  label="Cancel editing"
+                  tone="quiet"
+                  onPress={editing.onCancel}
+                  testID="chat-composer-cancel-edit"
+                />
+              </View>
+            ) : null}
             {workspacePicker}
             {activeSkills.length ? (
               <ScrollView
@@ -738,7 +1060,10 @@ export function ChatComposer({
                       <Image
                         source={{ uri: attachment.uri }}
                         contentFit="cover"
-                        style={styles.attachmentThumbnail}
+                        style={[
+                          styles.attachmentThumbnail,
+                          { backgroundColor: theme.controlFill },
+                        ]}
                         accessibilityLabel={`${attachment.name} preview`}
                       />
                     ) : (
@@ -768,10 +1093,16 @@ export function ChatComposer({
                 ))}
               </ScrollView>
             ) : null}
+            {voice?.clips.length ? (
+              <VoiceClipRows
+                clips={voice.clips}
+                onRetry={voice.retry}
+                onDiscard={voice.discard}
+              />
+            ) : null}
             <ComposerEditor
               key={`message-input-${editorKey}`}
               ref={inputRef}
-              value={draft}
               onChangeText={changeText}
               onSelectionChange={onSelectionChange}
               onContentSizeChange={({ nativeEvent }) => {
@@ -792,37 +1123,78 @@ export function ChatComposer({
               blurOnSubmit={false}
               textAlignVertical="top"
               style={[styles.input, { color: theme.text }]}
-            />
-            <View style={styles.toolbar}>
-              {attachmentButton}
-              <View style={styles.settings}>{settingsButton}</View>
-              {sendButton}
-            </View>
+            >
+              {display.pieces.map((piece, index) =>
+                piece.segment.kind === "text" ? (
+                  piece.text
+                ) : (
+                  <Text
+                    key={`mention:${index}`}
+                    style={[
+                      styles.mention,
+                      {
+                        color: theme.primary,
+                        backgroundColor: mentionTint(theme.primary),
+                      },
+                    ]}
+                  >
+                    {piece.text}
+                  </Text>
+                ),
+              )}
+            </ComposerEditor>
+            {voice?.recording ? (
+              <VoiceRecordingBar
+                recording={voice.recording}
+                onCancel={voice.cancel}
+                onFinish={voice.finish}
+              />
+            ) : (
+              <View style={styles.toolbar}>
+                {attachmentButton}
+                <View style={styles.settings}>{settingsButton}</View>
+                {busy && !primaryIsStop ? stopButton : null}
+                {/* While the agent works, a steer can be dictated beside Stop. */}
+                {primaryIsStop && steering && canDictate
+                  ? voiceButton(false)
+                  : null}
+                {sendButton}
+              </View>
+            )}
           </ComposerSurface>
         </View>
       </ComposerDismissArea>
+      <SendLaterSheet
+        visible={timePicker !== null}
+        initial={
+          timePicker?.kind === "reschedule"
+            ? new Date(timePicker.message.send_at)
+            : null
+        }
+        actionTitle={
+          timePicker?.kind === "reschedule" ? "Reschedule" : "Schedule"
+        }
+        onClose={() => setTimePicker(null)}
+        onConfirm={(sendAt) => {
+          const picked = timePicker;
+          setTimePicker(null);
+          if (picked?.kind === "reschedule")
+            void Promise.resolve(
+              queue?.onReschedule(picked.message.id, sendAt),
+            ).catch(() => undefined);
+          else schedule(sendAt);
+        }}
+      />
     </View>
   );
 }
 
-function estimateSelectionAfterEdit(
-  previous: string,
-  next: string,
-  selection: { start: number; end: number },
-): { start: number; end: number } {
-  let prefix = 0;
-  const sharedLimit = Math.min(previous.length, next.length);
-  while (prefix < sharedLimit && previous[prefix] === next[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < sharedLimit - prefix &&
-    previous[previous.length - 1 - suffix] === next[next.length - 1 - suffix]
-  )
-    suffix += 1;
-  const changedStart = Math.min(selection.start, prefix);
-  const insertedLength = Math.max(0, next.length - prefix - suffix);
-  const cursor = Math.min(next.length, changedStart + insertedLength);
-  return { start: cursor, end: cursor };
+/** The accent at low opacity: the background of a mention in the field. */
+function mentionTint(color: string): string {
+  const hex = /^#([0-9a-f]{6})$/i.exec(color)?.[1];
+  if (!hex) return "transparent";
+  const value = parseInt(hex, 16);
+  return `rgba(${value >> 16}, ${(value >> 8) & 255}, ${value & 255}, 0.16)`;
 }
 
 function isImage(attachment: ComposerAttachment): boolean {
@@ -840,6 +1212,18 @@ const styles = StyleSheet.create({
   core: { paddingTop: 6 },
   // The name lines up with the editor's text below it.
   workspace: { flexDirection: "row", marginHorizontal: 8, marginBottom: -6 },
+  // Its corners follow the surface's, inset by the surface padding.
+  editing: {
+    minHeight: 44,
+    borderRadius: 22,
+    borderCurve: "continuous",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingLeft: 14,
+    marginBottom: 2,
+  },
+  editingLabel: { flex: 1, fontSize: 15 },
   input: {
     minWidth: 0,
     minHeight: 36,
@@ -888,9 +1272,9 @@ const styles = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 10,
-    backgroundColor: "#777777",
   },
   skillName: { maxWidth: 170, fontSize: 13, fontWeight: "500" },
+  mention: { fontWeight: "600" },
   chipRemove: {
     width: 30,
     height: 30,

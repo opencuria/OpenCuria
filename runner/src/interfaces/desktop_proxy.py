@@ -15,7 +15,7 @@ import asyncio
 import base64
 import contextlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -119,12 +119,19 @@ class DesktopProxyEvents(Protocol):
         ...
 
 
+class _NoSession:
+    """Stands in for the HTTP session a guest WebSocket upstream owns."""
+
+    async def close(self) -> None:
+        return None
+
+
 @dataclass
 class _Tunnel:
     """Resources owned by one desktop WebSocket tunnel."""
 
-    session: aiohttp.ClientSession
-    websocket: aiohttp.ClientWebSocketResponse
+    session: aiohttp.ClientSession | _NoSession
+    websocket: Any  # aiohttp WebSocket or a display stream with the same surface
     reader_task: asyncio.Task[None]
     workspace_id: uuid.UUID
     desktop_generation: int | None = None
@@ -151,8 +158,20 @@ class DesktopProxy:
         capture_fence: CaptureFence | None = None,
         *,
         upstream_port: int = DESKTOP_UPSTREAM_PORT,
+        desktop_kind: Callable[[uuid.UUID], Awaitable[str]] | None = None,
+        open_display: Callable[[uuid.UUID], Awaitable[Any]] | None = None,
+        display_file: Callable[[str], bytes | None] | None = None,
     ) -> None:
-        """Inject desktop observations, outbound transport and capture admission."""
+        """Inject desktop observations, outbound transport and capture admission.
+
+        ``desktop_kind`` reports ``qemu`` for workspaces whose display QEMU
+        serves (Windows); ``open_display`` then opens that display as a
+        WebSocket-like byte stream and ``display_file`` supplies the runner's
+        pinned viewer files, because such a guest has no web server.
+        """
+        self._desktop_kind = desktop_kind
+        self._open_display = open_display
+        self._display_file = display_file
         self._get_guest_ip = get_guest_ip
         self._get_session = get_session
         self._events = events
@@ -186,6 +205,16 @@ class DesktopProxy:
         """
         if not _is_plain_path(rest_path):
             return _bad_gateway()
+        if await self._serves_display(workspace_id):
+            body = self._display_file(rest_path) if self._display_file else None
+            if body is None:
+                return {"status": 404, "headers": [], "body": "", "body_encoding": "base64"}
+            return {
+                "status": 200,
+                "headers": [["Content-Length", str(len(body))]],
+                "body": base64.b64encode(body).decode("ascii"),
+                "body_encoding": "base64",
+            }
         async with self._interaction(workspace_id):
             guest_ip = self._get_guest_ip(workspace_id)
             upstream_url = f"http://{guest_ip}:{self._port}{rest_path}"
@@ -287,19 +316,23 @@ class DesktopProxy:
                 current_generation = current.generation if current else None
                 if opening.invalidated or current_generation != generation:
                     raise RuntimeError("Desktop changed while opening proxy tunnel")
-                guest_ip = self._get_guest_ip(workspace_id)
-                upstream_url = f"ws://{guest_ip}:{self._port}/websockify"
-                upstream_origin = f"http://{guest_ip}:{self._port}"
                 chosen_protocol = "binary" if "binary" in (subprotocols or []) else None
-
-                session = self._client_session(guest_ip)
-                opening.session = session
-                websocket = await session.ws_connect(
-                    upstream_url,
-                    protocols=["binary"] if chosen_protocol else None,
-                    max_msg_size=16 * 1024 * 1024,
-                    headers={"Origin": upstream_origin},
-                )
+                display = await self._display_stream(workspace_id)
+                if display is not None:
+                    session: aiohttp.ClientSession | _NoSession = _NoSession()
+                    websocket: Any = display
+                else:
+                    guest_ip = self._get_guest_ip(workspace_id)
+                    upstream_url = f"ws://{guest_ip}:{self._port}/websockify"
+                    upstream_origin = f"http://{guest_ip}:{self._port}"
+                    session = self._client_session(guest_ip)
+                    opening.session = session
+                    websocket = await session.ws_connect(
+                        upstream_url,
+                        protocols=["binary"] if chosen_protocol else None,
+                        max_msg_size=16 * 1024 * 1024,
+                        headers={"Origin": upstream_origin},
+                    )
                 current = self._get_session(workspace_id)
                 current_generation = current.generation if current else None
                 if opening.invalidated or current_generation != generation:
@@ -325,6 +358,19 @@ class DesktopProxy:
         finally:
             if self._opening.get(tunnel_id) is opening:
                 self._opening.pop(tunnel_id)
+
+    async def _serves_display(self, workspace_id: uuid.UUID) -> bool:
+        """Whether QEMU serves this desktop (viewer files come from the runner)."""
+        if self._desktop_kind is None or self._open_display is None:
+            return False
+        return await self._desktop_kind(workspace_id) == "qemu"
+
+    async def _display_stream(self, workspace_id: uuid.UUID) -> Any | None:
+        """Open the QEMU display of a workspace that has one."""
+        if not await self._serves_display(workspace_id):
+            return None
+        assert self._open_display is not None
+        return await self._open_display(workspace_id)
 
     async def close_workspace(
         self,

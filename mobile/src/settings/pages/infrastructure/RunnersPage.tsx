@@ -1,10 +1,11 @@
 import React from "react";
-import type { NativeFormSection } from "../../../ui/NativeForm.types";
-import { tileColor } from "../../../ui/tileColors";
-import { useTheme } from "../../../ui/theme";
+import type {
+  NativeFormItemRow,
+  NativeFormSection,
+} from "../../../ui/NativeForm.types";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { usePolling } from "../../usePolling";
@@ -15,7 +16,6 @@ import { metricsSummary, runnerConnection } from "./runners";
 export function RunnersPage(): React.JSX.Element {
   const { client, resources } = useSettings();
   const navigation = useSettingsNavigation();
-  const { theme } = useTheme();
   const runners = useResource(resources, RUNNERS, () => client.runners.list());
   const online = (runners.data ?? []).filter(
     (runner) => runner.status === "online",
@@ -43,10 +43,10 @@ export function RunnersPage(): React.JSX.Element {
         {
           id: "runners",
           footer: "Runners execute workspaces and their AI coding agents.",
-          rows: runners.data.map((runner) => {
+          rows: runners.data.map((runner): NativeFormItemRow => {
             const sample = metrics.data?.[runner.id];
             return {
-              kind: "item" as const,
+              kind: "item",
               id: `runner-${runner.id}`,
               testID: `runner-${runner.id}`,
               title: runner.name || runner.id.slice(0, 8),
@@ -56,42 +56,42 @@ export function RunnersPage(): React.JSX.Element {
               ]
                 .filter(Boolean)
                 .join(" · "),
-              symbol: "server.rack" as const,
-              tint: tileColor(
-                runner.status === "online" ? "green" : "gray",
-                theme,
-              ),
+              symbol: "server.rack",
+              tile: true,
+              status: runner.status === "online" ? "positive" : "neutral",
               onPress: () => navigation.push(route("runner", runner.id)),
             };
           }),
         },
       ]
     : [];
+  const failure = runners.data ? undefined : loadFailure("runners", runners);
+  const register = {
+    title: "Register runner",
+    symbol: "plus" as const,
+    onPress: () => navigation.push("runner-new"),
+  };
 
   return (
     <SettingsPage
       title="Runners"
       sections={
-        runners.error && !runners.data
-          ? loadErrorSections(runners.error, () => void runners.reload())
-          : sections
+        failure ? [] : [...refreshError("runners", runners), ...sections]
       }
       loading={!runners.data && !runners.error}
       onRefresh={async () => {
         await Promise.allSettled([runners.reload(), metrics.reload()]);
       }}
-      empty={{
-        title: "No runners registered",
-        description:
-          "Register a runner to start provisioning workspaces for your AI coding agents.",
-        symbol: "server.rack",
-      }}
-      primaryAction={{
-        title: "Register runner",
-        symbol: "plus",
-        onPress: () => navigation.push("runner-new"),
-        testID: "register-runner",
-      }}
+      empty={
+        failure ?? {
+          title: "No runners yet",
+          description:
+            "Register a runner to start provisioning workspaces for your AI coding agents.",
+          symbol: "server.rack",
+          action: { ...register, testID: "empty-register-runner" },
+        }
+      }
+      primaryAction={{ ...register, testID: "register-runner" }}
       testID="settings-runners"
     />
   );

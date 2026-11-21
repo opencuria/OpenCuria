@@ -285,3 +285,48 @@ async def test_workspace_update_replaces_credentials_by_name(world, monkeypatch)
         for call in transport.call.await_args_list
     ]
     assert injected == [{"ACME_TOKEN": "update-secret"}, {}]
+
+
+async def test_workspace_options_and_create_report_the_guest_os(world, monkeypatch):
+    monkeypatch.setattr(
+        get_runner_service().runner_transport, "emit_to_runner", AsyncMock()
+    )
+
+    def captured_lines() -> None:
+        make_line(world.runner, world.user, name="Ubuntu base")
+        _, (windows,) = make_line(world.runner, world.user, name="Windows base")
+        ImageInstance.objects.filter(pk=windows.pk).update(
+            guest_os="windows", min_disk_size_gb=80
+        )
+        from apps.licensing.models import WindowsLicensePolicy
+
+        WindowsLicensePolicy.objects.update_or_create(
+            organization_id=world.runner.organization_id,
+            defaults={"mode": "unlicensed"},
+        )
+
+    await sync_to_async(captured_lines)()
+    ctx = world.ctx()
+
+    options = await ok(ctx, "workspace_options")
+    created = await ok(ctx, "workspace_create", name="win", image="Windows base")
+
+    images = {image["name"]: image for image in options["images"]}
+    assert images["Ubuntu base"]["guest_os"] == "linux"
+    assert "minimums" not in images["Ubuntu base"]
+    assert images["Windows base"]["guest_os"] == "windows"
+    assert images["Windows base"]["minimums"] == {
+        "vcpus": 2,
+        "memory_mb": 4096,
+        "disk_gb": 80,
+    }
+    assert created["guest_os"] == "windows"
+    workspace = await sync_to_async(Workspace.objects.get)(pk=created["workspace_id"])
+    assert workspace.qemu_disk_size_gb == 80
+    detail = await ok(ctx, "workspace_get", workspace=str(workspace.id))
+    assert detail["image"]["guest_os"] == "windows"
+    assert detail["resources"] == {"vcpus": 2, "memory_mb": 4096, "disk_gb": 80}
+    too_small = await fails(
+        ctx, "workspace_create", name="small", image="Windows base", memory_mb=2048
+    )
+    assert "Windows workspaces need at least 4096 MiB RAM" in too_small

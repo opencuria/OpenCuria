@@ -190,7 +190,7 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertFalse(mismatch["ok"])
-        oversize = base64.b64encode(b"x" * (64 * 1024 + 1)).decode()
+        oversize = base64.b64encode(b"x" * (1024 * 1024 + 1)).decode()
         too_big = await handlers["workspace:stream_input"](
             {
                 "connection_id": "i1",
@@ -533,7 +533,7 @@ class StreamPumpCoalescingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_coalescing_keeps_chunk_limit_and_stream_order(self) -> None:
         _svc, rt, ws_id, interface, handlers = _setup()
-        big = 40 * 1024
+        big = 640 * 1024
         stdout_chunks = [b"a1", b"a2", b"b" * big, b"c" * big, b"d1"]
         stdout_progress = asyncio.Event()
         stderr_queued = asyncio.Event()
@@ -565,7 +565,7 @@ class StreamPumpCoalescingTests(unittest.IsolatedAsyncioTestCase):
         emitted = await self._run_pump(interface, handlers, ws_id, "co2")
 
         for _stream, data in emitted:
-            self.assertLessEqual(len(data), 64 * 1024)
+            self.assertLessEqual(len(data), 1024 * 1024)
         self.assertEqual(
             b"".join(data for stream, data in emitted if stream == "stdout"),
             b"".join(stdout_chunks),
@@ -575,7 +575,7 @@ class StreamPumpCoalescingTests(unittest.IsolatedAsyncioTestCase):
         err_at = streams.index("stderr")
         before = b"".join(data for _, data in emitted[:err_at])
         self.assertEqual(before, b"a1a2")
-        # The two 40 KiB chunks cannot share one 64 KiB emit; the small
+        # The two 640 KiB chunks cannot share one 1 MiB emit; the small
         # tail queued behind the second one rides along with it.
         self.assertEqual(
             [data for _, data in emitted[err_at + 1 :]],

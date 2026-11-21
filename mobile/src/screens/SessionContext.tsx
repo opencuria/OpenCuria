@@ -13,11 +13,12 @@ import type { AuthUser, Organization, TokenPair } from "@opencuria/client";
 import { appScope } from "../apps/appPresentation";
 import { isUnreachable, watchNetwork } from "../offline/connectivity";
 import { offlineStore } from "../offline/offlineStore";
+import { clearVoiceClips } from "../voice/voiceClipStore";
 import {
   NativeSessionStorage,
   type NativeAuthSession,
 } from "../platform/storage";
-import { normalizeServerUrl } from "./serverConfig";
+import { describeServerUrl, normalizeServerUrl } from "./serverConfig";
 
 const storage = new NativeSessionStorage();
 
@@ -45,6 +46,8 @@ function savedScope(session: NativeAuthSession): string | null {
 type RegisterResource = (dispose: () => void) => () => void;
 interface SessionContextValue {
   booting: boolean;
+  /** A sign-in from the login screen runs; the form stays up meanwhile. */
+  signingIn: boolean;
   session: NativeAuthSession | null;
   client: OpenCuriaClient | null;
   user: AuthUser | null;
@@ -78,6 +81,7 @@ export function SessionProvider({
   children,
 }: React.PropsWithChildren): React.JSX.Element {
   const [booting, setBooting] = useState(true);
+  const [signingIn, setSigningIn] = useState(false);
   const [session, setSession] = useState<NativeAuthSession | null>(null);
   const [client, setClient] = useState<OpenCuriaClient | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -178,6 +182,7 @@ export function SessionProvider({
     void offlineStore()
       .clear()
       .catch(() => undefined);
+    clearVoiceClips();
     try {
       await storage.clear();
     } catch (cause) {
@@ -581,6 +586,7 @@ export function SessionProvider({
       setError(null);
       setSessionExpired(false);
       setBooting(true);
+      setSigningIn(true);
       const initial: NativeAuthSession = {
         serverUrl: config.serverUrl,
         accessToken: "",
@@ -601,10 +607,14 @@ export function SessionProvider({
       } catch (cause) {
         if (generation === generationRef.current) {
           setError(
-            messageOf(
-              cause,
-              "Sign in failed. Check the server address and your credentials.",
-            ),
+            // Without an answer the transport's message (a Java or URL
+            // exception) means nothing to the person signing in.
+            isUnreachable(cause)
+              ? `Can't reach ${describeServerUrl(config.serverUrl)}. Check the address and your connection.`
+              : messageOf(
+                  cause,
+                  "Sign in failed. Check the server address and your credentials.",
+                ),
           );
         }
         // Credentials are cleared only if login itself did not establish a token.
@@ -617,6 +627,7 @@ export function SessionProvider({
         }
       } finally {
         if (generation === generationRef.current) setBooting(false);
+        setSigningIn(false);
       }
     },
     [disposeScope, makeClient, readProfile, setCurrentSession, setOffline],
@@ -682,10 +693,12 @@ export function SessionProvider({
     setOffline(false);
     setError(null);
     setBooting(false);
-    // Chats saved for offline use leave the device with the sign-in.
+    // Chats saved for offline use and waiting recordings leave the device
+    // with the sign-in.
     void offlineStore()
       .clear()
       .catch(() => undefined);
+    clearVoiceClips();
     try {
       await storage.clear();
     } catch (cause) {
@@ -763,6 +776,7 @@ export function SessionProvider({
   const value = useMemo<SessionContextValue>(
     () => ({
       booting,
+      signingIn,
       session,
       client,
       user,
@@ -783,6 +797,7 @@ export function SessionProvider({
     }),
     [
       booting,
+      signingIn,
       session,
       client,
       user,

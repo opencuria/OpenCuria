@@ -57,6 +57,7 @@ from .run_timeline import (
     tail_remainder,
 )
 from .runner import HarnessRunner
+from .scheduled_messages import ScheduledMessageService
 from .session_access_service import SessionAccessService
 from .session_metadata_service import SessionMetadataService, title_from_prompt
 from .session_settings_service import SessionSettingsService
@@ -137,6 +138,10 @@ class HarnessService:
             permissions=self.permissions,
             emit=self._emit_frontend,
             is_running=self.is_running,
+        )
+        self.scheduled_messages = ScheduledMessageService(
+            conversations=self.conversations,
+            session_settings=self.session_settings,
         )
         self.timeline = RunTimeline(
             messages=self.messages,

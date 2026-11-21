@@ -7,7 +7,7 @@
  * snapshot is never mutated and unrelated transcript rows retain their identity.
  */
 
-import type { OpenCuriaClient } from "@opencuria/client";
+import { ApiRequestError, type OpenCuriaClient } from "@opencuria/client";
 import type {
   HarnessId,
   HarnessMessage,
@@ -15,8 +15,12 @@ import type {
   HarnessPermissionRequest,
   HarnessPermissionResponse,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
+  HarnessScheduledMessagesEvent,
   HarnessSession,
   HarnessSessionMode,
+  HarnessSteer,
+  HarnessSteerQueueEvent,
   HarnessTodo,
   HarnessPartUpdatedEvent,
   HarnessSessionStatusEvent,
@@ -32,14 +36,20 @@ import {
   applySubtaskStarted,
   applyTodoUpdate,
   ensureBusyAssistant,
+  hasDeliveredSteer,
   routeAssistantMessage,
   sortHarnessParts,
 } from "@opencuria/chat-core/harnessReducer";
+import { shouldMarkViewedSessionRead } from "@opencuria/chat-core/harnessReadState";
 import {
   collectAncestorSessions,
   collectDescendantSessionIds,
 } from "@opencuria/chat-core/harnessSubtaskActivity";
 import { assertHarnessSessionSelection } from "@opencuria/chat-core/harnessModels";
+import {
+  createOptimisticPrompt,
+  withoutOptimisticPrompt,
+} from "@opencuria/chat-core/optimisticPrompts";
 import { ChatTimelineController } from "@opencuria/chat-core/chatTimelineController";
 import type { HarnessTimeline } from "@opencuria/client";
 
@@ -63,6 +73,10 @@ export interface ChatControllerSnapshot {
   /** Pending gates for the active session and its descendants. */
   permissions: HarnessPermissionRequest[];
   questions: HarnessQuestionRequest[];
+  /** Messages queued for the active session's running turn (FIFO). */
+  steers: HarnessSteer[];
+  /** Messages scheduled for the active session, earliest first. */
+  scheduled: HarnessScheduledMessage[];
   activeSessionId: string | null;
   activeSession: HarnessSession | null;
   /** Root-to-active-session breadcrumb, inclusive. */
@@ -175,6 +189,15 @@ function cloneTodo(todo: HarnessTodo): HarnessTodo {
   return { ...todo };
 }
 
+function cloneScheduledMessage(
+  message: HarnessScheduledMessage,
+): HarnessScheduledMessage {
+  return {
+    ...message,
+    ...(message.skill_ids ? { skill_ids: [...message.skill_ids] } : {}),
+  };
+}
+
 function cloneQuestionRequest(
   request: HarnessQuestionRequest,
 ): HarnessQuestionRequest {
@@ -207,6 +230,15 @@ export class ChatController {
     HarnessPermissionRequest
   >();
   private readonly questionsById = new Map<string, HarnessQuestionRequest>();
+  /** Queued steers and scheduled messages per session (server snapshots). */
+  private readonly steersBySession = new Map<string, HarnessSteer[]>();
+  private readonly scheduledBySession = new Map<
+    string,
+    HarnessScheduledMessage[]
+  >();
+  /** Bumped per snapshot so late responses never resurrect a newer state. */
+  private readonly steerRevisions = new Map<string, number>();
+  private readonly scheduledRevisions = new Map<string, number>();
   private readonly timeline: ChatTimelineController<HarnessTimeline>;
   private readonly todoFlights = new Map<string, TodoFlight>();
   private readonly sessionRevisions = new Map<string, number>();
@@ -215,6 +247,17 @@ export class ChatController {
   /** Child ids explicitly announced by an owned parent, before list refresh commits them. */
   private readonly trustedChildSessionIds = new Set<string>();
   private readonly pendingSends = new Set<string>();
+  /** The first prompt of a chat being created, shown until the chat exists. */
+  private pendingPrompt: {
+    workspaceId: string;
+    message: HarnessMessage;
+  } | null = null;
+  /** A prompt shown before it is sent (`previewPrompt`); sending takes it over. */
+  private preview: {
+    workspaceGeneration: number;
+    sessionId: string | null;
+    message: HarnessMessage;
+  } | null = null;
   private readonly sendFlights = new Map<string, Promise<HarnessSession>>();
   private readonly createFlights = new Map<string, Promise<HarnessSession>>();
   private readonly readFlights = new Map<string, Promise<void>>();
@@ -287,7 +330,9 @@ export class ChatController {
             ...(this.messagesBySession.get(this.activeSessionId) ??
               EMPTY_MESSAGES),
           ])
-        : EMPTY_MESSAGES,
+        : this.pendingPrompt?.workspaceId === this.workspaceId
+          ? freezeMessages([this.pendingPrompt.message])
+          : EMPTY_MESSAGES,
       todos: this.activeSessionId
         ? freezeTree(
             (this.todosBySession.get(this.activeSessionId) ?? EMPTY_TODOS).map(
@@ -305,6 +350,20 @@ export class ChatController {
           .filter((request) => descendantIds.has(request.session_id))
           .map(cloneQuestionRequest),
       ),
+      steers: this.activeSessionId
+        ? freezeTree(
+            (this.steersBySession.get(this.activeSessionId) ?? []).map(
+              (steer) => ({ ...steer }),
+            ),
+          )
+        : EMPTY_STEERS,
+      scheduled: this.activeSessionId
+        ? freezeTree(
+            (this.scheduledBySession.get(this.activeSessionId) ?? []).map(
+              cloneScheduledMessage,
+            ),
+          )
+        : EMPTY_SCHEDULED,
       activeSessionId: this.activeSessionId,
       activeSession: activeSession
         ? freezeTree(cloneSession(activeSession))
@@ -343,6 +402,11 @@ export class ChatController {
     }
   }
 
+  /** Hide the current error, e.g. when the user dismisses its banner. */
+  dismissError(): void {
+    this.clearError();
+  }
+
   private bindRealtime(): void {
     const on = this.client.realtime.on.bind(this.client.realtime);
     this.detachRealtime.push(
@@ -367,6 +431,10 @@ export class ChatController {
       ),
       on("harness.question_resolved", (event) =>
         this.onQuestionResolved(event),
+      ),
+      on("harness.steer_queue", (event) => this.onSteerQueue(event)),
+      on("harness.scheduled_messages", (event) =>
+        this.onScheduledMessages(event),
       ),
       on("harness.conversations_changed", (event) => {
         if (event.workspace_id === this.workspaceId)
@@ -550,6 +618,10 @@ export class ChatController {
   private forgetSession(sessionId: string): void {
     this.messagesBySession.delete(sessionId);
     this.todosBySession.delete(sessionId);
+    this.steersBySession.delete(sessionId);
+    this.scheduledBySession.delete(sessionId);
+    this.steerRevisions.delete(sessionId);
+    this.scheduledRevisions.delete(sessionId);
     this.timeline.forget(sessionId);
     this.todoRevisions.set(
       sessionId,
@@ -603,6 +675,10 @@ export class ChatController {
       this.todosBySession.clear();
       this.permissionsById.clear();
       this.questionsById.clear();
+      this.steersBySession.clear();
+      this.scheduledBySession.clear();
+      this.steerRevisions.clear();
+      this.scheduledRevisions.clear();
       this.todoFlights.clear();
       this.sendFlights.clear();
       this.createFlights.clear();
@@ -613,6 +689,8 @@ export class ChatController {
       this.ownedSessionIds.clear();
       this.todoRevisions.clear();
       this.pendingSends.clear();
+      this.pendingPrompt = null;
+      this.preview = null;
       this.dismissedNotices.clear();
       this.activeWorkspaceSessionsLoaded = false;
       this.sessionListGeneration += 1;
@@ -792,6 +870,8 @@ export class ChatController {
         !activeSessionId
       )
         return;
+      // A run that finished while the app was away is read once it is shown.
+      this.maybeMarkRead(activeSessionId);
       const context = { workspaceId, workspaceGeneration, selectionGeneration };
       const lineageIds = collectDescendantSessionIds(
         activeSessionId,
@@ -868,6 +948,18 @@ export class ChatController {
       harnessId: HarnessId;
     },
   ): Promise<HarnessSession> {
+    // The new chat shows its prompt while the server creates it.
+    const optimistic =
+      this.takePreview(null, prompt) ??
+      freezeTree(
+        createOptimisticPrompt({
+          sessionId: "",
+          content: prompt,
+          skillIds: options.skillIds,
+          harnessId: options.harnessId,
+        }),
+      );
+    this.pendingPrompt = { workspaceId, message: optimistic };
     this.pendingSends.add(`new:${workspaceId}`);
     this.publish();
     try {
@@ -889,21 +981,18 @@ export class ChatController {
       }
       this.upsertSession(session);
       this.selectSession(session.id);
+      // The same row moves into the chat; its echo inherits the render key.
       this.messagesBySession.set(
         session.id,
         freezeMessages([
           {
-            id: `local-user-${session.id}`,
+            ...optimistic,
             session_id: session.id,
             harness_id: session.harness_id,
-            role: "user",
-            content: prompt,
-            skill_ids: [...(options.skillIds ?? [])],
-            parts: [],
-            created_at: new Date().toISOString(),
           },
-        ]) as HarnessMessage[],
+        ]),
       );
+      this.clearPendingPrompt(optimistic.id);
       this.touchTranscript(session.id, true);
       this.publish();
       const context = this.captureSelection()!;
@@ -929,9 +1018,85 @@ export class ChatController {
       }
       throw error;
     } finally {
+      this.clearPendingPrompt(optimistic.id);
       this.pendingSends.delete(`new:${workspaceId}`);
       this.publish();
     }
+  }
+
+  /**
+   * Show a prompt before it can be sent, e.g. while its attachments upload.
+   * `send` takes the row over with the final text; the returned function takes
+   * it back when sending is given up, and does nothing once it was sent.
+   */
+  previewPrompt(text: string, options: ChatRunOptions = {}): () => void {
+    this.assertLive();
+    const workspaceId = this.workspaceId;
+    if (!workspaceId || !text.trim()) return () => undefined;
+    const sessionId = this.activeSessionId;
+    const session = this.sessions.find((row) => row.id === sessionId);
+    const message = freezeTree(
+      createOptimisticPrompt({
+        sessionId: sessionId ?? "",
+        content: text,
+        skillIds: options.skillIds,
+        harnessId: session?.harness_id ?? options.harnessId,
+      }),
+    );
+    if (sessionId) {
+      this.messagesBySession.set(
+        sessionId,
+        freezeMessages([
+          ...(this.messagesBySession.get(sessionId) ?? EMPTY_MESSAGES),
+          message,
+        ]),
+      );
+      this.touchTranscript(sessionId);
+    } else {
+      this.pendingPrompt = { workspaceId, message };
+    }
+    this.preview = {
+      workspaceGeneration: this.workspaceGeneration,
+      sessionId,
+      message,
+    };
+    this.publish();
+    return () => {
+      if (this.disposed || this.preview?.message.id !== message.id) return;
+      this.preview = null;
+      if (sessionId) this.dropOptimisticPrompt(sessionId, message.id);
+      else this.clearPendingPrompt(message.id);
+      this.publish();
+    };
+  }
+
+  /** The previewed row for this send, now with its final text. */
+  private takePreview(
+    sessionId: string | null,
+    prompt: string,
+  ): HarnessMessage | null {
+    const preview = this.preview;
+    if (
+      !preview ||
+      preview.sessionId !== sessionId ||
+      preview.workspaceGeneration !== this.workspaceGeneration
+    )
+      return null;
+    this.preview = null;
+    return freezeTree({ ...preview.message, content: prompt.trim() });
+  }
+
+  private clearPendingPrompt(promptId: string): void {
+    if (this.pendingPrompt?.message.id === promptId) this.pendingPrompt = null;
+  }
+
+  /** A prompt the server rejected leaves the transcript. */
+  private dropOptimisticPrompt(sessionId: string, promptId: string): void {
+    const current = this.messagesBySession.get(sessionId);
+    if (!current) return;
+    const next = withoutOptimisticPrompt(current, promptId);
+    if (next !== current)
+      this.messagesBySession.set(sessionId, freezeMessages(next));
   }
 
   /** Send to the selected session, creating one when the composer is in new-chat mode. */
@@ -973,7 +1138,30 @@ export class ChatController {
     const session = this.sessions.find((row) => row.id === sessionId);
     if (!session) throw new Error("The active session no longer exists");
     assertHarnessSessionSelection(session, options);
-    const context = this.captureSelection()!;
+    // The prompt shows at once. The send endpoint persists it before
+    // returning; the snapshot fetched then hands the row over to the server's
+    // copy (never to an identical older prompt).
+    const previewed = this.takePreview(sessionId, prompt);
+    const optimistic =
+      previewed ??
+      freezeTree(
+        createOptimisticPrompt({
+          sessionId,
+          content: prompt,
+          skillIds: options.skillIds,
+          harnessId: session.harness_id,
+        }),
+      );
+    const shown = this.messagesBySession.get(sessionId) ?? EMPTY_MESSAGES;
+    this.messagesBySession.set(
+      sessionId,
+      freezeMessages(
+        previewed
+          ? shown.map((row) => (row.id === previewed.id ? previewed : row))
+          : [...shown, optimistic],
+      ),
+    );
+    this.touchTranscript(sessionId);
     this.pendingSends.add(sessionId);
     this.publish();
     try {
@@ -992,8 +1180,6 @@ export class ChatController {
         return updated;
       }
       this.upsertSession(updated);
-      // The send endpoint persists the user row before returning. Do not add a
-      // local prompt: retries after uncertain POST failures must not duplicate it.
       const reconcile = this.captureSelection();
       if (reconcile && this.activeSessionId === sessionId) {
         try {
@@ -1007,6 +1193,8 @@ export class ChatController {
       return updated;
     } catch (error) {
       if (!this.disposed && this.workspaceGeneration === workspaceGeneration) {
+        // The composer gets the text back; the bubble must not stay.
+        this.dropOptimisticPrompt(sessionId, optimistic.id);
         this.setError(error, "Failed to send message");
       }
       throw error;
@@ -1043,6 +1231,194 @@ export class ChatController {
         this.setError(error, "Failed to stop the run");
       throw error;
     }
+  }
+
+  /**
+   * Stop the running turn. The server drops queued steers on stop; their
+   * texts (unless delivered meanwhile) are returned for the composer.
+   */
+  async stop(sessionId = this.activeSessionId): Promise<string[]> {
+    if (!sessionId) return [];
+    const queued = [...(this.steersBySession.get(sessionId) ?? [])];
+    const updated = await this.abort(sessionId);
+    if (!updated || this.disposed) return [];
+    if (this.steersBySession.has(sessionId)) this.setSteers(sessionId, []);
+    const messages = this.messagesBySession.get(sessionId) ?? [];
+    return queued
+      .filter((steer) => !hasDeliveredSteer(messages, steer.id))
+      .map((steer) => steer.content);
+  }
+
+  /**
+   * Send a message into the running turn ("steering"). The server queues it
+   * for the turn's next step; when the run already ended it is sent as a
+   * regular turn with `options` instead.
+   */
+  async steer(prompt: string, options: ChatRunOptions = {}): Promise<void> {
+    this.assertLive();
+    if (!prompt.trim()) throw new Error("Prompt cannot be empty");
+    const sessionId = this.activeSessionId;
+    const context = this.captureSelection();
+    if (!sessionId || !context)
+      throw new Error("Open a running chat before steering it");
+    const revision = this.steerRevisions.get(sessionId) ?? 0;
+    try {
+      const steer = await this.client.harness.steer(sessionId, prompt);
+      const queue = this.steersBySession.get(sessionId) ?? [];
+      // The socket snapshot normally lands first; only fill the gap.
+      if (
+        this.selectionIsCurrent(context) &&
+        revision === (this.steerRevisions.get(sessionId) ?? 0) &&
+        !queue.some((item) => item.id === steer.id) &&
+        !hasDeliveredSteer(
+          this.messagesBySession.get(sessionId) ?? [],
+          steer.id,
+        )
+      )
+        this.setSteers(sessionId, [...queue, steer]);
+    } catch (error) {
+      if (
+        error instanceof ApiRequestError &&
+        error.status === 409 &&
+        error.code === "no_active_run"
+      ) {
+        await this.send(prompt, options);
+        return;
+      }
+      if (this.selectionIsCurrent(context))
+        this.setError(error, "Failed to send message");
+      throw error;
+    }
+  }
+
+  /** Withdraw a queued steer; its text, or `null` once it was delivered. */
+  async withdrawSteer(
+    steerId: string,
+    sessionId = this.activeSessionId,
+  ): Promise<string | null> {
+    if (!sessionId) return null;
+    const drop = () => {
+      const queue = this.steersBySession.get(sessionId) ?? [];
+      if (queue.some((item) => item.id === steerId))
+        this.setSteers(
+          sessionId,
+          queue.filter((item) => item.id !== steerId),
+        );
+    };
+    try {
+      const steer = await this.client.harness.withdraw(sessionId, steerId);
+      drop();
+      return steer.content;
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 404) {
+        drop();
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /** Schedule a message for the open chat; it is sent at `sendAt`. */
+  async schedule(
+    prompt: string,
+    sendAt: Date,
+    options: ChatRunOptions = {},
+  ): Promise<HarnessScheduledMessage> {
+    this.assertLive();
+    if (!prompt.trim()) throw new Error("Prompt cannot be empty");
+    const sessionId = this.activeSessionId;
+    const context = this.captureSelection();
+    if (!sessionId || !context)
+      throw new Error("Open a chat before scheduling a message");
+    const session = this.sessions.find((row) => row.id === sessionId);
+    if (session) assertHarnessSessionSelection(session, options);
+    const revision = this.scheduledRevisions.get(sessionId) ?? 0;
+    const message = await this.client.harness.scheduleMessage(sessionId, {
+      prompt,
+      send_at: sendAt.toISOString(),
+      mode: options.mode,
+      model: options.model,
+      reasoning_effort: options.reasoningEffort,
+      skill_ids: options.skillIds,
+    });
+    const scheduled = this.scheduledBySession.get(sessionId) ?? [];
+    if (
+      this.selectionIsCurrent(context) &&
+      revision === (this.scheduledRevisions.get(sessionId) ?? 0) &&
+      !scheduled.some((item) => item.id === message.id)
+    )
+      this.setScheduled(sessionId, [...scheduled, message]);
+    return message;
+  }
+
+  /** Move a scheduled message to another time (a failed one is retried then). */
+  async reschedule(
+    messageId: string,
+    sendAt: Date,
+    sessionId = this.activeSessionId,
+  ): Promise<void> {
+    if (!sessionId) return;
+    const updated = await this.client.harness.rescheduleMessage(
+      sessionId,
+      messageId,
+      sendAt.toISOString(),
+    );
+    const scheduled = this.scheduledBySession.get(sessionId) ?? [];
+    if (scheduled.some((item) => item.id === messageId))
+      this.setScheduled(
+        sessionId,
+        scheduled.map((item) => (item.id === messageId ? updated : item)),
+      );
+  }
+
+  /** Withdraw a scheduled message, e.g. to edit it; `null` once it is gone. */
+  async withdrawScheduled(
+    messageId: string,
+    sessionId = this.activeSessionId,
+  ): Promise<HarnessScheduledMessage | null> {
+    if (!sessionId) return null;
+    const drop = () => {
+      const scheduled = this.scheduledBySession.get(sessionId) ?? [];
+      if (scheduled.some((item) => item.id === messageId))
+        this.setScheduled(
+          sessionId,
+          scheduled.filter((item) => item.id !== messageId),
+        );
+    };
+    try {
+      const message = await this.client.harness.withdrawScheduledMessage(
+        sessionId,
+        messageId,
+      );
+      drop();
+      return message;
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 404) {
+        drop();
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Send a scheduled message now. A refused delivery keeps the message with
+   * its reason (published by the server) and rejects.
+   */
+  async sendScheduledNow(
+    messageId: string,
+    sessionId = this.activeSessionId,
+  ): Promise<void> {
+    if (!sessionId) return;
+    const context = this.captureSelection();
+    const updated = await this.client.harness.sendScheduledMessage(
+      sessionId,
+      messageId,
+    );
+    if (!context || !this.selectionIsCurrent(context)) return;
+    this.upsertSession(updated);
+    if (this.activeSessionId === sessionId)
+      await this.fetchTimeline(sessionId, context, true).catch(() => undefined);
   }
 
   /** Edit a persisted user message and reconcile its server timeline. */
@@ -1292,13 +1668,8 @@ export class ChatController {
 
   private maybeMarkRead(sessionId: string): void {
     const session = this.sessions.find((item) => item.id === sessionId);
-    if (
-      session?.status === "idle" &&
-      session.unread &&
-      !session.manual_unread
-    ) {
+    if (shouldMarkViewedSessionRead(session))
       void this.markRead(sessionId).catch(() => undefined);
-    }
   }
 
   /** Dismiss the selected session's error/abort notice for one message. */
@@ -1456,8 +1827,23 @@ export class ChatController {
             ...this.permissionsById.keys(),
             ...this.questionsById.keys(),
           ]);
-          return (snapshot) =>
+          const steerRevision = this.steerRevisions.get(sessionId) ?? 0;
+          const scheduledRevision = this.scheduledRevisions.get(sessionId) ?? 0;
+          return (snapshot) => {
+            // Socket snapshots that landed during the request are newer.
+            if (
+              snapshot.steers &&
+              steerRevision === (this.steerRevisions.get(sessionId) ?? 0)
+            )
+              this.setSteers(sessionId, snapshot.steers);
+            if (
+              snapshot.scheduled_messages &&
+              scheduledRevision ===
+                (this.scheduledRevisions.get(sessionId) ?? 0)
+            )
+              this.setScheduled(sessionId, snapshot.scheduled_messages);
             this.applyTimelineGates(sessionId, snapshot, knownGates);
+          };
         },
       });
     } catch (error) {
@@ -1759,12 +2145,26 @@ export class ChatController {
           event.session_id,
           event.message_id,
         );
+        const unknownTurn = Boolean(
+          event.user_message_id &&
+          !messages.some((message) => message.id === event.user_message_id) &&
+          !this.turnRequestInFlight(event.session_id),
+        );
         ensureBusyAssistant(
           messages,
           event.session_id,
           event.message_id,
           event.user_message_id,
         );
+        if (unknownTurn && this.isInActiveLineage(event.session_id)) {
+          // A run this client did not ask for (a steer follow-up, a scheduled
+          // message, another device) brings a user message to load.
+          const context = this.captureSelection();
+          if (context)
+            void this.fetchTimeline(event.session_id, context, true).catch(
+              () => undefined,
+            );
+        }
         const target = messages.find(
           (message) => message.id === event.message_id,
         );
@@ -1826,6 +2226,57 @@ export class ChatController {
       return;
     }
     this.publish();
+  }
+
+  private onSteerQueue(event: HarnessSteerQueueEvent): void {
+    if (!this.ownsEvent(event)) return;
+    this.setSteers(event.session_id, event.steers ?? []);
+  }
+
+  private onScheduledMessages(event: HarnessScheduledMessagesEvent): void {
+    if (!this.ownsEvent(event)) return;
+    this.setScheduled(event.session_id, event.messages ?? []);
+  }
+
+  /** Replace a session's steer queue (snapshot semantics). */
+  private setSteers(sessionId: string, steers: HarnessSteer[]): void {
+    this.steerRevisions.set(
+      sessionId,
+      (this.steerRevisions.get(sessionId) ?? 0) + 1,
+    );
+    if (steers.length) this.steersBySession.set(sessionId, [...steers]);
+    else this.steersBySession.delete(sessionId);
+    this.publish();
+  }
+
+  /** Replace a session's scheduled messages (snapshot semantics). */
+  private setScheduled(
+    sessionId: string,
+    messages: HarnessScheduledMessage[],
+  ): void {
+    this.scheduledRevisions.set(
+      sessionId,
+      (this.scheduledRevisions.get(sessionId) ?? 0) + 1,
+    );
+    if (messages.length)
+      this.scheduledBySession.set(
+        sessionId,
+        [...messages].sort(
+          (a, b) => Date.parse(a.send_at) - Date.parse(b.send_at),
+        ),
+      );
+    else this.scheduledBySession.delete(sessionId);
+    this.publish();
+  }
+
+  /** This client is sending or creating a turn for the session right now. */
+  private turnRequestInFlight(sessionId: string): boolean {
+    return (
+      this.pendingSends.has(sessionId) ||
+      Boolean(
+        this.workspaceId && this.pendingSends.has(`new:${this.workspaceId}`),
+      )
+    );
   }
 
   private onPermissionRequired(event: PermissionEvent): void {
@@ -1935,6 +2386,8 @@ export class ChatController {
     for (const detach of this.detachRealtime.splice(0)) detach();
     this.listeners.clear();
     this.timeline.clear();
+    this.steersBySession.clear();
+    this.scheduledBySession.clear();
     this.todoFlights.clear();
     this.trustedChildSessionIds.clear();
     this.sendFlights.clear();
@@ -1945,3 +2398,7 @@ export class ChatController {
 }
 
 const EMPTY_TODOS = Object.freeze([]) as unknown as HarnessTodo[];
+const EMPTY_STEERS = Object.freeze([]) as unknown as HarnessSteer[];
+const EMPTY_SCHEDULED = Object.freeze(
+  [],
+) as unknown as HarnessScheduledMessage[];

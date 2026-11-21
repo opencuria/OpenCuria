@@ -34,6 +34,7 @@ const VERSION = 1;
 const PROFILE = "profile.json";
 const OVERVIEW = "overview.json";
 const INDEX = "chats.json";
+const DRAFTS = "drafts.json";
 const CHATS = "chats";
 const TRANSCRIPT = "transcript.json";
 
@@ -84,6 +85,14 @@ export interface SavedTranscript {
   todos: HarnessTodo[];
 }
 
+/** A composer draft saved on this device. */
+export interface SavedDraft {
+  /** `chatInputCacheKey` of its chat. */
+  key: string;
+  text: string;
+  editedAt: string;
+}
+
 interface ChatEntry extends SavedChat {
   /** Name of the chat's directory. */
   key: string;
@@ -117,6 +126,16 @@ function isEntry(value: unknown): value is ChatEntry {
   );
 }
 
+function isDraft(value: unknown): value is SavedDraft {
+  const draft = value as Partial<SavedDraft> | null;
+  return Boolean(
+    draft &&
+    typeof draft.key === "string" &&
+    typeof draft.text === "string" &&
+    typeof draft.editedAt === "string",
+  );
+}
+
 function time(value: string | undefined): number {
   const parsed = Date.parse(value ?? "");
   return Number.isFinite(parsed) ? parsed : 0;
@@ -137,8 +156,8 @@ function mediaExtension(path: string): string {
 }
 
 /**
- * Chats, pictures and lists saved on this device so OpenCuria opens offline.
- * They live in the app's cache: the server has them, so they are never
+ * Chats, pictures and lists saved on this device so OpenCuria opens offline,
+ * and the composer drafts. They live in the app's cache, so they are never
  * backed up. Each account (server, organization and user) has its own
  * directory; file and directory names are hashes, never identifiers. Writes
  * of all accounts run one at a time and replace files only once their
@@ -298,6 +317,17 @@ export class OfflineAccount {
     conversations: HarnessConversation[],
   ): Promise<void> {
     return this.write(OVERVIEW, { workspaces, conversations });
+  }
+
+  /** Composer drafts as they were saved last. */
+  async loadDrafts(): Promise<SavedDraft[]> {
+    const stored = await this.read<{ drafts?: unknown }>(DRAFTS);
+    return Array.isArray(stored?.drafts) ? stored.drafts.filter(isDraft) : [];
+  }
+
+  /** Replace the saved composer drafts. */
+  saveDrafts(drafts: SavedDraft[]): Promise<void> {
+    return this.write(DRAFTS, { drafts });
   }
 
   /** Saved chats that have not expired, most recently opened first. */

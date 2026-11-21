@@ -17,6 +17,12 @@ from typing import Any
 
 from .runtime.diagnostics import CODES, INTERRUPTED, failure_code
 
+#: Payload fields that carry secrets or recipe contents. They are resolved anew
+#: at delivery and never written to the journal.
+SECRET_FIELDS = frozenset(
+    {"env_vars", "files", "ssh_keys", "init_script", "windows_activation"}
+)
+
 
 def serialized(method: Callable[..., Any]) -> Callable[..., Any]:
     """Keep synchronous callers and the journal worker on one transaction owner."""
@@ -216,17 +222,7 @@ class Journal:
         identity["command"] = event
         # Credentials are resolved anew at delivery. Exclude all secret-bearing
         # fields and recipe contents from persistent hash/material.
-        safe = {
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "env_vars",
-                "files",
-                "ssh_keys",
-                "init_script",
-            }
-        }
+        safe = {k: v for k, v in data.items() if k not in SECRET_FIELDS}
         fingerprint = hashlib.sha256(
             json.dumps([event, safe], sort_keys=True).encode()
         ).hexdigest()
@@ -252,11 +248,7 @@ class Journal:
         Raw messages may contain paths or secrets: only a generic text and a
         stable ``diagnostic_code`` leave the runner; the backend words it.
         """
-        clean = {
-            k: v
-            for k, v in data.items()
-            if k not in {"env_vars", "files", "ssh_keys", "init_script"}
-        }
+        clean = {k: v for k, v in data.items() if k not in SECRET_FIELDS}
         if "error" in clean:
             interrupted = (
                 clean.get("diagnostic_code") == INTERRUPTED

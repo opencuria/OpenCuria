@@ -7,7 +7,7 @@ import type {
 } from "../../ui/NativeForm.types";
 import { useTheme, type ThemeMode } from "../../ui/theme";
 import { useNotifications } from "../../notifications/NotificationContext";
-import { avatarColor, profileInitials, profileName } from "../profile";
+import { profileInitials, profileName } from "../profile";
 import { useSettings, useSettingsNavigation } from "../SettingsContext";
 import { SettingsPage } from "../SettingsPage";
 
@@ -32,7 +32,8 @@ function link(
 
 /**
  * The first settings page, laid out like ChatGPT's: the account's avatar and
- * name, the organization card, then grouped pages with large section titles.
+ * name, the organization card, grouped pages under bold section titles, the
+ * account and, last, Sign out with the app version.
  */
 export function RootPage(): React.JSX.Element {
   const settings = useSettings();
@@ -68,7 +69,6 @@ export function RootPage(): React.JSX.Element {
         id: "profile",
         initials: profileInitials(user),
         title: name,
-        tint: avatarColor(user),
       },
     ],
   };
@@ -92,8 +92,6 @@ export function RootPage(): React.JSX.Element {
   const account: NativeFormSection = {
     id: "account",
     title: "Account",
-    prominent: true,
-    footer: version ? `OpenCuria ${version}` : undefined,
     rows: [
       {
         kind: "value",
@@ -117,6 +115,13 @@ export function RootPage(): React.JSX.Element {
         value: serverHost(settings.serverUrl),
         symbol: "globe",
       },
+    ],
+  };
+  // Last, on its own, as in the Settings app; the version reads below it.
+  const signOutSection: NativeFormSection = {
+    id: "session",
+    footer: version ? `OpenCuria ${version}` : undefined,
+    rows: [
       {
         kind: "button",
         id: "sign-out",
@@ -137,8 +142,9 @@ export function RootPage(): React.JSX.Element {
           footer:
             "You’re offline. The other settings return once OpenCuria reconnects.",
         },
-        { id: "app", title: "App", prominent: true, rows: [appearance] },
+        { id: "app", title: "App", rows: [appearance] },
         account,
+        signOutSection,
       ]
     : [
         profile,
@@ -178,7 +184,6 @@ export function RootPage(): React.JSX.Element {
         {
           id: "configure",
           title: "Configure OpenCuria",
-          prominent: true,
           rows: [
             link("providers", "Provider & Models", "cpu"),
             ...(isAdmin ? [link("agents", "Agents", "sparkles")] : []),
@@ -190,7 +195,6 @@ export function RootPage(): React.JSX.Element {
         {
           id: "workspaces",
           title: "Workspaces",
-          prominent: true,
           rows: [
             ...(isAdmin
               ? [link("policy", "Workspace policy", "slider.horizontal.3")]
@@ -211,7 +215,6 @@ export function RootPage(): React.JSX.Element {
         {
           id: "access",
           title: "Access",
-          prominent: true,
           rows: [
             link("api-keys", "API keys", "key.horizontal"),
             ...(isAdmin
@@ -228,7 +231,6 @@ export function RootPage(): React.JSX.Element {
         {
           id: "app",
           title: "App",
-          prominent: true,
           rows: [
             appearance,
             link(
@@ -240,6 +242,7 @@ export function RootPage(): React.JSX.Element {
           ],
         },
         account,
+        signOutSection,
       ];
 
   return (

@@ -1,27 +1,18 @@
 /** Browser state and frontend commands over the shared realtime transport. */
-import { FileTransferError, RealtimeClient } from '@opencuria/client/realtime'
-import type {
-  FileContentResult,
-  FileDownloadResult,
-  FileListResult,
-  FileFindResult,
-} from '@opencuria/client/types'
-import { planFilesUpload } from '@opencuria/chat-core/fileChunks'
+import { FileTransferError } from '@opencuria/client/files'
+import { RealtimeClient } from '@opencuria/client/realtime'
+import type { FileListResult, FileFindResult } from '@opencuria/client/types'
 import { getActivePinia } from 'pinia'
 import { ref } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { getConfig } from './config'
 import { getApiClient } from './api'
-import type {
-  FilesUploadResultEvent,
-  ProcessRemovedEvent,
-  ProcessStatusChangedEvent,
-  WorkspaceDiskUsage,
-} from '@/types'
+import type { ProcessRemovedEvent, ProcessStatusChangedEvent, WorkspaceDiskUsage } from '@/types'
 import type {
   HarnessPartUpdatedEvent,
   HarnessPermissionRequiredEvent,
   HarnessQuestionRequiredEvent,
+  HarnessScheduledMessagesEvent,
   HarnessSessionStatusEvent,
   HarnessSessionSummaryEvent,
   HarnessSteerQueueEvent,
@@ -150,6 +141,7 @@ type EventMap = {
   'harness.conversations_changed': { workspace_id: string }
   'harness.todo_updated': HarnessTodoUpdatedEvent
   'harness.steer_queue': HarnessSteerQueueEvent
+  'harness.scheduled_messages': HarnessScheduledMessagesEvent
   'harness.subtask_started': HarnessSubtaskStartedEvent
   'harness.subtask_finished': HarnessSubtaskFinishedEvent
   'terminal:started': TerminalStartedEvent
@@ -158,7 +150,6 @@ type EventMap = {
   'desktop:started': DesktopStartedEvent
   'desktop:stopped': DesktopStoppedEvent
   'desktop:viewer_released': DesktopViewerReleasedEvent
-  'files:upload_result': FilesUploadResultEvent
   'runner:offline': RunnerOfflineEvent
   'runner:online': RunnerOnlineEvent
   'process:status_changed': ProcessStatusChangedEvent
@@ -253,19 +244,6 @@ export function sendTerminalClose(workspaceId: string, terminalId: string): void
 // File explorer helpers
 // ---------------------------------------------------------------------------
 
-/** Read workspace content through the shared correlated file transport. */
-export async function readWorkspaceFile(
-  workspaceId: string,
-  path: string,
-  maxSize?: number,
-  signal?: AbortSignal,
-): Promise<FileContentResult> {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) {
-    throw new FileTransferError('Workspace is transitioning', 'workspace_transitioning')
-  }
-  return getClient().readFile(workspaceId, path, maxSize, signal)
-}
-
 /** List a directory through the shared correlated file transport. */
 export async function listWorkspaceFiles(
   workspaceId: string,
@@ -289,47 +267,4 @@ export async function findWorkspaceFiles(
     throw new FileTransferError('Workspace is transitioning', 'workspace_transitioning')
   }
   return getClient().findFiles(workspaceId, query, limit, signal)
-}
-
-/**
- * Upload a file to the workspace VM.
- *
- * Uses the shared start/chunk/finish plan for every file size.
- *
- * Throws before emitting any event when the payload exceeds
- * MAX_UPLOAD_CHUNKS_PER_TRANSFER chunks or UPLOAD_MAX_BYTES exact raw
- * bytes, so an oversize upload never emits a partial stream.
- */
-export function sendFilesUpload(
-  workspaceId: string,
-  requestId: string,
-  path: string,
-  filename: string,
-  content: string,
-  isDirectory: boolean = false,
-): void {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  if (!client) return
-  for (const planned of planFilesUpload(
-    workspaceId,
-    requestId,
-    path,
-    filename,
-    content,
-    isDirectory,
-  )) {
-    client.emit(planned.event, planned.payload)
-  }
-}
-
-/** Download workspace content through the shared correlated file transport. */
-export async function downloadWorkspaceFile(
-  workspaceId: string,
-  path: string,
-  signal?: AbortSignal,
-): Promise<FileDownloadResult> {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) {
-    throw new FileTransferError('Workspace is transitioning', 'workspace_transitioning')
-  }
-  return getClient().downloadFile(workspaceId, path, signal)
 }

@@ -1,6 +1,7 @@
 import React, {
   memo,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -9,12 +10,17 @@ import React, {
 import {
   ActivityIndicator,
   Animated,
+  Keyboard,
   Platform,
+  Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
   View,
+  useWindowDimensions,
+  type GestureResponderEvent,
 } from "react-native";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import type {
@@ -35,7 +41,6 @@ import {
   GitBranch,
   LoaderCircle,
   MessageSquareText,
-  Sparkles,
 } from "lucide-react-native";
 import type {
   HarnessMessage,
@@ -51,11 +56,15 @@ import {
 } from "@opencuria/chat-core/harnessActivity";
 import { elapsedMs, formatElapsed } from "@opencuria/chat-core/formatElapsed";
 import { getMessageCopyText } from "@opencuria/chat-core/harnessMessageCopy";
+import { formatSendTime } from "@opencuria/chat-core/sendLater";
 import { HARNESS_PAGE_SIZE } from "@opencuria/chat-core/harnessPagination";
-import { sortHarnessMessages } from "@opencuria/chat-core/harnessReducer";
+import {
+  isOptimisticPrompt,
+  sortHarnessMessages,
+} from "@opencuria/chat-core/harnessReducer";
+import { messageRenderKey } from "@opencuria/chat-core/optimisticPrompts";
 import { toolAttachments } from "@opencuria/chat-core/harnessAttachments";
 import { resolveChildSessionId } from "@opencuria/chat-core/harnessSubtaskActivity";
-import { parseComposerSegments } from "@opencuria/chat-core/composerTokens";
 import {
   formatMessageUsage,
   resolveMessageUsage,
@@ -64,7 +73,6 @@ import {
   parseToolArguments,
   toolDisplayLabel,
 } from "@opencuria/chat-core/toolDisplay";
-import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import {
   messagePublishedApps,
   type PublishedAppReference,
@@ -80,7 +88,7 @@ import {
   useEndPullState,
   type EndPullScrollHandlers,
 } from "./EndPull";
-import { NativeMenu } from "../ui/NativeMenu";
+import { NativeContextMenu } from "../ui/ContextMenu";
 import { useTheme } from "../ui/theme";
 import {
   Banner,
@@ -89,7 +97,11 @@ import {
   NativeModal,
   NativeAction,
 } from "../ui/primitives";
-import { ChatMarkdown, type ResolvedChatMedia } from "./ChatMarkdown";
+import { ChatMarkdown } from "./ChatMarkdown";
+import { PromptImages, PromptParagraph } from "./PromptContent";
+import { PromptFlight, TranscriptReadyContext } from "./PromptFlight";
+import { promptLayout, type PromptLayout } from "./promptBlocks";
+import { composerDisplay } from "./composerDisplay";
 import {
   chatImages,
   galleryFor,
@@ -101,6 +113,7 @@ import {
   MediaViewer,
   type OpenMediaGallery,
 } from "./MediaViewer";
+import type { ChatMediaResolver } from "./useWorkspaceMedia";
 
 export interface ChatMessagesProps {
   messages: HarnessMessage[];
@@ -110,8 +123,14 @@ export interface ChatMessagesProps {
   loading?: boolean;
   streamingMessageId?: string | null;
   disabled?: boolean;
-  resolveMedia?: (path: string) => Promise<ResolvedChatMedia>;
-  onEdit?: (messageId: string, text: string) => void | Promise<void>;
+  resolveMedia?: ChatMediaResolver;
+  /** Edits a sent prompt; the host moves it into the composer. */
+  onEdit?: (message: HarnessMessage) => void;
+  /**
+   * The prompt being edited. The transcript ends with it and notes that
+   * sending the edit restarts the chat from there.
+   */
+  editingMessageId?: string | null;
   onFork?: (messageId: string) => void | Promise<void>;
   onDismissNotice?: (messageId: string) => void | Promise<void>;
   onCopy?: (message: HarnessMessage, text: string) => void | Promise<void>;
@@ -157,6 +176,23 @@ const VIEWABILITY = { itemVisiblePercentThreshold: 1 };
 /** Message actions keep native touch targets; their glyphs align with the text. */
 const ACTION_SIZE = Platform.OS === "ios" ? 44 : 36;
 const ACTION_ICON = 17;
+/** A prompt bubble fills at most this share of its row. */
+const USER_BUBBLE_SHARE = 0.82;
+const USER_BUBBLE_RADIUS = 24;
+/** How long the iOS context menu takes to close after an action. */
+const MENU_DISMISS_MS = 350;
+/** Selection handles reach this far beyond a selected bubble. */
+const HANDLE_SLOP = 16;
+
+/** Reports a touch on the transcript, in page coordinates. */
+type SelectionTouch = (pageX: number, pageY: number) => void;
+/**
+ * The prompt selected in place, if any. It ends its selection when the
+ * transcript is touched elsewhere, as tapping beside selected text does.
+ */
+const PromptSelectionContext = React.createContext<{
+  current: SelectionTouch | null;
+}>({ current: null });
 /** Stay pinned to the newest output while it streams in and grows. */
 const FOLLOW_END = {
   animated: false,
@@ -177,6 +213,7 @@ export function ChatMessages({
   disabled = false,
   resolveMedia,
   onEdit,
+  editingMessageId = null,
   onFork,
   onCopy,
   onDismissNotice,
@@ -199,6 +236,15 @@ export function ChatMessages({
   // Messages scroll beneath translucent navigation chrome and host overlays.
   const topInset = useChromeTopInset() + contentInsetTop;
   const listRef = useRef<LegendListRef>(null);
+  const promptSelection = useRef<SelectionTouch | null>(null);
+  const touchTranscript = useCallback(
+    (event: GestureResponderEvent) =>
+      promptSelection.current?.(
+        event.nativeEvent.pageX,
+        event.nativeEvent.pageY,
+      ),
+    [],
+  );
   const { registerScrollToEnd } = layout;
   useEffect(
     () =>
@@ -217,7 +263,7 @@ export function ChatMessages({
       const next = new Set(
         viewableItems
           .filter((item) => item.isViewable)
-          .map((item) => item.item.id),
+          .map((item) => messageRenderKey(item.item)),
       );
       visibleMessageIds.current = next;
       setVisibleMessageIdsState((previous) =>
@@ -229,7 +275,22 @@ export function ChatMessages({
     [],
   );
   // Live replies have no server position yet; the shared rule keeps them last.
-  const ordered = useMemo(() => sortHarnessMessages(messages), [messages]);
+  // An edit replaces everything after its prompt, so that is hidden meanwhile.
+  const ordered = useMemo(() => {
+    const sorted = sortHarnessMessages(messages);
+    const edited = editingMessageId
+      ? sorted.findIndex((message) => message.id === editingMessageId)
+      : -1;
+    return edited < 0 ? sorted : sorted.slice(0, edited + 1);
+  }, [editingMessageId, messages]);
+  // The prompt being edited becomes the end of the transcript.
+  useEffect(() => {
+    if (!editingMessageId) return;
+    const frame = requestAnimationFrame(() => {
+      void listRef.current?.scrollToEnd({ animated: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editingMessageId]);
   // A tapped picture opens in a gallery of every picture in the chat, read
   // from the messages so it also reaches rows that are not rendered.
   const orderedRef = useRef(ordered);
@@ -272,7 +333,7 @@ export function ChatMessages({
     ({ item }: { item: HarnessMessage }) => (
       <MessageRow
         message={item}
-        mediaVisible={visibleMessageIds.current.has(item.id)}
+        mediaVisible={visibleMessageIds.current.has(messageRenderKey(item))}
         mediaScopeKey={mediaScopeKey ?? item.session_id}
         disabled={disabled || busy}
         streaming={
@@ -285,6 +346,7 @@ export function ChatMessages({
         resolveMedia={resolveMedia}
         todos={item.id === todoMessageId ? liveTodos : undefined}
         todoPartId={item.id === todoMessageId ? todoPartId : undefined}
+        editing={item.id === editingMessageId}
         onEdit={handleEdit}
         onFork={handleFork}
         onCopy={handleCopy}
@@ -298,6 +360,7 @@ export function ChatMessages({
     [
       busy,
       disabled,
+      editingMessageId,
       handleCopy,
       handleDismissNotice,
       handleEdit,
@@ -315,10 +378,18 @@ export function ChatMessages({
       mediaScopeKey,
     ],
   );
-  const keyExtractor = useCallback((message: HarnessMessage) => message.id, []);
+  // A sent prompt keeps its row when the server's copy replaces it.
+  const keyExtractor = useCallback(
+    (message: HarnessMessage) => messageRenderKey(message),
+    [],
+  );
   // "Scroll to latest" follows the list's own end tracking, which includes the
   // keyboard and composer insets and also reacts to content growing below.
   const hasMessages = !loading && ordered.length > 0;
+  // A list mounting with its first rows hides them until they are placed.
+  const [listReady, setListReady] = useState(false);
+  if (!hasMessages && listReady) setListReady(false);
+  const onListReady = useCallback(() => setListReady(true), []);
   /**
    * The pull arms at the end with a little slack: the list's own flag is
    * exact to a point, while insets and fractional offsets keep a resting list
@@ -396,7 +467,9 @@ export function ChatMessages({
   return (
     <MediaGalleryContext.Provider value={openGallery}>
       <PublishedAppContext.Provider value={renderPublishedApp ?? null}>
-      <View style={styles.listRoot}>
+      <TranscriptReadyContext.Provider value={listReady}>
+      <PromptSelectionContext.Provider value={promptSelection}>
+      <View style={styles.listRoot} onTouchStart={touchTranscript}>
         <EndPullArea gesture={pull.gesture}>
           <View style={styles.listRoot} collapsable={false}>
             <KeyboardAwareLegendList
@@ -414,6 +487,7 @@ export function ChatMessages({
               onViewableItemsChanged={onViewableItemsChanged}
               viewabilityConfig={VIEWABILITY}
               initialScrollAtEnd
+              onReady={onListReady}
               maintainScrollAtEnd={FOLLOW_END}
               maintainVisibleContentPosition
               recycleItems={false}
@@ -442,6 +516,8 @@ export function ChatMessages({
         <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
         {pullHint}
       </View>
+      </PromptSelectionContext.Provider>
+      </TranscriptReadyContext.Provider>
       </PublishedAppContext.Provider>
       {viewer}
     </MediaGalleryContext.Provider>
@@ -596,6 +672,8 @@ interface MessageRowProps extends Omit<
   todos?: HarnessTodo[];
   /** The hosting `todowrite` part; null appends the card after the message. */
   todoPartId?: string | null;
+  /** This prompt is being edited in the composer. */
+  editing: boolean;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -605,6 +683,7 @@ const MessageRow = memo(function MessageRow({
   resolveMedia,
   todos,
   todoPartId,
+  editing,
   onEdit,
   onFork,
   onCopy,
@@ -617,10 +696,12 @@ const MessageRow = memo(function MessageRow({
   mediaScopeKey,
 }: MessageRowProps): React.JSX.Element {
   const { theme } = useTheme();
-  const [editing, setEditing] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
-  const [editText, setEditText] = useState(message.content);
   const isUser = message.role === "user";
+  const prompt = useMemo(
+    () => (isUser ? promptLayout(message.content) : null),
+    [isUser, message.content],
+  );
   const showTodos = Boolean(todos?.length);
   const blocks = useMemo(
     () =>
@@ -640,16 +721,6 @@ const MessageRow = memo(function MessageRow({
   const duration = elapsedMs(message.created_at, message.completed_at);
   const elapsedLabel = duration === null ? "" : formatElapsed(duration);
   const copyText = getMessageCopyText(message, streaming);
-  const editUserMessage = useCallback(
-    async (messageId: string, text: string) => {
-      try {
-        await onEdit?.(messageId, text);
-      } catch {
-        /* The host owns surfacing edit/rerun failures. */
-      }
-    },
-    [onEdit],
-  );
   const forkMessage = useCallback(
     async (messageId: string) => {
       try {
@@ -675,110 +746,40 @@ const MessageRow = memo(function MessageRow({
     }
   }, [copyText, message, onCopy]);
 
-  const userBubble = isUser ? (
-    <View
-      style={
-        editing
-          ? [styles.userBubble, { backgroundColor: theme.userBubble }]
-          : undefined
-      }
-    >
-      {editing ? (
-        <>
-          <TextInput
-            multiline
-            value={editText}
-            onChangeText={setEditText}
-            accessibilityLabel="Edit message"
-            testID={`chat-edit-${message.id}`}
-            style={[
-              styles.editInput,
-              { color: theme.text, borderColor: theme.border },
-            ]}
-          />
-          <View style={styles.inlineActions}>
-            <Button
-              title="Cancel"
-              variant="ghost"
-              compact
-              onPress={() => {
-                setEditing(false);
-                setEditText(message.content);
-              }}
-            />
-            <Button
-              title="Save & run"
-              variant="primary"
-              compact
-              onPress={() => {
-                setEditing(false);
-                void editUserMessage(message.id, editText.trim());
-              }}
-              disabled={!editText.trim() || editText.trim() === message.content}
-            />
-          </View>
-        </>
-      ) : (
-        <UserMessageContent
-          markdown={message.content}
-          mediaScopeKey={mediaScopeKey}
-          mediaVisible={mediaVisible}
-          resolveMedia={resolveMedia}
-          onOpenFile={onOpenFile}
-          testID={`chat-message-markdown-${message.id}`}
-        />
-      )}
-    </View>
-  ) : null;
+  // A prompt already being edited is not offered again; a local echo has no
+  // server copy to edit yet.
+  const editPrompt =
+    isUser &&
+    !editing &&
+    !disabled &&
+    !message.id.startsWith("local-user-") &&
+    onEdit
+      ? () => onEdit(message)
+      : undefined;
 
   return (
-    <View
-      testID={`chat-message-${message.id}`}
-      style={[
-        styles.messageFrame,
-        isUser ? styles.userFrame : styles.assistantFrame,
-      ]}
-    >
+    <MessageFrame message={message}>
       {isUser ? (
-        editing ? (
-          userBubble
-        ) : (
-          <NativeMenu
-            style={[styles.userBubble, { backgroundColor: theme.userBubble }]}
-            label={`Your message: ${message.content}`}
-            longPress
-            testID={`chat-message-menu-${message.id}`}
-            actions={[
-              {
-                id: "copy",
-                title: "Copy message",
-                symbol: "doc.on.doc",
-                disabled: !copyText,
-              },
-              ...(!editing &&
-              !disabled &&
-              !message.id.startsWith("local-user-") &&
-              onEdit
-                ? [
-                    {
-                      id: "edit",
-                      title: "Edit and run again",
-                      symbol: "pencil",
-                    },
-                  ]
-                : []),
-            ]}
-            onSelect={(action) => {
-              if (action === "copy") void doCopy();
-              else {
-                setEditText(message.content);
-                setEditing(true);
-              }
-            }}
-          >
-            {userBubble}
-          </NativeMenu>
-        )
+        <PromptBubble
+          messageId={message.id}
+          text={copyText}
+          sentAt={message.created_at}
+          onCopy={() => {
+            void doCopy();
+          }}
+          onEdit={editPrompt}
+        >
+          <UserMessageContent
+            markdown={message.content}
+            layout={prompt ?? undefined}
+            mediaScopeKey={mediaScopeKey}
+            mediaVisible={mediaVisible}
+            resolveMedia={resolveMedia}
+            onOpenFile={onOpenFile}
+            selectable={false}
+            testID={`chat-message-markdown-${message.id}`}
+          />
+        </PromptBubble>
       ) : (
         <View style={styles.assistantBody}>
           {message.error && !message.notice_dismissed_at ? (
@@ -843,6 +844,23 @@ const MessageRow = memo(function MessageRow({
           ))}
         </View>
       )}
+      {isUser && prompt?.images.length ? (
+        <PromptImages
+          images={prompt.images}
+          resolveMedia={resolveMedia}
+          mediaVisible={mediaVisible}
+          mediaScopeKey={mediaScopeKey}
+          testID={`chat-message-images-${message.id}`}
+        />
+      ) : null}
+      {editing ? (
+        <Text
+          style={[styles.editHint, { color: theme.mutedText }]}
+          testID={`chat-edit-hint-${message.id}`}
+        >
+          Editing this message restarts the chat from here.
+        </Text>
+      ) : null}
       {!isUser && !streaming ? (
         <View style={styles.messageActions}>
           <IconButton
@@ -916,19 +934,14 @@ const MessageRow = memo(function MessageRow({
           }}
           testID={isUser ? `chat-copy-${message.id}` : undefined}
         />
-        {isUser &&
-        !editing &&
-        !disabled &&
-        !message.id.startsWith("local-user-") &&
-        onEdit ? (
+        {editPrompt ? (
           <Button
             symbol="pencil"
             title="Edit and run again"
             variant="ghost"
             onPress={() => {
               setActionsOpen(false);
-              setEditText(message.content);
-              setEditing(true);
+              editPrompt();
             }}
             testID={`chat-edit-action-${message.id}`}
           />
@@ -960,76 +973,331 @@ const MessageRow = memo(function MessageRow({
           </Text>
         ) : null}
       </NativeModal>
-    </View>
+    </MessageFrame>
   );
 });
 
+/** A row's frame; a prompt just sent flies into it from the composer. */
+function MessageFrame({
+  message,
+  children,
+}: React.PropsWithChildren<{ message: HarnessMessage }>): React.JSX.Element {
+  const testID = `chat-message-${message.id}`;
+  if (message.role !== "user")
+    return (
+      <View
+        testID={testID}
+        style={[styles.messageFrame, styles.assistantFrame]}
+      >
+        {children}
+      </View>
+    );
+  return (
+    <PromptFlight
+      testID={testID}
+      fly={isOptimisticPrompt(message)}
+      flightKey={messageRenderKey(message)}
+      style={[styles.messageFrame, styles.userFrame]}
+    >
+      {children}
+    </PromptFlight>
+  );
+}
+
+/**
+ * Text of a prompt. Mentions are chips in the flow of their paragraph, as in
+ * the webapp; pictures it mentions show as `PromptImages` below the bubble.
+ */
 export function UserMessageContent({
   markdown,
+  layout,
   resolveMedia,
   onOpenFile,
   mediaVisible = true,
   mediaScopeKey,
+  selectable,
   testID = "chat-user-message-content",
 }: {
   markdown: string;
+  /** `promptLayout(markdown)`, when the host already has it. */
+  layout?: PromptLayout;
   resolveMedia?: ChatMessagesProps["resolveMedia"];
   onOpenFile?: ChatMessagesProps["onOpenFile"];
   mediaVisible?: boolean;
   mediaScopeKey?: string | number;
+  /** Native text selection (default); off inside a bubble with a menu. */
+  selectable?: boolean;
+  testID?: string;
+}): React.JSX.Element {
+  const blocks = useMemo(
+    () => (layout ?? promptLayout(markdown)).blocks,
+    [layout, markdown],
+  );
+  return (
+    <View testID={testID} style={styles.userMessageContent}>
+      {blocks.map((block, index) =>
+        block.kind === "paragraph" ? (
+          <PromptParagraph
+            key={`paragraph:${index}`}
+            runs={block.runs}
+            onOpenFile={onOpenFile}
+          />
+        ) : (
+          <ChatMarkdown
+            key={`markdown:${index}`}
+            markdown={block.markdown}
+            variant="prompt"
+            selectable={selectable}
+            mediaVisible={mediaVisible}
+            mediaScopeKey={mediaScopeKey}
+            resolveMedia={resolveMedia}
+            onOpenFile={onOpenFile}
+          />
+        ),
+      )}
+    </View>
+  );
+}
+
+/**
+ * A sent prompt's bubble. Holding it lifts it with a haptic tick and opens
+ * its actions under the time it was sent, as in native messengers.
+ */
+function PromptBubble({
+  messageId,
+  text,
+  sentAt,
+  onCopy,
+  onEdit,
+  children,
+}: React.PropsWithChildren<{
+  messageId: string;
+  /** The prompt as sent: copied, shared and offered for selection. */
+  text: string | null;
+  sentAt?: string | null;
+  onCopy: () => void;
+  /** Hidden when undefined. */
+  onEdit?: () => void;
+}>): React.JSX.Element {
+  const { theme } = useTheme();
+  const window = useWindowDimensions();
+  // iOS hosts the bubble at its own size, so its width cap is in points:
+  // first the window less the transcript padding, then its measured row.
+  const [rowWidth, setRowWidth] = useState(() => window.width - 32);
+  const [selecting, setSelecting] = useState(false);
+  const bubble = useRef<View>(null);
+  const bubbleWidth = useRef<number | undefined>(undefined);
+  const selectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeSelection = useContext(PromptSelectionContext);
+  const shown = useMemo(() => (text ? composerDisplay(text).text : ""), [text]);
+  useEffect(
+    () => () => {
+      if (selectTimer.current) clearTimeout(selectTimer.current);
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!selecting) return;
+    const end = () => setSelecting(false);
+    const touchedAt: SelectionTouch = (x, y) => {
+      bubble.current?.measure((_x, _y, width, height, left, top) => {
+        const inside =
+          x >= left - HANDLE_SLOP &&
+          x <= left + width + HANDLE_SLOP &&
+          y >= top - HANDLE_SLOP &&
+          y <= top + height + HANDLE_SLOP;
+        if (!inside) end();
+      });
+    };
+    activeSelection.current = touchedAt;
+    const keyboard = Keyboard.addListener("keyboardWillShow", end);
+    return () => {
+      keyboard.remove();
+      if (activeSelection.current === touchedAt) activeSelection.current = null;
+    };
+  }, [activeSelection, selecting]);
+  const select = (action: string) => {
+    if (action === "copy") onCopy();
+    else if (action === "edit") {
+      // The composer only takes focus once the iOS menu is gone.
+      if (Platform.OS === "ios")
+        selectTimer.current = setTimeout(() => onEdit?.(), MENU_DISMISS_MS);
+      else onEdit?.();
+    } else if (action === "select") {
+      // The text view only keeps its selection once the menu is gone.
+      selectTimer.current = setTimeout(
+        () => setSelecting(true),
+        MENU_DISMISS_MS,
+      );
+    } else if (action === "share" && text)
+      void Share.share({ message: text }).catch(() => undefined);
+  };
+  const bubbleStyle = [
+    styles.userBubble,
+    {
+      backgroundColor: theme.userBubble,
+      maxWidth: Math.floor(rowWidth * USER_BUBBLE_SHARE),
+    },
+  ];
+  return (
+    <View
+      style={styles.promptRow}
+      onLayout={(event) => setRowWidth(event.nativeEvent.layout.width)}
+    >
+      {selecting ? (
+        // Out of the menu, so holding the text adjusts the selection.
+        <View
+          ref={bubble}
+          style={[bubbleStyle, { width: bubbleWidth.current }]}
+        >
+          <SelectedPrompt
+            text={shown}
+            onDeselect={() => setSelecting(false)}
+            testID={`chat-select-text-${messageId}`}
+          />
+        </View>
+      ) : (
+        <NativeContextMenu
+          label={(sentAt && formatSendTime(sentAt)) || "Your message"}
+          fitContent
+          previewRadius={USER_BUBBLE_RADIUS}
+          actions={[
+            {
+              id: "copy",
+              title: "Copy",
+              symbol: "doc.on.doc",
+              disabled: !text,
+            },
+            ...(onEdit
+              ? [{ id: "edit", title: "Edit", symbol: "pencil" }]
+              : []),
+            // Android cannot select a text view's text for the user.
+            ...(Platform.OS === "ios"
+              ? [
+                  {
+                    id: "select",
+                    title: "Select text",
+                    symbol: "selection.pin.in.out",
+                    disabled: !text,
+                  },
+                ]
+              : []),
+            {
+              id: "share",
+              title: "Share",
+              symbol: "square.and.arrow.up",
+              disabled: !text,
+            },
+          ]}
+          onSelect={select}
+        >
+          {(showMenu) => (
+            // iOS presents the menu itself; Android opens it on this long press.
+            <Pressable
+              testID={`chat-message-menu-${messageId}`}
+              accessibilityLabel={`Your message: ${text ?? ""}`}
+              onLongPress={showMenu}
+              onLayout={(event) => {
+                bubbleWidth.current = event.nativeEvent.layout.width;
+              }}
+              style={bubbleStyle}
+            >
+              {children}
+            </Pressable>
+          )}
+        </NativeContextMenu>
+      )}
+    </View>
+  );
+}
+
+/**
+ * A prompt's text selected in place: a read-only native text view that
+ * selects everything at first, with the system's handles and edit menu
+ * (Copy, Look Up, Translate, Share).
+ */
+function SelectedPrompt({
+  text,
+  onDeselect,
+  testID,
+}: {
+  text: string;
+  /** The reader cleared the selection, e.g. by tapping the text. */
+  onDeselect: () => void;
   testID?: string;
 }): React.JSX.Element {
   const { theme } = useTheme();
-  const segments = parseComposerSegments(markdown);
+  // Selects all once; afterwards the handles own the selection.
+  const [initial, setInitial] = useState<
+    { start: number; end: number } | undefined
+  >({ start: 0, end: text.length });
+  const ranged = useRef(false);
   return (
-    <View testID={testID} style={styles.userMessageContent}>
-      {segments.map((segment, index) =>
-        segment.kind === "text" ? (
-          segment.text ? (
-            <ChatMarkdown
-              key={`text:${index}`}
-              markdown={segment.text}
-              variant="prompt"
-              mediaVisible={mediaVisible}
-              mediaScopeKey={mediaScopeKey}
-              resolveMedia={resolveMedia}
-              onOpenFile={onOpenFile}
-            />
-          ) : null
-        ) : segment.kind === "agent" ? (
-          <View
-            key={`agent:${segment.start}`}
-            style={[styles.mentionChip, { backgroundColor: theme.surface }]}
-          >
-            <Sparkles size={13} color={theme.mutedText} />
-            <Text style={{ color: theme.text, fontSize: 13 }}>
-              {segment.name}
-            </Text>
-          </View>
-        ) : classifyWorkspaceFile(segment.path) === "image" ? (
-          <MentionImage
-            key={`image:${segment.start}`}
-            path={segment.path}
-            name={segment.name}
-            mediaScopeKey={mediaScopeKey}
-            mediaVisible={mediaVisible}
-            resolveMedia={resolveMedia}
-          />
-        ) : (
-          <NativeAction
-            key={`file:${segment.start}`}
-            accessibilityRole="button"
-            accessibilityLabel={`Open file ${segment.path}`}
-            onPress={() => onOpenFile?.(segment.path)}
-            style={[styles.mentionChip, { backgroundColor: theme.surface }]}
-          >
-            <FileCode2 size={13} color={theme.mutedText} />
-            <Text numberOfLines={1} style={{ color: theme.text, fontSize: 13 }}>
-              {segment.name}
-            </Text>
-          </NativeAction>
-        ),
-      )}
+    <TextInput
+      testID={testID}
+      value={text}
+      editable={false}
+      multiline
+      scrollEnabled={false}
+      // Native, unlike focus(), which skips read-only fields.
+      autoFocus
+      selection={initial}
+      onSelectionChange={({ nativeEvent: { selection } }) => {
+        if (selection.end > selection.start) {
+          ranged.current = true;
+          setInitial(undefined);
+        } else if (ranged.current) onDeselect();
+      }}
+      style={[styles.selectText, { color: theme.text }]}
+    />
+  );
+}
+
+/** A message the user sent while the agent worked, inside its turn. */
+function SteerBubble({
+  partId,
+  markdown,
+  resolveMedia,
+  onOpenFile,
+  mediaVisible,
+  mediaScopeKey,
+}: {
+  partId: string;
+  markdown: string;
+  resolveMedia?: ChatMessagesProps["resolveMedia"];
+  onOpenFile?: ChatMessagesProps["onOpenFile"];
+  mediaVisible: boolean;
+  mediaScopeKey?: string | number;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const layout = useMemo(() => promptLayout(markdown), [markdown]);
+  return (
+    <View testID={`chat-steer-${partId}`} style={styles.steerRow}>
+      <View
+        style={[styles.userBubble, { backgroundColor: theme.surfaceMuted }]}
+      >
+        <UserMessageContent
+          markdown={markdown}
+          layout={layout}
+          mediaScopeKey={mediaScopeKey}
+          mediaVisible={mediaVisible}
+          resolveMedia={resolveMedia}
+          onOpenFile={onOpenFile}
+          testID={`chat-steer-content-${partId}`}
+        />
+      </View>
+      {layout.images.length ? (
+        <PromptImages
+          images={layout.images}
+          resolveMedia={resolveMedia}
+          mediaVisible={mediaVisible}
+          mediaScopeKey={mediaScopeKey}
+          testID={`chat-steer-images-${partId}`}
+        />
+      ) : null}
+      <Text style={[styles.steerCaption, { color: theme.subtleText }]}>
+        Sent while working
+      </Text>
     </View>
   );
 }
@@ -1105,23 +1373,14 @@ function BlockView({
     );
   if (block.kind === "steer")
     return (
-      <View testID={`chat-steer-${block.part.id}`} style={styles.steerRow}>
-        <View
-          style={[styles.userBubble, { backgroundColor: theme.surfaceMuted }]}
-        >
-          <UserMessageContent
-            markdown={block.part.output}
-            mediaScopeKey={mediaScopeKey}
-            mediaVisible={mediaVisible}
-            resolveMedia={resolveMedia}
-            onOpenFile={onOpenFile}
-            testID={`chat-steer-content-${block.part.id}`}
-          />
-        </View>
-        <Text style={[styles.steerCaption, { color: theme.subtleText }]}>
-          Sent while working
-        </Text>
-      </View>
+      <SteerBubble
+        partId={block.part.id}
+        markdown={block.part.output}
+        mediaScopeKey={mediaScopeKey}
+        mediaVisible={mediaVisible}
+        resolveMedia={resolveMedia}
+        onOpenFile={onOpenFile}
+      />
     );
   if (block.kind === "text")
     return (
@@ -1863,27 +2122,15 @@ const styles = StyleSheet.create({
   userFrame: { alignSelf: "flex-end", alignItems: "flex-end" },
   assistantFrame: { alignSelf: "flex-start", alignItems: "flex-start" },
   userBubble: {
-    maxWidth: "82%",
+    maxWidth: `${USER_BUBBLE_SHARE * 100}%`,
     minWidth: 48,
-    borderRadius: 24,
+    borderRadius: USER_BUBBLE_RADIUS,
     paddingVertical: 13,
     paddingHorizontal: 16,
   },
-  userMessageContent: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: 4,
-  },
-  mentionChip: {
-    minHeight: 30,
-    maxWidth: 240,
-    borderRadius: 15,
-    paddingHorizontal: 9,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-  },
+  promptRow: { alignSelf: "stretch", alignItems: "flex-end" },
+  selectText: { fontSize: 17, lineHeight: 26, padding: 0 },
+  userMessageContent: { gap: 10 },
   assistantBody: { width: "100%", gap: 6 },
   steerRow: { alignSelf: "flex-end", alignItems: "flex-end", maxWidth: "94%" },
   steerCaption: { fontSize: 11, lineHeight: 16, marginTop: 3 },
@@ -1894,21 +2141,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginLeft: -(ACTION_SIZE - ACTION_ICON) / 2,
   },
-  inlineActions: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: 8,
-    marginTop: 8,
-  },
-  editInput: {
-    minHeight: 88,
-    maxHeight: 240,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
-    padding: 10,
-    fontSize: 16,
-    lineHeight: 23,
-    textAlignVertical: "top",
+  editHint: {
+    maxWidth: "92%",
+    marginTop: 6,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: "right",
   },
   streamingCursor: {
     flexDirection: "row",

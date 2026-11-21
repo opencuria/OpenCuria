@@ -1,7 +1,11 @@
 import type { NativeSymbol } from "./controls.types";
 import type { NativeMenuAction } from "./NativeMenu";
+import type { StatusTone } from "./statusColors";
 
-/** Semantic colors a row may use; each platform maps them to its palette. */
+/**
+ * Semantic colors a row may use; each platform maps them to its palette.
+ * `accent` is the ink (same as `default`), kept for emphasis in data.
+ */
 export type NativeFormTone =
   | "default"
   | "muted"
@@ -9,6 +13,44 @@ export type NativeFormTone =
   | "success"
   | "warning"
   | "danger";
+
+/**
+ * Status of an entity, drawn as a small colored dot (rows, headers) or as
+ * the color of an outcome symbol: running, needs attention, failed, idle.
+ * Always paired with a text label; color is never the only signal.
+ */
+export type NativeFormStatus = StatusTone;
+
+/**
+ * A trailing capsule button on an item row, as in the App Store ("Open",
+ * "Update"). `prominent` fills it with ink for the action that changes state.
+ */
+export interface NativeFormAccessory {
+  title: string;
+  onPress: () => void;
+  prominent?: boolean;
+  busy?: boolean;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+}
+
+/**
+ * The centered state shown instead of the sections: empty, no results or a
+ * load failure, with an optional action such as "Retry" or "New workspace".
+ */
+export interface NativeFormEmptyState {
+  title: string;
+  description?: string;
+  symbol: NativeSymbol;
+  action?: {
+    title: string;
+    onPress: () => void;
+    symbol?: NativeSymbol;
+    busy?: boolean;
+    testID?: string;
+  };
+}
 
 /** A swipe (iOS) or overflow (Android) action of an item row. */
 export interface NativeFormSwipeAction {
@@ -39,15 +81,27 @@ interface RowBase {
   disabled?: boolean;
 }
 
-/** A tappable list entry with a status tile, subtitle, menu and swipe actions. */
+/**
+ * A tappable list entry: a leading symbol, tile, image or time, title and
+ * subtitle (optionally led by a status dot), trailing accessories, a context
+ * menu and swipe actions.
+ */
 export interface NativeFormItemRow extends RowBase {
   kind: "item";
   title: string;
   subtitle?: string;
   subtitleTone?: NativeFormTone;
+  /** Colored dot before the subtitle, e.g. a workspace that is running. */
+  status?: NativeFormStatus;
+  /** Leading symbol: plain ink, or on a neutral tile with `tile`. */
   symbol?: NativeSymbol;
-  /** Color of the leading tile. */
-  tint?: string;
+  /** Colors a plain leading symbol by status, e.g. a failed run. */
+  symbolStatus?: NativeFormStatus;
+  /**
+   * Places the symbol on a neutral rounded tile, for entities with an
+   * identity such as workspaces and apps. Implied by `image`.
+   */
+  tile?: boolean;
   /**
    * A small local image (`file://`) that fills the leading tile in place of
    * the symbol, e.g. an app icon. Native lists read it while they draw, so
@@ -64,8 +118,10 @@ export interface NativeFormItemRow extends RowBase {
   leadingTone?: NativeFormTone;
   selected?: boolean;
   busy?: boolean;
-  /** Short trailing hint, e.g. "Update". */
+  /** Short trailing chip, e.g. "Update". */
   badge?: string;
+  /** Trailing capsule button; replaces the badge. */
+  accessory?: NativeFormAccessory;
   onPress?: () => void;
   /** Trailing detail button (ⓘ). */
   onInfo?: () => void;
@@ -76,14 +132,20 @@ export interface NativeFormItemRow extends RowBase {
   onAction?: (id: string) => void;
 }
 
-/** Hero header of a detail screen with its quick actions. */
+/**
+ * Hero header of a detail screen: a neutral tile, the name, a status line
+ * and liquid-glass (iOS) or tonal (Android) quick actions.
+ */
 export interface NativeFormHeaderRow extends RowBase {
   kind: "header";
   title: string;
   subtitle?: string;
   subtitleTone?: NativeFormTone;
+  /** Colored dot before the subtitle. */
+  status?: NativeFormStatus;
   symbol: NativeSymbol;
-  tint: string;
+  /** A small local image filling the tile in place of the symbol. */
+  image?: string;
   busy?: boolean;
   actions: NativeFormQuickAction[];
   onAction: (id: string) => void;
@@ -227,21 +289,20 @@ export interface NativeFormLinkRow extends RowBase {
   value?: string;
   valueTone?: NativeFormTone;
   symbol?: NativeSymbol;
-  /** A colored tile around the symbol instead of a plain one. */
-  tint?: string;
   busy?: boolean;
   /** Route of the pushed page. */
   route: string;
 }
 
-/** Large centered avatar with the user's initials and name, as in ChatGPT. */
+/**
+ * Large centered avatar with the user's initials and name, as in ChatGPT:
+ * ink initials on a neutral circle, like the sidebar's account button.
+ */
 export interface NativeFormProfileRow extends RowBase {
   kind: "profile";
   initials: string;
   title: string;
   subtitle?: string;
-  /** Avatar color. */
-  tint: string;
 }
 
 /** A highlighted card with a capsule action or menu, e.g. the organization. */
@@ -256,10 +317,17 @@ export interface NativeFormCardRow extends RowBase {
   onSelect?: (id: string) => void;
 }
 
+/**
+ * Explanatory text inside a section, e.g. an offline notice or an inline
+ * error. `busy` leads it with a small spinner for section-level loading
+ * ("Loading runs…"); `symbol` leads it with a glyph in the tone's color.
+ */
 export interface NativeFormNoteRow extends RowBase {
   kind: "note";
   text: string;
   tone?: NativeFormTone;
+  symbol?: NativeSymbol;
+  busy?: boolean;
 }
 
 export type NativeFormRow =
@@ -280,11 +348,13 @@ export type NativeFormRow =
   | NativeFormButtonRow
   | NativeFormNoteRow;
 
+/**
+ * A group of rows on one card. Every title renders as a prominent,
+ * sentence-case header (ink, bold), the same on every sheet and page.
+ */
 export interface NativeFormSection {
   id: string;
   title?: string;
-  /** Larger section title, as in ChatGPT's settings. */
-  prominent?: boolean;
   footer?: string;
   footerTone?: NativeFormTone;
   rows: NativeFormRow[];
@@ -295,11 +365,12 @@ export interface NativeFormProps {
   /** Pull to refresh. */
   onRefresh?: () => Promise<void>;
   /** Shown instead of the sections when there are none. */
-  empty?: {
-    title: string;
-    description?: string;
-    symbol: NativeSymbol;
-  };
+  empty?: NativeFormEmptyState;
+  /**
+   * The first load is still running: a centered progress indicator replaces
+   * the empty state while there are no sections.
+   */
+  loading?: boolean;
   /** Extra space below the last section for a floating action button. */
   contentInsetBottom?: number;
   testID?: string;

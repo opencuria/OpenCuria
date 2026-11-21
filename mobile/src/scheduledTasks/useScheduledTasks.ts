@@ -58,7 +58,7 @@ export function useScheduledTasks(
       setError(null);
     } catch (cause) {
       if (request === generation.current)
-        setError(errorText(cause, "Could not load scheduled tasks."));
+        setError(errorText(cause, "Check your connection and try again."));
     } finally {
       if (request === generation.current) setLoading(false);
     }

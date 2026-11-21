@@ -642,11 +642,13 @@ async def test_chunked_read_final_total_mismatch_raises() -> None:
 
 
 async def test_chunked_read_incomplete_transfer_raises() -> None:
-    """Only 2 of 3 announced chunks arrive → incomplete/missing error."""
+    """Only 2 of 3 chunks arrive by the read timeout → incomplete error."""
     transport = FakeTransport()
     raw = b"0123456789abcdef" * 64
 
     async def auto_reply(event: str, payload: dict) -> None:
+        if event != "harness:read_file":
+            return
         rid = payload["request_id"]
         for chunk in _chunk_payloads(raw, 3, rid)[:2]:
             route_harness_file_chunk(chunk)
@@ -662,8 +664,145 @@ async def test_chunked_read_incomplete_transfer_raises() -> None:
         )
 
     transport.auto_reply = auto_reply
-    with pytest.raises(RunnerAccessorError, match="incomplete|missing"):
-        await _accessor(transport).read_file("/workspace/big.bin")
+    accessor = _accessor(transport, default_timeout=0.05)
+    with pytest.raises(
+        RunnerAccessorError, match=r"incomplete transfer \(missing 1 of 3 chunks\)"
+    ):
+        await accessor.read_file("/workspace/big.bin")
+    assert [event for event, _ in transport.emitted][-1] == "harness:cancel"
+    assert accessor._pending == {}
+    assert accessor._file_chunks == {}
+
+
+def _chunked_final(rid: str, raw: bytes, total: int, **overrides) -> dict:
+    return {
+        "request_id": rid,
+        "workspace_id": "ws-1",
+        "path": "/workspace/big.bin",
+        "chunked": True,
+        "total_chunks": total,
+        "size": len(raw),
+        "mime": "application/octet-stream",
+        **overrides,
+    }
+
+
+async def test_chunked_read_final_before_last_chunk_completes() -> None:
+    """A final that overtakes the last chunk waits for it instead of failing."""
+    transport = FakeTransport()
+    raw = bytes(range(256)) * 40
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        chunks = _chunk_payloads(raw, 10, rid)
+        for chunk in chunks[:9]:
+            assert route_harness_file_chunk(chunk) is True
+        assert route_harness_result(_chunked_final(rid, raw, 10)) is True
+        await asyncio.sleep(0)
+        assert route_harness_file_chunk(chunks[9]) is True
+
+    transport.auto_reply = auto_reply
+    accessor = _accessor(transport, default_timeout=2)
+    content = await accessor.read_file("/workspace/big.bin")
+    assert content.content == raw
+    assert content.size == len(raw)
+    assert accessor._pending == {}
+    assert accessor._file_chunks == {}
+
+
+async def test_chunked_read_final_before_every_chunk_completes() -> None:
+    """The final may even arrive first; chunks then complete the read."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        assert route_harness_result(_chunked_final(rid, raw, 3)) is True
+        for chunk in reversed(_chunk_payloads(raw, 3, rid)):
+            await asyncio.sleep(0)
+            assert route_harness_file_chunk(chunk) is True
+
+    transport.auto_reply = auto_reply
+    content = await _accessor(transport, default_timeout=2).read_file(
+        "/workspace/big.bin"
+    )
+    assert content.content == raw
+
+
+async def test_chunked_read_early_final_pins_total() -> None:
+    """Chunks that contradict an early final's total fail the read at once."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        if event != "harness:read_file":
+            return
+        rid = payload["request_id"]
+        route_harness_result(_chunked_final(rid, raw, 2))
+        await asyncio.sleep(0)
+        route_harness_file_chunk(_chunk_payloads(raw, 3, rid)[0])
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="chunk total mismatch"):
+        await _accessor(transport, default_timeout=2).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_early_final_metadata_mismatch_fails_fast() -> None:
+    """An early final for another path fails without waiting for chunks."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        if event != "harness:read_file":
+            return
+        route_harness_result(
+            _chunked_final(payload["request_id"], raw, 3, path="/workspace/x")
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="path mismatch"):
+        await _accessor(transport, default_timeout=2).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_duplicate_final_raises() -> None:
+    """A second chunked final for the same read fails closed."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        if event != "harness:read_file":
+            return
+        rid = payload["request_id"]
+        route_harness_result(_chunked_final(rid, raw, 3))
+        await asyncio.sleep(0)
+        route_harness_result(_chunked_final(rid, raw, 3))
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="duplicate final"):
+        await _accessor(transport, default_timeout=2).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_chunks_from_worker_thread_after_final() -> None:
+    """Chunks delivered from a worker thread after an on-loop final still land."""
+    transport = FakeTransport()
+    raw = bytes(range(256)) * 40
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        chunks = _chunk_payloads(raw, 10, rid)
+        route_harness_result(_chunked_final(rid, raw, 10))
+
+        def from_thread() -> None:
+            for chunk in chunks:
+                assert route_harness_file_chunk(chunk) is True
+
+        threading.Thread(target=from_thread, daemon=True).start()
+
+    transport.auto_reply = auto_reply
+    content = await _accessor(transport, default_timeout=2).read_file(
+        "/workspace/big.bin"
+    )
+    assert content.content == raw
 
 
 async def test_chunked_read_bad_index_raises() -> None:

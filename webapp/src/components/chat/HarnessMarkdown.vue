@@ -13,17 +13,14 @@ import {
 import type { PropType, VNodeChild } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Button } from '@/components/ui/button'
 import ImageLightbox from './ImageLightbox.vue'
 import HarnessCodeBlock from './HarnessCodeBlock.vue'
+import WorkspaceMedia from './WorkspaceMedia.vue'
 import {
   classifyWorkspaceFile,
   resolveWorkspaceLinkPath,
-  resolveWorkspaceMediaPath,
 } from '@opencuria/chat-core/workspaceFileRefs'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import {
   parseComposerSegments,
@@ -103,29 +100,17 @@ const rootClass = computed(() => {
 
 const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const workspaceId = computed(() => workspaceIdRef.value)
-const imageStore = useWorkspaceImageStore()
 
+/** `href`/`src` are URLs already parsed by marked or the HTML parser: decode once. */
 function localLinkPath(href: string): string | null {
   return resolveWorkspaceLinkPath(href, props.baseDirectory)
 }
 
-function localMediaPath(src: string): string | null {
-  // Document URLs are already parsed by marked/the HTML parser, including spaces.
-  return props.baseDirectory === undefined
-    ? resolveWorkspaceMediaPath(src)
-    : localLinkPath(src)
-}
-
-type HtmlSegment = {
+type MarkdownSegment = {
   kind: 'html'
   html: string
   nodes?: Node[]
-  media: MediaSegment[]
 }
-type ImageSegment = { kind: 'image'; path: string; label: string }
-type VideoSegment = { kind: 'video'; path: string; label: string }
-type MediaSegment = ImageSegment | VideoSegment
-type MarkdownSegment = HtmlSegment
 
 /** Parse and sanitize the complete document so reference links remain in scope. */
 function parseMarkdownRoot(text: string): { html: string; root: HTMLElement | null } {
@@ -172,106 +157,18 @@ function renderMarkdown(text: string): string {
   return parseMarkdownRoot(text).html
 }
 
-const WorkspaceMediaNode = defineComponent({
-  name: 'HarnessMarkdownWorkspaceMedia',
-  props: {
-    kind: { type: String as PropType<MediaSegment['kind']>, required: true },
-    path: { type: String, required: true },
-    label: { type: String, default: '' },
-    linked: { type: Boolean, default: false },
-  },
-  emits: { open: (segment: ImageSegment) => Boolean(segment) },
-  setup(mediaProps, { emit }) {
-    const store = useWorkspaceImageStore()
-    const workspaceId = computed(() => workspaceIdRef.value)
-    const url = computed(() => {
-      const segment = { kind: mediaProps.kind, path: mediaProps.path, label: mediaProps.label }
-      return segment.kind === 'image'
-        ? store.getImageUrl(segment.path)
-        : store.getVideoUrl(segment.path)
-    })
-    const loading = computed(() => {
-      if (!workspaceId.value) return false
-      return mediaProps.kind === 'image'
-        ? store.isFetchingImage(mediaProps.path)
-        : store.isFetchingVideo(mediaProps.path)
-    })
-
-    return () => {
-      const label = mediaProps.label || mediaProps.path
-      if (mediaProps.kind === 'image' && url.value && mediaProps.linked) {
-        return h('img', {
-          src: url.value,
-          alt: label,
-          'data-voice-image-path': mediaProps.path,
-          'data-voice-workspace': workspaceId.value,
-          class: 'my-2 max-h-96 max-w-full object-contain',
-        })
-      }
-      if (mediaProps.kind === 'image' && url.value) {
-        return h(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            'aria-haspopup': 'dialog',
-            'aria-label': `Open image preview ${label}`,
-            class:
-              'my-2 block h-auto max-w-full cursor-zoom-in overflow-hidden rounded-md border border-border p-0 hover:bg-transparent',
-            onClick: () =>
-              emit('open', { kind: 'image', path: mediaProps.path, label: mediaProps.label }),
-          },
-          () => [
-            h('img', {
-              src: url.value,
-              alt: label,
-              'data-voice-image-path': mediaProps.path,
-              'data-voice-workspace': workspaceId.value,
-              class: 'm-0 max-h-96 max-w-full object-contain',
-            }),
-          ],
-        )
-      }
-      if (mediaProps.kind === 'video' && url.value) {
-        return h('video', {
-          src: url.value,
-          controls: true,
-          class: 'my-2 max-h-96 max-w-full rounded-md border border-border',
-        })
-      }
-      if (loading.value) {
-        return h(Skeleton, {
-          class: 'my-2 h-24 w-full max-w-md',
-          'data-testid': 'harness-markdown-media-loading',
-        })
-      }
-      return h(
-        'span',
-        {
-          class: 'text-muted-foreground',
-          'data-testid': 'harness-markdown-media-fallback',
-        },
-        label,
-      )
-    }
-  },
-})
-
 const HtmlSegmentRenderer = defineComponent({
   name: 'HarnessMarkdownHtml',
   props: {
     nodes: { type: Array as PropType<Node[]>, required: true },
     streaming: { type: Boolean, default: false },
   },
-  emits: { open: (segment: ImageSegment) => Boolean(segment) },
-  setup(segmentProps, { emit }) {
+  setup(segmentProps) {
     return () =>
       h(
         'div',
         { 'data-md-html': '' },
-        segmentProps.nodes.map((node) =>
-          renderMarkdownNode(node, segmentProps.streaming, (segment) => emit('open', segment)),
-        ),
+        segmentProps.nodes.map((node) => renderMarkdownNode(node, segmentProps.streaming)),
       )
   },
 })
@@ -281,11 +178,7 @@ function languageFromClass(codeClass: string): string {
   return languageClass?.slice('language-'.length) ?? ''
 }
 
-function renderMarkdownNode(
-  node: Node,
-  isStreaming: boolean,
-  onOpen: (segment: ImageSegment) => void,
-): VNodeChild {
+function renderMarkdownNode(node: Node, isStreaming: boolean): VNodeChild {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? ''
   if (node.nodeType !== Node.ELEMENT_NODE) return null
 
@@ -307,22 +200,32 @@ function renderMarkdownNode(
   }
 
   if (tag === 'img' && !element.closest('button')) {
-    const path = localMediaPath(element.getAttribute('src') ?? '')
+    const path = localLinkPath(element.getAttribute('src') ?? '')
     if (path) {
       const kind = classifyWorkspaceFile(path)
       if (kind === 'image' || kind === 'video') {
-        const segment: MediaSegment = {
-          kind,
-          path,
-          label: (element.getAttribute('alt') ?? '').trim(),
-        }
-        return h(WorkspaceMediaNode, {
-          kind: segment.kind,
-          path: segment.path,
-          label: segment.label,
-          linked: Boolean(element.closest('a')),
-          onOpen,
-        })
+        const label = (element.getAttribute('alt') ?? '').trim() || path
+        return h(
+          WorkspaceMedia,
+          {
+            workspaceId: workspaceId.value,
+            path,
+            kind,
+            alt: label,
+            zoomable: !element.closest('a'),
+          },
+          {
+            fallback: () =>
+              h(
+                'span',
+                {
+                  class: 'text-muted-foreground',
+                  'data-testid': 'harness-markdown-media-fallback',
+                },
+                label,
+              ),
+          },
+        )
       }
     }
   }
@@ -334,29 +237,15 @@ function renderMarkdownNode(
     }
   }
   const children = Array.from(element.childNodes).map((child) =>
-    renderMarkdownNode(child, isStreaming, onOpen),
+    renderMarkdownNode(child, isStreaming),
   )
   return h(tag, attrs, children)
 }
 
 function buildSegments(text: string): MarkdownSegment[] {
   const parsed = parseMarkdownRoot(text)
-  const media: MediaSegment[] = []
   const nodes = parsed.root ? Array.from(parsed.root.childNodes) : undefined
-  const visit = (node: Node): void => {
-    if (node.nodeType !== Node.ELEMENT_NODE) return
-    const element = node as Element
-    if (element.localName === 'img' && !element.closest('button')) {
-      const path = localMediaPath(element.getAttribute('src') ?? '')
-      const kind = path ? classifyWorkspaceFile(path) : null
-      if (path && (kind === 'image' || kind === 'video')) {
-        media.push({ kind, path, label: (element.getAttribute('alt') ?? '').trim() })
-      }
-    }
-    for (const child of Array.from(node.childNodes)) visit(child)
-  }
-  for (const node of nodes ?? []) visit(node)
-  return [{ kind: 'html', html: parsed.html, nodes, media }]
+  return [{ kind: 'html', html: parsed.html, nodes }]
 }
 
 const streaming = computed(() => props.streaming === true)
@@ -404,98 +293,8 @@ watch(
   { flush: 'sync' },
 )
 
-const pinnedMediaPaths = new Set<string>()
-let pinnedMediaGeneration = imageStore.mediaGeneration
-let pinnedWorkspaceId = workspaceId.value
-const lightbox = ref<{ src: string; alt: string; path?: string } | null>(null)
-let lightboxMediaPath: string | null = null
-let lightboxMediaGeneration = imageStore.mediaGeneration
-
-function syncVisibleMedia(): void {
-  const generation = imageStore.mediaGeneration
-  const id = workspaceId.value
-  const media = segments.value.flatMap((segment) => segment.media)
-  const nextPaths = new Set(media.map((item) => item.path))
-  const workspaceChanged = id !== pinnedWorkspaceId
-
-  if (generation !== pinnedMediaGeneration) {
-    // reset() cleared the store-side refcounts; discard old local ownership
-    // without releasing it into the new generation.
-    pinnedMediaPaths.clear()
-    pinnedMediaGeneration = generation
-    if (lightboxMediaPath && lightboxMediaGeneration !== generation) {
-      lightbox.value = null
-      lightboxMediaPath = null
-      lightboxMediaGeneration = generation
-    }
-  } else if (workspaceChanged) {
-    if (pinnedMediaGeneration === generation) imageStore.releaseMedia(pinnedMediaPaths)
-    pinnedMediaPaths.clear()
-  } else {
-    const releasedPaths: string[] = []
-    for (const path of pinnedMediaPaths) {
-      if (!nextPaths.has(path)) {
-        releasedPaths.push(path)
-        pinnedMediaPaths.delete(path)
-      }
-    }
-    if (releasedPaths.length > 0) imageStore.releaseMedia(releasedPaths)
-  }
-  pinnedWorkspaceId = id
-  if (!id) return
-  if (lightboxMediaPath && lightboxMediaGeneration !== generation) {
-    lightboxMediaPath = null
-    lightboxMediaGeneration = generation
-  }
-
-  // Pin all current media before requesting it, so even an oversized fresh
-  // response is protected from immediate cache trimming.
-  for (const path of nextPaths) {
-    if (!pinnedMediaPaths.has(path)) {
-      imageStore.pinMedia(path, true)
-      pinnedMediaPaths.add(path)
-    }
-  }
-  for (const item of media) {
-    if (item.kind === 'image') imageStore.fetchImage(id, item.path)
-    else imageStore.fetchVideo(id, item.path)
-  }
-}
-
-watch(
-  () => [renderedText.value, props.baseDirectory, workspaceId.value, imageStore.mediaGeneration] as const,
-  syncVisibleMedia,
-  {
-    immediate: true,
-    flush: 'post',
-  },
-)
-
-function mediaUrl(segment: MediaSegment): string | null {
-  return segment.kind === 'image'
-    ? imageStore.getImageUrl(segment.path)
-    : imageStore.getVideoUrl(segment.path)
-}
-
-function openImage(segment: ImageSegment): void {
-  const src = mediaUrl(segment)
-  if (!src) return
-  if (lightboxMediaPath !== segment.path) {
-    if (lightboxMediaPath) imageStore.pinMedia(lightboxMediaPath, false)
-    imageStore.pinMedia(segment.path, true)
-    lightboxMediaPath = segment.path
-    lightboxMediaGeneration = imageStore.mediaGeneration
-  }
-  lightbox.value = { src, alt: segment.label || segment.path, path: segment.path }
-}
-
-function closeLightbox(): void {
-  lightbox.value = null
-  if (lightboxMediaPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
-    imageStore.pinMedia(lightboxMediaPath, false)
-  }
-  lightboxMediaPath = null
-}
+// Remote and inline HTML images; workspace media opens its own lightbox.
+const lightbox = ref<{ src: string; alt: string } | null>(null)
 
 /** Route local file links to the existing viewer; leave browser links alone. */
 function onHtmlClick(event: MouseEvent): void {
@@ -763,17 +562,7 @@ onMounted(() => {
   scheduleMentionEnhance()
 })
 
-onUnmounted(() => {
-  clearRenderTimer()
-  if (pinnedMediaGeneration === imageStore.mediaGeneration) {
-    imageStore.releaseMedia(pinnedMediaPaths)
-  }
-  pinnedMediaPaths.clear()
-  if (lightboxMediaPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
-    imageStore.pinMedia(lightboxMediaPath, false)
-  }
-  lightboxMediaPath = null
-})
+onUnmounted(clearRenderTimer)
 
 defineExpose({ renderMarkdown })
 </script>
@@ -787,10 +576,9 @@ defineExpose({ renderMarkdown })
         :key="`${index}-${markdownRevision}`"
         :nodes="segment.nodes"
         :streaming="streaming"
-        @open="openImage"
       />
       <div v-else data-md-html v-html="segment.html" />
     </template>
   </div>
-  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" :path="lightbox.path" :workspace-id="workspaceId ?? undefined" @close="closeLightbox" />
+  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" @close="lightbox = null" />
 </template>

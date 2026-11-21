@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict
 
 from common import stream_diagnostics
 
+from ..access.guest import guest_of
 from ..agent_desktop import AgentDesktop, DesktopBusyError
 from ..desktop_leases import DesktopLease, cleanup_rpc
 from ..tools.base import Tool, ToolContext, ToolError, ToolResult
@@ -584,9 +585,7 @@ class McpServerConnection:
                         if self.agent_desktop is not None
                         else await self.desktop_lease.reserve()
                     )
-                    self.env.update(
-                        DISPLAY=binding["display"], XAUTHORITY=binding["xauthority"]
-                    )
+                    self.env.update(guest_of(accessor).desktop_environment(binding))
                     if self.desktop_activation == "server_start":
                         if self.agent_desktop is not None:
                             await self.agent_desktop.action("start")

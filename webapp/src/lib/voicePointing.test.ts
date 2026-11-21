@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from './voiceLimits'
+import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from '@opencuria/chat-core/voiceInput'
 import {
   activePointingWorkspace,
   captureDesktopFrame,
@@ -11,20 +11,17 @@ import {
 } from './voicePointing'
 
 const transport = vi.hoisted(() => ({
-  send: vi.fn(),
-  track: vi.fn(async () => {}),
-  fail: vi.fn(),
-  cancel: vi.fn(),
+  upload: vi.fn(
+    async (
+      _workspaceId: string,
+      _input: { directory: string; filename: string; body: Blob; signal?: AbortSignal },
+    ) => ({ path: '', size: 0 }),
+  ),
 }))
-vi.mock('@/stores/fileExplorer', () => ({
-  useFileExplorerStore: () => ({
-    trackAndUpload: transport.track,
-    failUpload: transport.fail,
-    cancelUpload: transport.cancel,
-  }),
+vi.mock('@/services/workspaceFiles', () => ({
+  workspaceFiles: () => ({ upload: transport.upload }),
 }))
-vi.mock('@/services/socket', () => ({ sendFilesUpload: transport.send }))
-vi.mock('@/lib/chatUpload', () => ({ fileToBase64: vi.fn(async () => 'anBlZw==') }))
+const uploaded = { path: '', size: 0 }
 
 const recordingId = '11111111-1111-4111-8111-111111111111'
 let recording: ReturnType<typeof startPointing> | null = null
@@ -146,7 +143,7 @@ describe('voice pointing', () => {
     ])
     expect(result.pointers[result.pointers.length - 1]?.target).toBeNull()
     expect(activePointingWorkspace.value).toBeNull()
-    expect(transport.send).not.toHaveBeenCalled()
+    expect(transport.upload).not.toHaveBeenCalled()
   })
 
   it('never logs browser URLs, escaped paths or images from another workspace', async () => {
@@ -180,7 +177,7 @@ describe('voice pointing', () => {
       'https://desktop.test',
     )
     expect(await recording.stop()).toBeNull()
-    expect(transport.track).not.toHaveBeenCalled()
+    expect(transport.upload).not.toHaveBeenCalled()
     expect(pointingEngaged.value).toBe(false)
   })
 
@@ -258,7 +255,7 @@ describe('voice pointing', () => {
     move('pointerdown')
     await vi.advanceTimersByTimeAsync(1000)
     await expect(recording.stop()).rejects.toThrow('cancelled')
-    expect(transport.send).not.toHaveBeenCalled()
+    expect(transport.upload).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -323,7 +320,7 @@ describe('voice pointing', () => {
     const result = recording.stop()
     frameReply(iframe, frameRequests(send)[0]!.requestId)
     expect(await result).toBeNull()
-    expect(transport.send).not.toHaveBeenCalled()
+    expect(transport.upload).not.toHaveBeenCalled()
   })
 
   it('bounds click floods and reports an explicit failure instead of growing indefinitely', async () => {
@@ -351,10 +348,10 @@ describe('voice pointing', () => {
     const { iframe, send } = viewer()
     unregister = registerPointingDesktop('workspace-a', () => iframe)
     let completeUpload!: () => void
-    transport.track.mockImplementationOnce(
+    transport.upload.mockImplementationOnce(
       () =>
-        new Promise<void>((resolve) => {
-          completeUpload = resolve
+        new Promise((resolve) => {
+          completeUpload = () => resolve(uploaded)
         }),
     )
     recording = startPointing('workspace-a', recordingId, performance.now())
@@ -364,7 +361,13 @@ describe('voice pointing', () => {
     expect(frameRequests(send)).toHaveLength(1)
     frameReply(iframe, frameRequests(send)[0]!.requestId)
     await vi.advanceTimersByTimeAsync(100)
-    expect(transport.track).toHaveBeenCalledOnce()
+    expect(transport.upload).toHaveBeenCalledExactlyOnceWith('workspace-a', {
+      directory: `/workspace/.opencuria/recordings/${recordingId}/frames`,
+      filename: '000000.jpg',
+      body: expect.any(Blob),
+      conflict: 'replace',
+      signal: expect.any(AbortSignal),
+    })
     expect(pointingEngaged.value).toBe(true)
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -492,7 +495,7 @@ describe('voice pointing', () => {
     pointAt(iframe, { event: 'down' })
     const result = (await recording.stop())!
     expect(result.frames).toHaveLength(1)
-    expect(transport.send).toHaveBeenCalledOnce()
+    expect(transport.upload).toHaveBeenCalledOnce()
     expect(result.pointers.find((point) => point.event === 'down')?.target?.path).toBe(
       result.frames[0]!.path,
     )
@@ -539,7 +542,7 @@ describe('voice pointing', () => {
       expect(gaps).toContain(8000)
       expect(gaps).toContain(16000)
       expect(gaps.slice(-2)).toEqual([30_000, 30_000])
-      expect(transport.send).toHaveBeenCalledTimes(times.length)
+      expect(transport.upload).toHaveBeenCalledTimes(times.length)
       const beforeResume = times.length
       if (resume === 'speech') recording.audioActivity()
       else if (resume === 'desktop movement') pointAt(iframe, { x: 1000 })
@@ -613,7 +616,7 @@ describe('voice pointing', () => {
     expect(lastClick.t_ms).toBe(VOICE_MAX_DURATION_MS)
     expect(lastClick.target?.kind).toBe('desktop')
     expect(lastClick.target?.path).toBe(lastFrame.path)
-    expect(transport.send).toHaveBeenCalledTimes(1201)
+    expect(transport.upload).toHaveBeenCalledTimes(1201)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -637,7 +640,7 @@ describe('voice pointing', () => {
     expect(result.pointers[1]!.t_ms).toBe(VOICE_MAX_DURATION_MS - 100)
     expect(result.pointers[3]!.target?.path).toBe('/workspace/other.png')
     expect(pointingError.value).toBeNull()
-    expect(transport.send).not.toHaveBeenCalled()
+    expect(transport.upload).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -655,7 +658,7 @@ describe('voice pointing', () => {
     frameReply(iframe, frameRequests(send)[1]!.requestId, { data: {} })
     expect(result.frames).toHaveLength(1)
     expect(pointingError.value).toBeNull()
-    expect(transport.send).toHaveBeenCalledOnce()
+    expect(transport.upload).toHaveBeenCalledOnce()
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -681,9 +684,9 @@ describe('voice pointing', () => {
   it('still reports failed uploads of accepted frames when stopping', async () => {
     const { iframe, send } = viewer()
     let rejectUpload!: (error: Error) => void
-    transport.track.mockImplementationOnce(
+    transport.upload.mockImplementationOnce(
       () =>
-        new Promise<void>((_, reject) => {
+        new Promise((_, reject) => {
           rejectUpload = reject
         }),
     )
@@ -698,6 +701,23 @@ describe('voice pointing', () => {
     rejectUpload(new Error('upload failed'))
     await rejected
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps frame uploads running on stop and aborts them on cancel', async () => {
+    const { iframe, send } = viewer()
+    transport.upload.mockImplementationOnce(() => new Promise(() => {}))
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
+    await vi.advanceTimersByTimeAsync(100)
+    const signal = transport.upload.mock.calls[0]![1].signal!
+    void recording.stop()
+    expect(signal.aborted).toBe(false)
+    recording.cancel()
+    recording = null
+    expect(signal.aborted).toBe(true)
   })
 
   it('rejects malformed framebuffer dimensions instead of assigning workspace display dimensions', async () => {

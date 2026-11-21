@@ -1,4 +1,4 @@
-"""Tests for chunked base64 file transport (runner side, fakes only)."""
+"""Tests for chunked base64 harness reads/writes (runner side, fakes only)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from src.chunking import (
 )
 from src.config import RunnerSettings
 from tests.command_support import make_interface as WebSocketInterface
-from src.services.file_download import FILE_DOWNLOAD_TOO_LARGE
 
 _SMALL_JSON = 64 * 1024
 _HALF_MIB_JSON = 512 * 1024
@@ -31,11 +30,9 @@ _HALF_MIB_JSON = 512 * 1024
 class FakeChunkService:
     """Minimal fake WorkspaceService for chunked-transfer handler tests."""
 
-    def __init__(self, *, read_content: str = "aGk=", download_content: str = "aGk=") -> None:
+    def __init__(self, *, read_content: str = "aGk=") -> None:
         self.read_content = read_content
-        self.download_content = download_content
         self.read_calls: list[tuple] = []
-        self.upload_calls: list[dict] = []
         self.write_calls: list[dict] = []
 
     # Step 4: websocket files/harness handlers call ``service.files``
@@ -52,17 +49,6 @@ class FakeChunkService:
                 workspace_id, path, max_size=max_size
             )
 
-        async def download_file(self, workspace_id, path):
-            return await self._outer._download_file_impl(workspace_id, path)
-
-        async def upload_file(
-            self, workspace_id, path, filename, content_b64, is_directory=False
-        ):
-            return await self._outer._upload_file_impl(
-                workspace_id, path, filename, content_b64,
-                is_directory=is_directory,
-            )
-
         async def write_file_content(
             self, workspace_id, path, content_b64, mode=0o644, *, allow_external=False
         ):
@@ -75,23 +61,11 @@ class FakeChunkService:
         return {"content": self.read_content, "size": len(self.read_content),
                 "truncated": False, "mime_type": "text/plain"}
 
-    async def _download_file_impl(self, workspace_id, path):
-        return {"content": self.download_content, "filename": "a.txt",
-                "is_archive": False, "size": len(self.download_content)}
-
-    async def _upload_file_impl(
-        self, workspace_id, path, filename, content_b64, is_directory=False
-    ):
-        self.upload_calls.append({"workspace_id": workspace_id, "path": path,
-                                  "filename": filename, "content_b64": content_b64,
-                                  "is_directory": is_directory})
-
     async def _write_file_content_impl(
         self, workspace_id, path, content_b64, mode=0o644
     ):
         self.write_calls.append({"workspace_id": workspace_id, "path": path,
                                  "content_b64": content_b64, "mode": mode})
-
 
 
 def _interface(service) -> WebSocketInterface:
@@ -158,47 +132,6 @@ def test_100mib_read_fits_read_cap_but_not_upload_cap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_files_read_small_stays_inline() -> None:
-    service = FakeChunkService(read_content="aGk=")
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    await interface._sio.handlers["/"]["files:read"](
-        _payload(workspace_id, "r-small", path="/workspace/a.txt"))
-    emitted = _emits(interface)
-    assert len([e for e, _ in emitted if e == "files:content_chunk"]) == 0
-    results = _emits_of(interface, "files:content_result")
-    assert len(results) == 1
-    assert results[0]["content"] == "aGk="
-    assert not results[0].get("chunked")
-    for _, payload in emitted:
-        assert len(json.dumps(payload)) < _HALF_MIB_JSON
-
-
-@pytest.mark.asyncio
-async def test_files_read_large_emits_ordered_chunks() -> None:
-    big = "QUJD" * 75_000  # 300000 base64 chars
-    service = FakeChunkService(read_content=big)
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    await interface._sio.handlers["/"]["files:read"](
-        _payload(workspace_id, "r-big", path="/workspace/a.txt"))
-    chunks = _emits_of(interface, "files:content_chunk")
-    assert len(chunks) >= 2
-    total = chunks[0]["total_chunks"]
-    assert [p["index"] for p in chunks] == list(range(total))
-    assert all(p["total_chunks"] == total for p in chunks)
-    assert all(len(p["content"]) <= CHUNK_B64_SIZE for p in chunks)
-    results = _emits_of(interface, "files:content_result")
-    assert len(results) == 1
-    final = results[0]
-    assert final["content"] == "" and final["chunked"] is True
-    assert final["total_chunks"] == total
-    assert "".join(p["content"] for p in chunks) == normalize_base64(big)
-    for _, payload in _emits(interface):
-        assert len(json.dumps(payload)) < _HALF_MIB_JSON
-
-
-@pytest.mark.asyncio
 async def test_harness_read_large_emits_ordered_chunks() -> None:
     big = "QUJD" * 75_000  # 300000 base64 chars
     service = FakeChunkService(read_content=big)
@@ -225,87 +158,6 @@ async def test_harness_read_large_emits_ordered_chunks() -> None:
 # ---------------------------------------------------------------------------
 # handler contract: chunked files upload
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pieces", [[], ["QUJD"], ["QUJD", "REVG", "R0hJ"]])
-async def test_files_upload_chunked_out_of_order_happy(pieces: list[str]) -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    request_id, path = "up-happy", "/workspace"
-    total = len(pieces)
-    handlers = interface._sio.handlers["/"]
-    await handlers["files:upload_start"](_payload(workspace_id, request_id, path=path,
-        filename="a.txt", total_chunks=total))
-    assert service.upload_calls == []
-    for index in reversed(range(total)):
-        await handlers["files:upload_chunk"](_payload(workspace_id, request_id, path=path,
-            index=index, total_chunks=total, content=pieces[index]))
-    await handlers["files:upload_finish"](_payload(workspace_id, request_id, path=path, total_chunks=total))
-    assert len(service.upload_calls) == 1
-    assert service.upload_calls[0]["content_b64"] == "".join(pieces)
-    assert service.upload_calls[0]["filename"] == "a.txt"
-    results = _emits_of(interface, "files:upload_result")
-    assert results and results[-1]["status"] == "success"
-
-
-@pytest.mark.asyncio
-async def test_files_upload_duplicate_chunk_fails_and_cleans_up() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    request_id, path = "up-dup", "/workspace"
-    handlers = interface._sio.handlers["/"]
-    await handlers["files:upload_start"](_payload(workspace_id, request_id, path=path,
-        filename="a.txt", total_chunks=2))
-    mk = lambda idx: _payload(workspace_id, request_id, path=path, index=idx,
-                              total_chunks=2, content="QUJD")
-    await handlers["files:upload_chunk"](mk(0))
-    await handlers["files:upload_chunk"](mk(0))  # duplicate -> error + cleanup
-    results = _emits_of(interface, "files:upload_result")
-    assert results and results[-1]["status"] == "error" and results[-1].get("error")
-    await handlers["files:upload_finish"](_payload(workspace_id, request_id, path=path, total_chunks=2))
-    assert service.upload_calls == []
-    assert _emits_of(interface, "files:upload_result")[-1]["status"] == "error"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("total", [-1, 65])
-async def test_files_upload_invalid_start_and_unknown_chunk(total: int) -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    handlers = interface._sio.handlers["/"]
-    await handlers["files:upload_start"](_payload(workspace_id, "up-bad", path="/workspace",
-        filename="a.txt", total_chunks=total))
-    await handlers["files:upload_chunk"](_payload(workspace_id, "up-ghost", path="/workspace",
-        index=0, total_chunks=1, content="QUJD"))  # unknown transfer
-    results = _emits_of(interface, "files:upload_result")
-    assert len(results) == 2
-    for payload in results:
-        assert payload["status"] == "error" and payload.get("error")
-        assert len(json.dumps(payload)) < _SMALL_JSON
-    assert service.upload_calls == []
-
-
-@pytest.mark.asyncio
-async def test_files_upload_missing_chunk_finish_errors() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    request_id, path = "up-gap", "/workspace"
-    handlers = interface._sio.handlers["/"]
-    await handlers["files:upload_start"](_payload(workspace_id, request_id, path=path,
-        filename="a.txt", total_chunks=2))
-    await handlers["files:upload_chunk"](_payload(workspace_id, request_id, path=path,
-        index=0, total_chunks=2, content="QUJD"))
-    await handlers["files:upload_finish"](_payload(workspace_id, request_id, path=path, total_chunks=2))
-    assert service.upload_calls == []
-    results = _emits_of(interface, "files:upload_result")
-    assert results and results[-1]["status"] == "error"
-    err = results[-1]["error"].lower()
-    assert "missing" in err or "incomplete" in err
 
 
 # ---------------------------------------------------------------------------
@@ -362,16 +214,13 @@ async def test_harness_write_unknown_chunk_errors_small() -> None:
 
 
 @pytest.mark.asyncio
-async def test_harness_write_cancel_is_scoped_to_workspace_and_transfer_kind() -> None:
+async def test_harness_write_cancel_is_scoped_to_workspace() -> None:
     service = FakeChunkService()
     interface = _interface(service)
     workspace_id = uuid.uuid4()
     handlers = interface._sio.handlers["/"]
     payload = _payload(workspace_id, "cancel", path="/workspace/a.txt")
     await handlers["harness:write_file_start"]({**payload, "total_chunks": 0})
-    await handlers["files:upload_start"](
-        {**payload, "filename": "a.txt", "total_chunks": 0}
-    )
     await handlers["harness:cancel"]({**payload, "workspace_id": str(uuid.uuid4())})
     await handlers["harness:write_file_finish"](payload)
     assert _emits_of(interface, "harness:write_file_result")[-1]["ok"] is True
@@ -381,116 +230,12 @@ async def test_harness_write_cancel_is_scoped_to_workspace_and_transfer_kind() -
     assert _emits_of(interface, "harness:write_file_result")[-1]["error"] == (
         "unknown write transfer"
     )
-    await handlers["files:upload_finish"](payload)
-    assert _emits_of(interface, "files:upload_result")[-1]["status"] == "success"
-    assert len(service.write_calls) == len(service.upload_calls) == 1
-
-
-# ---------------------------------------------------------------------------
-# download size cap (real WorkspaceService, faked runtime probes)
-# ---------------------------------------------------------------------------
-
-
-class _OversizeProbeRuntime:
-    """Fake runtime whose guest size precheck rejects an oversized file."""
-
-    def __init__(self) -> None:
-        self.calls: list[list[str]] = []
-
-    async def exec_command_wait(self, instance_id, command, workdir=None, env=None):
-        self.calls.append(list(command))
-        if command[:2] == ["realpath", "-m"]:
-            return 0, command[2] + "\n"
-        if command[:2] == ["sh", "-c"]:
-            return FILE_DOWNLOAD_TOO_LARGE, ""
-        raise AssertionError(f"unexpected command: {command!r}")
-
-
-def _oversize_download_service():
-    from src.models import WorkspaceInfo
-    from src.service import WorkspaceService
-
-    runtime = _OversizeProbeRuntime()
-    service = WorkspaceService(
-        runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
-    )
-    workspace_id = uuid.uuid4()
-    service.registry._cache[workspace_id] = WorkspaceInfo(
-        workspace_id=workspace_id,
-        instance_id="instance-1",
-        status="running",
-    )
-    return service, runtime, workspace_id
-
-
-@pytest.mark.asyncio
-async def test_download_oversize_rejected_via_size_precheck() -> None:
-    # Single-file downloads fail via a stat size precheck (no base64 read).
-    service, runtime, workspace_id = _oversize_download_service()
-    with pytest.raises(ValueError, match="maximum size"):
-        await service.files.download_file(workspace_id, "/workspace/big.bin")
-    assert not any(cmd[:1] == ["base64"] for cmd in runtime.calls)
-
-
-@pytest.mark.asyncio
-async def test_files_download_handler_reports_oversize_error() -> None:
-    service, _runtime, workspace_id = _oversize_download_service()
-    interface = _interface(service)
-    await interface._sio.handlers["/"]["files:download"](
-        _payload(workspace_id, "dl-big", path="/workspace/big.bin"))
-    results = _emits_of(interface, "files:download_result")
-    assert len(results) == 1
-    assert results[0]["content"] == "" and "maximum size" in results[0].get("error", "")
-    assert len(json.dumps(results[0])) < _SMALL_JSON
+    assert len(service.write_calls) == 1
 
 
 # ---------------------------------------------------------------------------
 # malformed workspace/payload + small result payloads
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_files_read_malformed_workspace_answers_small_error() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    await interface._sio.handlers["/"]["files:read"](
-        {"workspace_id": "not-a-uuid", "request_id": "r-bad",
-         "path": "/workspace/a.txt"})
-    results = _emits_of(interface, "files:content_result")
-    assert len(results) == 1
-    assert results[0]["workspace_id"] == "not-a-uuid"
-    assert results[0]["request_id"] == "r-bad"
-    assert results[0]["content"] == "" and results[0].get("error")
-    assert len(json.dumps(results[0])) < _SMALL_JSON
-    assert service.read_calls == []
-
-
-@pytest.mark.asyncio
-async def test_files_read_non_string_path_answers_small_error() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    await interface._sio.handlers["/"]["files:read"](
-        {"workspace_id": str(workspace_id), "request_id": "r-path",
-         "path": ["not", "a", "string"]})
-    results = _emits_of(interface, "files:content_result")
-    assert len(results) == 1 and results[0].get("error")
-    assert len(json.dumps(results[0])) < _SMALL_JSON
-    assert service.read_calls == []
-
-
-@pytest.mark.asyncio
-async def test_files_download_malformed_workspace_answers_small_error() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    await interface._sio.handlers["/"]["files:download"](
-        {"workspace_id": "!!!", "request_id": "dl-bad",
-         "path": "/workspace/a.txt"})
-    results = _emits_of(interface, "files:download_result")
-    assert len(results) == 1
-    assert results[0]["workspace_id"] == "!!!"
-    assert results[0].get("error")
-    assert len(json.dumps(results[0])) < _SMALL_JSON
 
 
 @pytest.mark.asyncio
@@ -521,34 +266,6 @@ async def test_harness_write_malformed_workspace_answers_small_error(stage: str)
     assert results[0]["workspace_id"] == "bad" and results[0].get("error")
     assert len(json.dumps(results[0])) < _SMALL_JSON
     assert service.write_calls == []
-
-
-@pytest.mark.asyncio
-async def test_files_upload_chunk_malformed_workspace_answers_small_error() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    await interface._sio.handlers["/"]["files:upload_chunk"](
-        {"workspace_id": "bad", "request_id": "up-bad",
-         "path": "/workspace", "index": 0, "total_chunks": 1,
-         "content": "QUJD"})
-    results = _emits_of(interface, "files:upload_result")
-    assert len(results) == 1
-    assert results[0]["workspace_id"] == "bad"
-    assert results[0]["status"] == "error" and results[0].get("error")
-    assert len(json.dumps(results[0])) < _SMALL_JSON
-    assert service.upload_calls == []
-
-
-@pytest.mark.asyncio
-async def test_files_upload_chunk_missing_request_id_stays_silent() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    await interface._sio.handlers["/"]["files:upload_chunk"](
-        {"workspace_id": str(workspace_id), "path": "/workspace",
-         "index": 0, "total_chunks": 1, "content": "QUJD"})
-    assert _emits_of(interface, "files:upload_result") == []
-    assert service.upload_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -596,54 +313,6 @@ def _cap_service(monkeypatch, cap_bytes: int):
 
 def _raw_bytes(n: int) -> bytes:
     return bytes((i % 251 for i in range(n)))
-
-
-@pytest.mark.asyncio
-async def test_upload_file_invalid_base64_rejected_before_mkdir(monkeypatch) -> None:
-    service, runtime, workspace_id = _cap_service(monkeypatch, 16)
-    with pytest.raises(ValueError, match="Invalid base64"):
-        await service.files.upload_file(
-            workspace_id, "/workspace", "a.bin", "!!!not-base64!!!"
-        )
-    # Only the read-only realpath probe may run; no mkdir side effect.
-    assert all(cmd[:2] == ["realpath", "-m"] for cmd in runtime.commands)
-    assert not any(cmd[:2] == ["mkdir", "-p"] for cmd in runtime.commands)
-    assert runtime.archives == []
-
-
-@pytest.mark.asyncio
-async def test_upload_file_decoded_oversize_rejected_before_mkdir(monkeypatch) -> None:
-    import base64
-
-    service, runtime, workspace_id = _cap_service(monkeypatch, 16)
-    oversize = base64.b64encode(_raw_bytes(17)).decode()
-    with pytest.raises(ValueError, match="maximum size"):
-        await service.files.upload_file(workspace_id, "/workspace", "a.bin", oversize)
-    assert all(cmd[:2] == ["realpath", "-m"] for cmd in runtime.commands)
-    assert not any(cmd[:2] == ["mkdir", "-p"] for cmd in runtime.commands)
-    assert runtime.archives == []
-
-
-@pytest.mark.asyncio
-async def test_upload_file_exact_cap_allowed(monkeypatch) -> None:
-    import base64
-
-    service, runtime, workspace_id = _cap_service(monkeypatch, 16)
-    exact = base64.b64encode(_raw_bytes(16)).decode()
-    await service.files.upload_file(workspace_id, "/workspace", "a.bin", exact)
-    assert runtime.archives != []
-    assert any(cmd[:2] == ["mkdir", "-p"] for cmd in runtime.commands)
-
-
-@pytest.mark.asyncio
-async def test_upload_file_whitespace_normalized_and_accepted(monkeypatch) -> None:
-    import base64
-
-    service, runtime, workspace_id = _cap_service(monkeypatch, 16)
-    exact = base64.b64encode(_raw_bytes(16)).decode()
-    noisy = "\n".join(exact[i : i + 60] for i in range(0, len(exact), 60))
-    await service.files.upload_file(workspace_id, "/workspace", "a.bin", noisy)
-    assert runtime.archives != []
 
 
 @pytest.mark.asyncio

@@ -94,12 +94,12 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
-    "react-native-enriched-markdown": "1.0.1",
+    "react-native-enriched-markdown": "1.1.1",
     "react-native-gesture-handler": "~2.32.0",
     "react-native-keyboard-controller": "1.22.9",
     "react-native-maps": "1.27.2",
     "react-native-pager-view": "8.0.2",
-    "react-native-reanimated": "4.5.1",
+    "react-native-reanimated": "4.5.5",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
     "react-native-svg": "15.15.4",
@@ -118,7 +118,15 @@
     "react-test-renderer": "19.2.3",
     "typescript": "~6.0.3"
   },
+  "enriched-markdown": {
+    "enableVideo": false
+  },
   "expo": {
+    "install": {
+      "exclude": [
+        "react-native-reanimated"
+      ]
+    },
     "autolinking": {
       "android": {
         "buildFromSource": [

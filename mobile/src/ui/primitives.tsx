@@ -14,8 +14,8 @@ export type { ButtonProps, IconButtonProps } from "./controls.types";
 export type { NativeModalProps } from "./NativeModal";
 export { NativeModal } from "./NativeModal";
 
-/** `neutral` carries no status color, e.g. for notices inside the transcript. */
-export type BannerTone = "info" | "success" | "warning" | "error" | "neutral";
+/** `neutral` (default) carries no status color, e.g. for notices in the transcript. */
+export type BannerTone = "neutral" | "success" | "warning" | "error";
 export interface BannerProps {
   tone?: BannerTone;
   title?: string;
@@ -29,7 +29,7 @@ export interface BannerProps {
 
 /** Inline status feedback for errors or notices that belong beside their content. */
 export function Banner({
-  tone = "info",
+  tone = "neutral",
   title,
   message,
   actionLabel,
@@ -46,9 +46,7 @@ export function Banner({
         ? theme.warning
         : tone === "success"
           ? theme.success
-          : tone === "neutral"
-            ? theme.text
-            : theme.info;
+          : theme.text;
   return (
     <View
       accessibilityRole="alert"

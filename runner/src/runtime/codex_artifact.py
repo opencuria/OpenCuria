@@ -16,60 +16,162 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 VERSION = "0.166.0"
-MAX_ARCHIVE_SIZE = 150 * 1024 * 1024
-MAX_PACKAGE_SIZE = 400 * 1024 * 1024
-FILES = frozenset(
-    {
-        "bin/codex-app-server",
-        "bin/codex-code-mode-host",
-        "bin/codex-exec-server",
-        "codex-package.json",
-        "codex-path/rg",
-        "codex-resources/bwrap",
-    }
-)
+RELEASE_URL = "https://github.com/openai/codex/releases/download/rust-v0.166.0/"
 DIRECTORIES = frozenset({"bin", "codex-path", "codex-resources"})
-PINS = {
-    "x86_64-unknown-linux-musl": (
-        "e69a1b62488288f702186b9c216a8e3930e45475f70124381d4e1c633f2e0c76",
-        155332411,
+RENAME_NOREPLACE = 1
+_MIB = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class CodexTarget:
+    """One official app-server package: pinned bytes, exact layout and limits."""
+
+    sha256: str
+    size: int
+    max_archive_size: int
+    max_package_size: int
+    resources: frozenset[str]
+    executable_suffix: str = ""
+
+    @property
+    def entrypoint(self) -> str:
+        """Package-relative app-server executable."""
+        return "bin/codex-app-server" + self.executable_suffix
+
+    @property
+    def exec_server(self) -> str:
+        """Package-relative exec-server executable."""
+        return "bin/codex-exec-server" + self.executable_suffix
+
+    @property
+    def files(self) -> frozenset[str]:
+        """Every regular file of the package; nothing else is accepted."""
+        suffix = self.executable_suffix
+        return frozenset(
+            {
+                self.entrypoint,
+                self.exec_server,
+                "bin/codex-code-mode-host" + suffix,
+                "codex-package.json",
+                "codex-path/rg" + suffix,
+                *(f"codex-resources/{name}" for name in self.resources),
+            }
+        )
+
+
+# Official release assets. Limits sit just above the measured sizes (Windows:
+# 165,654,104 B archive, 479,695,627 B of files; its sandbox helpers replace bwrap).
+TARGETS = {
+    "x86_64-unknown-linux-musl": CodexTarget(
+        sha256="e69a1b62488288f702186b9c216a8e3930e45475f70124381d4e1c633f2e0c76",
+        size=155332411,
+        max_archive_size=150 * _MIB,
+        max_package_size=400 * _MIB,
+        resources=frozenset({"bwrap"}),
     ),
-    "aarch64-unknown-linux-musl": (
-        "50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
-        145150661,
+    "aarch64-unknown-linux-musl": CodexTarget(
+        sha256="50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
+        size=145150661,
+        max_archive_size=150 * _MIB,
+        max_package_size=400 * _MIB,
+        resources=frozenset({"bwrap"}),
+    ),
+    "x86_64-pc-windows-msvc": CodexTarget(
+        sha256="2476ec968c64e9ae47f449446320e47a54d16f5436ce6eb95eec758584f12eb6",
+        size=165654104,
+        max_archive_size=168 * _MIB,
+        max_package_size=480 * _MIB,
+        resources=frozenset(
+            {"codex-command-runner.exe", "codex-windows-sandbox-setup.exe"}
+        ),
+        executable_suffix=".exe",
     ),
 }
-RELEASE_URL = "https://github.com/openai/codex/releases/download/rust-v0.166.0/"
+# Both Linux libc variants use the official static musl package.
+PLATFORM_TARGETS = {
+    "linux-x64": "x86_64-unknown-linux-musl",
+    "linux-x64-musl": "x86_64-unknown-linux-musl",
+    "linux-arm64": "aarch64-unknown-linux-musl",
+    "linux-arm64-musl": "aarch64-unknown-linux-musl",
+    "win32-x64": "x86_64-pc-windows-msvc",
+}
+
+
+def target_spec(target: str) -> CodexTarget:
+    """Return the pinned package description of an approved target."""
+    try:
+        return TARGETS[target]
+    except (KeyError, TypeError):
+        raise ValueError("Unsupported Codex target") from None
 
 
 def target_for_platform(platform: str) -> str:
-    """Use the official static musl package on both supported libc variants."""
-    arch = "x86_64" if platform in {"linux-x64", "linux-x64-musl"} else "aarch64"
-    if platform not in {
-        "linux-x64",
-        "linux-x64-musl",
-        "linux-arm64",
-        "linux-arm64-musl",
-    }:
-        raise ValueError("Unsupported Codex platform")
-    return arch + "-unknown-linux-musl"
+    """Map a guest platform key to its official package target."""
+    try:
+        return PLATFORM_TARGETS[platform]
+    except (KeyError, TypeError):
+        raise ValueError("Unsupported Codex platform") from None
+
+
+def package_url(target: str) -> str:
+    """Fixed release asset URL of a target package."""
+    target_spec(target)
+    return RELEASE_URL + f"codex-app-server-package-{target}.tar.gz"
+
+
+def archive_size_limits() -> dict[str, int]:
+    """Approved package URLs and their compressed size limits."""
+    return {package_url(t): spec.max_archive_size for t, spec in TARGETS.items()}
+
+
+def package_metadata(target: str) -> dict:
+    """The exact ``codex-package.json`` an official target package carries."""
+    spec = target_spec(target)
+    return {
+        "layoutVersion": 1,
+        "version": VERSION,
+        "target": target,
+        "variant": "codex-app-server",
+        "entrypoint": spec.entrypoint,
+        "execServer": spec.exec_server,
+        "resourcesDir": "codex-resources",
+        "pathDir": "codex-path",
+    }
 
 
 def manifest_entry() -> dict:
     """Return the pinned official standalone app-server package specification."""
     platforms = {}
-    for platform in ("linux-x64", "linux-x64-musl", "linux-arm64", "linux-arm64-musl"):
-        target = target_for_platform(platform)
-        digest, size = PINS[target]
+    for platform, target in PLATFORM_TARGETS.items():
+        spec = TARGETS[target]
         platforms[platform] = {
-            "url": RELEASE_URL + f"codex-app-server-package-{target}.tar.gz",
-            "sha256": digest,
-            "size": size,
+            "url": package_url(target),
+            "sha256": spec.sha256,
+            "size": spec.size,
         }
     return {"version": VERSION, "platforms": platforms}
+
+
+def cygwin_runtime() -> bool:
+    """Windows guests run this module in MSYS2 (Cygwin) Python on NTFS."""
+    return sys.platform in {"cygwin", "msys"}
+
+
+def version_environment(target: str, home: str) -> dict[str, str]:
+    """Minimal ``--version`` environment; profile and config stay in ``home``."""
+    env = {"HOME": home, "CODEX_HOME": home, "PATH": "/usr/bin:/bin"}
+    if target_spec(target).executable_suffix == ".exe":
+        # Native Windows programs resolve profile and temp directories from
+        # these. The Cygwin runtime converts the paths and adds SYSTEMROOT and
+        # WINDIR itself.
+        for name in ("USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
+            env[name] = home
+    return env
 
 
 def sha_file(path: Path) -> str:
@@ -84,27 +186,29 @@ def sha_file(path: Path) -> str:
 class _BoundedPackageStream:
     """Bound all decompressed TAR bytes, including metadata and padding."""
 
-    def __init__(self, stream: gzip.GzipFile) -> None:
+    def __init__(self, stream: gzip.GzipFile, limit: int) -> None:
         self.stream = stream
+        self.limit = limit
         self.received = 0
 
     def read(self, size: int = -1) -> bytes:
         # TAR payload reads are streamed; oversized PAX/header allocations fail.
-        if size < 0 or size > 1024 * 1024:
+        if size < 0 or size > _MIB:
             raise ValueError("Oversized Codex archive metadata")
         data = self.stream.read(size)
         self.received += len(data)
-        if self.received > MAX_PACKAGE_SIZE + 1024 * 1024:
+        if self.received > self.limit + _MIB:
             raise ValueError("Codex archive exceeds decompression limit")
         return data
 
 
 def inspect_package(path: Path, target: str) -> dict[str, str]:
     """Validate every archive entry and hash all payload bytes before execution."""
+    spec = target_spec(target)
     if (
         path.is_symlink()
         or not path.is_file()
-        or path.stat().st_size > MAX_ARCHIVE_SIZE
+        or path.stat().st_size > spec.max_archive_size
     ):
         raise ValueError("Unsafe Codex archive")
     found = set()
@@ -112,7 +216,9 @@ def inspect_package(path: Path, target: str) -> dict[str, str]:
     total = 0
     with (
         gzip.open(path, "rb") as compressed,
-        tarfile.open(fileobj=_BoundedPackageStream(compressed), mode="r|") as archive,
+        tarfile.open(
+            fileobj=_BoundedPackageStream(compressed, spec.max_package_size), mode="r|"
+        ) as archive,
     ):
         for member in archive:
             name = member.name
@@ -125,10 +231,10 @@ def inspect_package(path: Path, target: str) -> dict[str, str]:
             found.add(name)
             if name in DIRECTORIES and member.isdir() and member.size == 0:
                 continue
-            if name not in FILES or not member.isfile() or member.size <= 0:
+            if name not in spec.files or not member.isfile() or member.size <= 0:
                 raise ValueError("Unexpected Codex archive entry")
             total += member.size
-            if total > MAX_PACKAGE_SIZE:
+            if total > spec.max_package_size:
                 raise ValueError("Codex package exceeds size limit")
             if name == "codex-package.json" and member.size > 4096:
                 raise ValueError("Invalid Codex package metadata")
@@ -140,18 +246,11 @@ def inspect_package(path: Path, target: str) -> dict[str, str]:
                 if name == "codex-package.json":
                     metadata.extend(block)
             hashes[name] = digest.hexdigest()
-            if name == "codex-package.json" and json.loads(metadata) != {
-                "layoutVersion": 1,
-                "version": VERSION,
-                "target": target,
-                "variant": "codex-app-server",
-                "entrypoint": "bin/codex-app-server",
-                "execServer": "bin/codex-exec-server",
-                "resourcesDir": "codex-resources",
-                "pathDir": "codex-path",
-            }:
+            if name == "codex-package.json" and json.loads(
+                metadata
+            ) != package_metadata(target):
                 raise ValueError("Invalid Codex package metadata")
-    if found != FILES | DIRECTORIES:
+    if found != spec.files | DIRECTORIES:
         raise ValueError("Incomplete Codex package")
     return hashes
 
@@ -174,7 +273,16 @@ def safe_directory(path: Path, *, create: bool = False) -> None:
 
 
 def verify_tree(root: Path, hashes: dict[str, str]) -> None:
-    """Reject missing, extra, linked, mutable or changed installed package bytes."""
+    """Reject missing, extra, linked, mutable or changed installed package bytes.
+
+    ``hashes`` holds every package file. On NTFS the Cygwin runtime synthesizes
+    modes: directories always report owner-write and execute bits follow file
+    names, so there only the read-only state of files is checked. Entry set,
+    types, link counts and bytes stay exact everywhere.
+    """
+    if not any(set(hashes) == spec.files for spec in TARGETS.values()):
+        raise ValueError("Incomplete Codex package hashes")
+    posix_modes = not cygwin_runtime()
     safe_directory(root)
     seen = set()
     for directory, dirs, files in os.walk(root, followlinks=False):
@@ -184,7 +292,7 @@ def verify_tree(root: Path, hashes: dict[str, str]) -> None:
             mode = path.lstat().st_mode
             seen.add(relative)
             if relative in DIRECTORIES:
-                if not stat.S_ISDIR(mode) or mode & 0o222:
+                if not stat.S_ISDIR(mode) or (posix_modes and mode & 0o222):
                     raise ValueError("Unsafe installed Codex directory")
             elif (
                 relative not in hashes
@@ -192,18 +300,44 @@ def verify_tree(root: Path, hashes: dict[str, str]) -> None:
                 or path.lstat().st_nlink != 1
                 or mode & 0o222
                 or sha_file(path) != hashes[relative]
-                or stat.S_IMODE(mode)
-                != (0o444 if relative.endswith(".json") else 0o555)
+                or (
+                    posix_modes
+                    and stat.S_IMODE(mode)
+                    != (0o444 if relative.endswith(".json") else 0o555)
+                )
             ):
                 raise ValueError("Changed installed Codex package")
-    if seen != FILES | DIRECTORIES or root.stat().st_mode & 0o222:
+    if seen != set(hashes) | DIRECTORIES or (
+        posix_modes and root.stat().st_mode & 0o222
+    ):
         raise ValueError("Incomplete installed Codex package")
 
 
+def _renameat2() -> tuple[Any, int]:
+    """Return the C runtime's renameat2 and that runtime's AT_FDCWD."""
+    if not cygwin_runtime():
+        return ctypes.CDLL(None, use_errno=True).renameat2, -100
+    # dlopen(NULL) only exposes the Python executable on Cygwin; the runtime
+    # DLL itself exports renameat2.
+    for name in ("msys-2.0.dll", "cygwin1.dll"):
+        try:
+            return ctypes.CDLL(name, use_errno=True).renameat2, -2
+        except (OSError, AttributeError):
+            continue
+    raise OSError(errno.ENOSYS, "renameat2 is unavailable")
+
+
 def publish_directory(stage: Path, final: Path) -> None:
-    """Atomically publish without replacing even an empty concurrent directory."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    rename = libc.renameat2
+    """Atomically publish without replacing even an empty concurrent directory.
+
+    Invariant: ``final`` is absent or one complete verified tree, moved by a
+    single rename that fails if anything holds the name. A directory cannot be
+    created first and filled atomically, and plain rename() replaces an empty
+    directory, so both runtimes use renameat2(RENAME_NOREPLACE): Cygwin
+    implements it as an NTFS rename without ReplaceIfExists (EEXIST on
+    collision). The guest lock only serializes cooperating installers.
+    """
+    rename, at_fdcwd = _renameat2()
     rename.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -212,7 +346,8 @@ def publish_directory(stage: Path, final: Path) -> None:
         ctypes.c_uint,
     ]
     rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(stage), -100, os.fsencode(final), 1) != 0:
+    source, destination = os.fsencode(stage), os.fsencode(final)
+    if rename(at_fdcwd, source, at_fdcwd, destination, RENAME_NOREPLACE) != 0:
         error = ctypes.get_errno()
         if error == errno.EEXIST:
             raise ValueError("Codex installation already exists")
@@ -225,10 +360,10 @@ def guest_main() -> None:
     root = Path(root_name)
     source = Path(source_name)
     hashes = json.loads(encoded_hashes)
+    spec = target_spec(target)
     if (
         action not in {"install", "verify"}
-        or set(hashes) != FILES
-        or target not in PINS
+        or set(hashes) != spec.files
         or not re.fullmatch(r"[0-9a-f]{64}", digest)
         or not all(re.fullmatch(r"[0-9a-f]{64}", v) for v in hashes.values())
     ):
@@ -252,7 +387,7 @@ def guest_main() -> None:
             if (
                 source.is_symlink()
                 or not source.is_file()
-                or source.stat().st_size > MAX_ARCHIVE_SIZE
+                or source.stat().st_size > spec.max_archive_size
                 or sha_file(source) != digest
                 or inspect_package(source, target) != hashes
             ):
@@ -261,7 +396,7 @@ def guest_main() -> None:
             with tarfile.open(source, "r:gz") as archive:
                 for directory in DIRECTORIES:
                     (stage / directory).mkdir(mode=0o755)
-                for name in sorted(FILES):
+                for name in sorted(spec.files):
                     with (
                         archive.extractfile(name) as src,
                         (stage / name).open("xb") as dst,
@@ -284,8 +419,8 @@ def guest_main() -> None:
         verify_tree(final, hashes)
         with tempfile.TemporaryDirectory(prefix="opencuria-codex-version-") as home:
             output = subprocess.check_output(
-                [str(final / "bin/codex-app-server"), "--version"],
-                env={"HOME": home, "CODEX_HOME": home, "PATH": "/usr/bin:/bin"},
+                [str(final / spec.entrypoint), "--version"],
+                env=version_environment(target, home),
                 stderr=subprocess.DEVNULL,
                 timeout=20,
             )

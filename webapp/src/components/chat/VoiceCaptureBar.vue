@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useElementSize } from '@vueuse/core'
-import { Loader2, MousePointer2, Send, Square, X } from '@lucide/vue'
+import { CloudOff, Loader2, MousePointer2, Send, Square, X } from '@lucide/vue'
+import { voiceWaveformBars } from '@opencuria/chat-core/voiceInput'
 import { Button } from '@/components/ui/button'
 import { pointingEngaged, pointingError } from '@/lib/voicePointing'
 import { voiceCaptureControls as controls } from '@/lib/voiceCaptureControls'
@@ -12,14 +13,12 @@ const recording = computed(() => controls.value?.state === 'recording')
 const waveform = ref<HTMLElement | null>(null)
 const { width } = useElementSize(waveform)
 // Newest first: the row is reversed so fresh samples enter at the right edge.
-const bars = computed(() => {
-  const levels = controls.value?.levels ?? []
-  // Cover the measured width with 3px bars and 3px gaps, padding history with quiet dots.
-  const count = Math.ceil((width.value + 3) / 6)
-  return Array.from({ length: count }, (_, index) =>
-    Math.round(3 + Math.min(1, levels[levels.length - 1 - index] ?? 0) * 25),
-  )
-})
+// Cover the measured width with 3px bars and 3px gaps, padding history with quiet dots.
+const bars = computed(() =>
+  voiceWaveformBars(controls.value?.levels ?? [], Math.ceil((width.value + 3) / 6)).map((level) =>
+    Math.round(3 + level * 25),
+  ),
+)
 </script>
 
 <template>
@@ -65,6 +64,14 @@ const bars = computed(() => {
             ? 'Voice input needs attention.'
             : 'Voice input needs attention. Review it in the composer.'
         }}
+      </span>
+      <span
+        v-else-if="controls.state === 'processing' && controls.waiting"
+        class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground"
+        data-testid="voice-waiting"
+      >
+        <CloudOff :size="14" class="shrink-0" />
+        <span class="truncate">Waiting for connection… The recording is kept.</span>
       </span>
       <span v-else class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <Loader2 :size="14" class="shrink-0 animate-spin" />

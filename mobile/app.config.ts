@@ -17,8 +17,16 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     scheme: "opencuria",
     orientation: "default",
     userInterfaceStyle: "automatic",
+    // Rendered from brand/opencuria-app-icon.svg; also the Android legacy icon.
     icon: "./assets/icon.png",
     ios: {
+      // iOS 18+ home screen appearances; dark keeps its alpha for the system
+      // backdrop, tinted is grayscale on black.
+      icon: {
+        light: "./assets/icon.png",
+        dark: "./assets/icon-dark.png",
+        tinted: "./assets/icon-tinted.png",
+      },
       bundleIdentifier: development
         ? "com.opencuria.mobile.dev"
         : "com.opencuria.mobile",
@@ -57,9 +65,12 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       package: development
         ? "com.opencuria.mobile.dev"
         : "com.opencuria.mobile",
+      // The mark stays inside the 66dp safe zone of the 108dp canvas;
+      // monochrome feeds Android 13+ themed icons.
       adaptiveIcon: {
         foregroundImage: "./assets/adaptive-icon.png",
-        backgroundColor: "#F4F4F6",
+        backgroundImage: "./assets/adaptive-icon-background.png",
+        monochromeImage: "./assets/adaptive-icon-monochrome.png",
       },
       // Camera for chat photos; the rest for apps agents publish, which run
       // inside OpenCuria and request them at runtime like in Expo Go.
@@ -118,7 +129,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
             "Choose photos to share with your OpenCuria agent or an app you open in OpenCuria.",
           cameraPermission:
             "Take photos for your OpenCuria conversation or an app you open in OpenCuria.",
-          microphonePermission: "Record audio in apps you open in OpenCuria.",
+          microphonePermission:
+            "Dictate messages to your OpenCuria agent and record audio in apps you open in OpenCuria.",
         },
       ],
       [
@@ -127,7 +139,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         // accepts http:// for local-network hosts, public hosts need https://.
         { android: { usesCleartextTraffic: true } },
       ],
-      "react-native-enriched-markdown",
       [
         "react-native-maps",
         // Maps in published apps: Android needs a Google Maps key at build

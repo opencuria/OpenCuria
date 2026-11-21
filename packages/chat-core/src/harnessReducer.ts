@@ -684,10 +684,8 @@ function furthestPartState(
  * Reconciliation is by message/part ID and position order — never by
  * comparing content lengths across turns. Same-turn rows merge (longest
  * known output wins per row so stale snapshots preserve already-received
- * data); optimistic user rows (`local-*`) the server has not echoed yet
- * are carried over; server-echoed locals are dropped in favor of the
- * server ids. Messages and parts sort by `position` with creation-order
- * fallback.
+ * data); optimistic prompts follow `reconcileOptimisticPrompts`. Messages
+ * and parts sort by `position` with creation-order fallback.
  */
 export function mergeBusyFetchedMessages(
   previous: HarnessMessage[],
@@ -712,41 +710,15 @@ export function mergeBusyFetchedMessages(
     mergeAssistantParts(live, serverMsg);
   }
 
-  // Keep live turns missing from a stale snapshot and optimistic user
-  // messages until the server echoes them.
+  // Keep live turns missing from a stale snapshot.
   const extras: HarnessMessage[] = [];
   for (const live of previous) {
-    if (incomingIds.has(live.id)) continue;
-    if (!isLocalId(live.id)) {
-      // A server-id row missing from the snapshot is a stale-snapshot
-      // hole (or a deleted suffix after edit/fork): keep completed rows
-      // so already-received data is not lost mid-run.
-      if (live.role === "assistant" || live.role === "user") extras.push(live);
-      continue;
-    }
-    if (live.role === "user") {
-      // Only pair an optimistic user with a newly echoed user row
-      // *after* the last user known before this snapshot. Comparing against
-      // any identical prompt would erase a valid repeated follow-up.
-      const lastKnownUserPosition = Math.max(
-        -1,
-        ...previous
-          .filter((m) => m.role === "user" && !isLocalId(m.id))
-          .map((m) => messagePosition(m) ?? -1),
-      );
-      // The backend persists prompts stripped; upload mentions end with a
-      // separator space, so compare the same normalized text.
-      const prompt = live.content.trim();
-      const echoed = incoming.some(
-        (m) =>
-          m.role === "user" &&
-          !isLocalId(m.id) &&
-          m.content.trim() === prompt &&
-          (messagePosition(m) ?? -1) > lastKnownUserPosition,
-      );
-      if (!echoed) extras.push(live);
-      continue;
-    }
+    // Optimistic prompts are handed over below.
+    if (incomingIds.has(live.id) || isLocalId(live.id)) continue;
+    // A server-id row missing from the snapshot is a stale-snapshot hole (or
+    // a deleted suffix after edit/fork): keep completed rows so
+    // already-received data is not lost mid-run.
+    if (live.role === "assistant" || live.role === "user") extras.push(live);
   }
 
   const combined = sortHarnessMessages([...incoming, ...extras]);
@@ -754,7 +726,72 @@ export function mergeBusyFetchedMessages(
   for (const message of combined) {
     message.parts = sortHarnessParts(message.parts);
   }
-  return combined;
+  return reconcileOptimisticPrompts(previous, combined);
+}
+
+/** True for a prompt shown before the server stored it (`local-user-*`). */
+export function isOptimisticPrompt(message: HarnessMessage): boolean {
+  return message.role === "user" && isLocalId(message.id);
+}
+
+/**
+ * Hand optimistic prompts over to a server snapshot.
+ *
+ * `next` is the reconciled snapshot. A prompt the snapshot echoes passes its
+ * `client_key` to the echo, so clients keep the bubble they already render;
+ * a prompt the server has not stored yet stays. Rows known before keep their
+ * keys. Only user rows the client did not know yet, after the last known
+ * one, can echo: an identical earlier prompt never takes a new one's place.
+ */
+export function reconcileOptimisticPrompts(
+  previous: HarnessMessage[],
+  next: HarnessMessage[],
+): HarnessMessage[] {
+  const keys = new Map<string, string>();
+  const known = new Set<string>();
+  let lastKnownUser = -1;
+  for (const message of previous) {
+    if (isLocalId(message.id)) continue;
+    known.add(message.id);
+    if (message.client_key) keys.set(message.id, message.client_key);
+    if (message.role === "user")
+      lastKnownUser = Math.max(lastKnownUser, messagePosition(message) ?? -1);
+  }
+  const prompts = previous.filter(isOptimisticPrompt);
+  if (!keys.size && !prompts.length) return next;
+  const result = next.map((message) => {
+    const key = keys.get(message.id);
+    return key && message.client_key !== key
+      ? { ...message, client_key: key }
+      : message;
+  });
+  const claimed = new Set<number>();
+  const pending: HarnessMessage[] = [];
+  for (const prompt of prompts) {
+    // The backend persists prompts stripped; compare the same text.
+    const text = prompt.content.trim();
+    const index = result.findIndex((message, position) => {
+      if (claimed.has(position) || message.role !== "user") return false;
+      if (isLocalId(message.id) || known.has(message.id)) return false;
+      const order = messagePosition(message);
+      return (
+        (order === undefined || order > lastKnownUser) &&
+        message.content.trim() === text
+      );
+    });
+    if (index < 0) {
+      // A copy: callers stamp snapshot rows, while `previous` may be frozen.
+      if (!result.some((message) => message.id === prompt.id))
+        pending.push({ ...prompt, parts: prompt.parts.map((p) => ({ ...p })) });
+      continue;
+    }
+    claimed.add(index);
+    result[index] = {
+      ...result[index]!,
+      client_key: prompt.client_key ?? prompt.id,
+    };
+  }
+  return pending.length ? sortHarnessMessages([...result, ...pending]) : result;
 }
 
 const STREAM_PART_TYPES = new Set(["text", "reasoning"]);

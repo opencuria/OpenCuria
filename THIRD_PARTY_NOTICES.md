@@ -57,6 +57,19 @@ license notice is retained in `packages/computer-use/third_party/` and included
 in the installed runtime's `NOTICES.txt`; the upstream copy is available at
 https://github.com/nodejs/node/blob/v22.23.2/LICENSE.
 
+## noVNC web client (Windows workspace desktop)
+
+The runner ships the unmodified **noVNC 1.7.0** release archive
+(`runner/src/runtime/assets/novnc-1.7.0.tar.gz`,
+[novnc/noVNC](https://github.com/novnc/noVNC)) and serves it as the viewer of
+Windows workspaces, whose display QEMU provides. The archive keeps every
+upstream license file. Its JavaScript core (`core/**/*.js`, `app/*.js`) is
+licensed under the **Mozilla Public License 2.0**; HTML and CSS under the
+**BSD 2-Clause License**; the Orbitron font under the **SIL Open Font License
+1.1**; images under **CC BY-SA 3.0**; the vendored `pako` under the **MIT
+License**. The source of the MPL-licensed files is the archive itself and
+<https://github.com/novnc/noVNC/tree/v1.7.0>.
+
 ## Claude Agent SDK for Python
 
 The backend depends on the unmodified `claude-agent-sdk` Python distribution,

@@ -28,7 +28,7 @@ vi.mock('@/services/git.api', () => ({
   readGitFileContent: vi.fn(),
   runGitOperation: vi.fn(),
 }))
-vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn() }))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
 vi.mock('@/stores/fileExplorer', () => ({
   useFileExplorerStore: () => ({
     reset: mocks.reset,
@@ -45,10 +45,6 @@ vi.mock('@/stores/git', () => ({
 vi.mock('@/stores/desktop', () => ({
   useDesktopStore: () => ({ reset: mocks.reset, close: vi.fn() }),
 }))
-vi.mock('@/stores/workspaceImages', () => ({
-  useWorkspaceImageStore: () => ({ reset: mocks.reset }),
-}))
-vi.mock('@/composables/useWorkspaceFileEvents', () => ({ useWorkspaceFileEvents: vi.fn() }))
 vi.mock('@/components/ui/sidebar', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/ui/sidebar')>()),
   SidebarTrigger: { template: '<button aria-label="Toggle sidebar" />' },

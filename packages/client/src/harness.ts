@@ -4,6 +4,8 @@ import type {
   HarnessMessageIn,
   HarnessPart,
   HarnessPermissionResponse,
+  HarnessScheduledMessage,
+  HarnessScheduledMessageIn,
   HarnessSessionCreateIn,
   HarnessSessionMode,
   HarnessSessionPatchIn,
@@ -173,6 +175,51 @@ export function createHarnessApi(getApi: () => ApiClient) {
       request<HarnessSteer>(
         "DELETE",
         `/harness/sessions/${segment(sessionId)}/steer/${segment(steerId)}`,
+        undefined,
+        signal,
+      ),
+    scheduleMessage: (
+      sessionId: string,
+      input: HarnessScheduledMessageIn,
+      signal?: AbortSignal,
+    ) =>
+      request<HarnessScheduledMessage>(
+        "POST",
+        `/harness/sessions/${segment(sessionId)}/scheduled-messages`,
+        input,
+        signal,
+      ),
+    rescheduleMessage: (
+      sessionId: string,
+      messageId: string,
+      sendAt: string,
+      signal?: AbortSignal,
+    ) =>
+      request<HarnessScheduledMessage>(
+        "PATCH",
+        `/harness/sessions/${segment(sessionId)}/scheduled-messages/${segment(messageId)}`,
+        { send_at: sendAt },
+        signal,
+      ),
+    withdrawScheduledMessage: (
+      sessionId: string,
+      messageId: string,
+      signal?: AbortSignal,
+    ) =>
+      request<HarnessScheduledMessage>(
+        "DELETE",
+        `/harness/sessions/${segment(sessionId)}/scheduled-messages/${segment(messageId)}`,
+        undefined,
+        signal,
+      ),
+    sendScheduledMessage: (
+      sessionId: string,
+      messageId: string,
+      signal?: AbortSignal,
+    ) =>
+      request<HarnessSession>(
+        "POST",
+        `/harness/sessions/${segment(sessionId)}/scheduled-messages/${segment(messageId)}/send`,
         undefined,
         signal,
       ),

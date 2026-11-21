@@ -13,7 +13,7 @@ import {
   getByGestureTestId,
 } from "react-native-gesture-handler/jest-utils";
 import { ChatMessages, UserMessageContent } from "./ChatMessages";
-import { Animated, Text } from "react-native";
+import { Animated, Platform, Share, Text } from "react-native";
 import { ThemeProvider } from "../ui/theme";
 import type {
   HarnessMessage,
@@ -110,6 +110,14 @@ jest.mock("expo-sharing", () => ({
   isAvailableAsync: jest.fn().mockResolvedValue(true),
   shareAsync: jest.fn().mockResolvedValue(undefined),
 }));
+
+const prompt = (content: string): HarnessMessage => ({
+  id: "prompt",
+  session_id: "s1",
+  role: "user",
+  content,
+  parts: [],
+});
 
 const message = (parts: HarnessPart[]): HarnessMessage => ({
   id: "m1",
@@ -319,8 +327,8 @@ describe("ChatMessages", () => {
     );
   });
 
-  it("opens user actions on long press and keeps edit-and-run available", async () => {
-    const onEdit = jest.fn().mockResolvedValue(undefined);
+  it("hands a prompt to the host for editing from its long-press menu", async () => {
+    const onEdit = jest.fn();
     const prompt: HarnessMessage = {
       id: "prompt",
       session_id: "s1",
@@ -335,15 +343,71 @@ describe("ChatMessages", () => {
     );
     expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
     fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
-    fireEvent.press(screen.getByRole("button", { name: "Edit and run again" }));
-    fireEvent.changeText(
-      screen.getByTestId("chat-edit-prompt"),
-      "Updated prompt",
+    fireEvent.press(screen.getByRole("button", { name: "Edit" }));
+    // The bubble stays as it is; the composer takes the text.
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(prompt));
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("ends the transcript with the prompt being edited and notes the restart", async () => {
+    const onEdit = jest.fn();
+    const row = (
+      id: string,
+      role: HarnessMessage["role"],
+      position: number,
+    ): HarnessMessage => ({
+      id,
+      session_id: "s1",
+      role,
+      content: id,
+      parts: [],
+      position,
+      completed_at: "2026-10-27T10:00:00Z",
+    });
+    const rows = [
+      row("first", "user", 0),
+      row("first-answer", "assistant", 1),
+      row("edited", "user", 2),
+      row("edited-answer", "assistant", 3),
+      row("later", "user", 4),
+    ];
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={rows}
+          onEdit={onEdit}
+          editingMessageId="edited"
+        />
+      </ThemeProvider>,
     );
-    fireEvent.press(screen.getByRole("button", { name: "Save & run" }));
+    expect(
+      screen
+        .getAllByTestId(
+          /^chat-message-(first|first-answer|edited|edited-answer|later)$/,
+        )
+        .map((row) => row.props.testID),
+    ).toEqual([
+      "chat-message-first",
+      "chat-message-first-answer",
+      "chat-message-edited",
+    ]);
+    expect(screen.getByTestId("chat-edit-hint-edited")).toHaveTextContent(
+      "Editing this message restarts the chat from here.",
+    );
     await waitFor(() =>
-      expect(onEdit).toHaveBeenCalledWith("prompt", "Updated prompt"),
+      expect(mockScrollToEnd).toHaveBeenCalledWith({ animated: true }),
     );
+    // Only other prompts can be taken for editing meanwhile.
+    fireEvent(screen.getByTestId("chat-message-menu-edited"), "longPress");
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages messages={rows} onEdit={onEdit} />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("chat-message-later")).toBeTruthy();
+    expect(screen.queryByTestId("chat-edit-hint-edited")).toBeNull();
   });
 
   it("allows inspecting a user message while editing is unavailable", () => {
@@ -366,9 +430,93 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
     fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
-    expect(screen.getByRole("button", { name: "Copy message" })).toBeEnabled();
-    expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Select text" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Share" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it("titles a prompt's menu with its send time and shares its text", () => {
+    const share = jest
+      .spyOn(Share, "share")
+      .mockResolvedValue({ action: Share.sharedAction });
+    const sentAt = new Date();
+    sentAt.setHours(7, 20, 0, 0);
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              ...prompt("What does sed do?"),
+              created_at: sentAt.toISOString(),
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    expect(screen.getByRole("header").props.children).toMatch(/^Today, 0?7:20/);
+    fireEvent.press(screen.getByRole("button", { name: "Share" }));
+    expect(share).toHaveBeenCalledWith({ message: "What does sed do?" });
+    share.mockRestore();
+  });
+
+  it("selects a prompt's text in place until the reader clears it", async () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[prompt("Read @file:/workspace/src/app.ts please")]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    fireEvent.press(screen.getByRole("button", { name: "Select text" }));
+
+    // In the bubble, not in a sheet: a read-only native text view, all
+    // selected, showing mentions by name as the bubble does.
+    const text = await screen.findByTestId("chat-select-text-prompt");
+    expect(screen.queryByTestId("chat-message-menu-prompt")).toBeNull();
+    expect(text.props).toEqual(
+      expect.objectContaining({
+        value: "Read app.ts please",
+        editable: false,
+        autoFocus: true,
+        selection: { start: 0, end: 18 },
+      }),
+    );
+    // Testing Library drops events on read-only fields; native sends them.
+    const select = (start: number, end: number) =>
+      act(() =>
+        text.props.onSelectionChange({
+          nativeEvent: { selection: { start, end } },
+        }),
+      );
+    select(0, 18);
+    // The handles own the selection from now on.
+    select(5, 11);
+    expect(text.props.selection).toBeUndefined();
+
+    select(7, 7);
+    expect(screen.queryByTestId("chat-select-text-prompt")).toBeNull();
+    expect(screen.getByTestId("chat-message-menu-prompt")).toBeTruthy();
+  });
+
+  it("offers no text selection on Android, which cannot start one", () => {
+    const os = Platform.OS;
+    Platform.OS = "android";
+    try {
+      render(
+        <ThemeProvider>
+          <ChatMessages messages={[prompt("What does sed do?")]} />
+        </ThemeProvider>,
+      );
+      fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+      expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Select text" })).toBeNull();
+    } finally {
+      Platform.OS = os;
+    }
   });
 
   it("renders ordered work details and fetches omitted heavy detail only when expanded", async () => {
@@ -431,7 +579,16 @@ describe("ChatMessages", () => {
       },
       detail_loaded: true,
     });
-    const resolveMedia = jest.fn(() => new Promise<string>(() => {}));
+    // Large tool pictures wait for a tap like any chat picture.
+    const resolveMedia = Object.assign(
+      jest.fn(() => new Promise<string>(() => {})),
+      {
+        describe: jest.fn().mockResolvedValue({
+          size: 6 * 1024 * 1024,
+          thumbnailUrl: "",
+        }),
+      },
+    );
     const onOpenFile = jest.fn();
     const onOpenAttachment = jest.fn();
     render(
@@ -458,6 +615,9 @@ describe("ChatMessages", () => {
     fireEvent.press(screen.getByRole("button", { name: "Worked" }));
     fireEvent.press(screen.getByRole("button", { name: "Explored 1 file" }));
     fireEvent.press(screen.getByRole("button", { name: "read" }));
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Load image cat.png, 6.0 MB" }),
+    );
     await waitFor(() => expect(resolveMedia).toHaveBeenCalledWith(image));
     fireEvent.press(
       screen.getByRole("button", { name: "Open attachment spec.pdf" }),
@@ -973,20 +1133,161 @@ describe("ChatMessages", () => {
     view.unmount();
     for (const release of releases) expect(release).toHaveBeenCalledTimes(1);
   });
-});
 
-describe("user message context", () => {
-  it("turns workspace file mentions into ordered chips instead of raw tokens", () => {
+  it("loads the shown picture of the gallery and previews large neighbours", async () => {
+    const resolveMedia = Object.assign(
+      jest.fn(async (path: string) => `file:///cache${path}`),
+      {
+        describe: jest.fn(async (path: string) => ({
+          size: path.includes("big") ? 9 * 1024 * 1024 : 1024,
+          thumbnailUrl: `https://curia.test/thumbnail${path}`,
+        })),
+      },
+    );
     render(
       <ThemeProvider>
-        <UserMessageContent
-          markdown={"Open @file:/workspace/src/main.ts after this."}
+        <ChatMessages
+          messages={[
+            {
+              ...message([
+                part(
+                  "answer",
+                  "text",
+                  "![Small](/workspace/small.png)\n\n![Big](/workspace/big.png)",
+                  0,
+                ),
+              ]),
+              completed_at: "2026-10-30T10:00:05Z",
+            },
+          ]}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="gallery-scope"
         />
       </ThemeProvider>,
     );
     expect(
-      screen.getByRole("button", { name: "Open file /workspace/src/main.ts" }),
+      await screen.findByRole("button", { name: "Load image Big, 9.0 MB" }),
     ).toBeTruthy();
-    expect(screen.queryByText(/@file:/)).toBeNull();
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Open image preview Small" }),
+    );
+    const viewer = await screen.findByTestId("image-preview");
+    // The neighbour waits with its preview until it is shown.
+    expect(await within(viewer).findByLabelText("Big, 9.0 MB")).toBeTruthy();
+    expect(resolveMedia.mock.calls.map(([path]) => path)).not.toContain(
+      "/workspace/big.png",
+    );
+    fireEvent.press(
+      within(viewer).getByRole("button", { name: "Show image 2 of 2, Big" }),
+    );
+    // Shown, it loads, and the transcript shows it as well.
+    await waitFor(() =>
+      expect(resolveMedia.mock.calls.map(([path]) => path)).toContain(
+        "/workspace/big.png",
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Open image preview Big" }),
+    ).toBeTruthy();
+  });
+});
+
+describe("user message context", () => {
+  it("shows mentions as chips in the flow of their paragraph", () => {
+    const onOpenFile = jest.fn();
+    render(
+      <ThemeProvider>
+        <UserMessageContent
+          markdown={
+            "Open @file:/workspace/src/main.ts with **care**, ask @agent:explore!\n\n```\n@file:/workspace/raw.ts\n```"
+          }
+          onOpenFile={onOpenFile}
+        />
+      </ThemeProvider>,
+    );
+    // One paragraph: the chips flow with the words around them.
+    expect(screen.getByTestId("chat-user-message-content")).toHaveTextContent(
+      /Open main\.ts with care, ask @agent:explore!/,
+    );
+    fireEvent.press(
+      screen.getByRole("button", { name: "Open file src/main.ts" }),
+    );
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/src/main.ts");
+    expect(screen.getByTestId("prompt-mention-agent")).toBeTruthy();
+    // Code keeps a mention as typed.
+    expect(screen.getByText(/@file:\/workspace\/raw\.ts/)).toBeTruthy();
+    expect(screen.queryByText(/@file:\/workspace\/src/)).toBeNull();
+  });
+
+  it("shows large mentioned pictures as previews that load on tap", async () => {
+    const resolveMedia = Object.assign(
+      jest.fn(async (path: string) => `file:///cache${path}`),
+      {
+        describe: jest.fn().mockResolvedValue({
+          size: 7 * 1024 * 1024,
+          thumbnailUrl: "https://curia.test/thumbnail/photo.png",
+        }),
+      },
+    );
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              id: "u1",
+              session_id: "s1",
+              role: "user",
+              content: "Look @file:/workspace/photo.png",
+              parts: [],
+              position: 0,
+            },
+          ]}
+          resolveMedia={resolveMedia}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(
+      await screen.findByRole("button", {
+        name: "Load image photo.png, 7.0 MB",
+      }),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Open image preview photo.png",
+      }),
+    ).toBeTruthy();
+    expect(resolveMedia).toHaveBeenCalledWith("/workspace/photo.png");
+  });
+
+  it("shows mentioned pictures as thumbnails below the bubble", async () => {
+    const resolveMedia = jest.fn(
+      async (path: string) => `file:///cache${path}`,
+    );
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              id: "u1",
+              session_id: "s1",
+              role: "user",
+              content: "Compare @file:/workspace/shots/login.png please",
+              parts: [],
+              position: 0,
+            },
+          ]}
+          resolveMedia={resolveMedia}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("chat-message-markdown-u1")).toHaveTextContent(
+      "Compare login.png please",
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Open image preview login.png",
+      }),
+    ).toBeTruthy();
+    expect(resolveMedia).toHaveBeenCalledWith("/workspace/shots/login.png");
   });
 });

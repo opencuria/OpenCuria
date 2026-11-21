@@ -5,6 +5,7 @@ import type {
   HarnessPartsOut,
   HarnessPermissionRequest,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
   HarnessSession,
   HarnessSessionMode,
   HarnessSteer,
@@ -78,6 +79,92 @@ export interface WorkspacePolicyInput {
   image_versions_to_keep: number;
 }
 
+/**
+ * How an organization licenses its Windows workspaces: product key seats per
+ * workspace, licensed members activating through KMS, or no license at all.
+ */
+export type WindowsLicenseMode = "per_device" | "per_user" | "unlicensed";
+
+/** One workspace holding a product key seat; shows its owner, never its name. */
+export interface WindowsProductKeyAssignment {
+  owner_label: string;
+  /** A `WindowsActivationStatus` value. */
+  activation_status: string;
+}
+
+/** A product key of the pool. The key itself is write-only. */
+export interface WindowsProductKey {
+  id: string;
+  label: string;
+  /** Last characters of the key, as `slmgr /dli` shows them. */
+  key_suffix: string;
+  seats: number;
+  used_seats: number;
+  created_at: string;
+  assignments: WindowsProductKeyAssignment[];
+}
+
+export interface WindowsLicenseMember {
+  user_id: string;
+  label: string;
+  licensed: boolean;
+}
+
+/** Windows workspaces of the organization by license kind (counts only). */
+export interface WindowsLicenseUsage {
+  windows_workspaces: number;
+  running: number;
+  device_key: number;
+  user: number;
+  unlicensed: number;
+}
+
+/** Windows licensing of an organization (admins only). */
+export interface WindowsLicensing {
+  mode: WindowsLicenseMode;
+  /** Empty: KMS clients find the host through DNS. */
+  kms_host: string;
+  user_license_seats: number;
+  /** Cap on running Windows workspaces in every mode; `null` is unlimited. */
+  max_running: number | null;
+  product_keys: WindowsProductKey[];
+  members: WindowsLicenseMember[];
+  usage: WindowsLicenseUsage;
+}
+
+/** Partial update; `max_running: null` removes the cap. */
+export interface WindowsLicensingInput {
+  mode?: WindowsLicenseMode;
+  kms_host?: string;
+  user_license_seats?: number;
+  max_running?: number | null;
+}
+
+export interface WindowsProductKeyCreateInput {
+  product_key: string;
+  label?: string;
+  seats: number;
+}
+
+export interface WindowsProductKeyUpdateInput {
+  label?: string;
+  seats?: number;
+}
+
+export type WindowsActivationStatus =
+  | "pending"
+  | "activated"
+  | "failed"
+  | "not_activated";
+
+/** License state of one Windows workspace, visible to its owner. */
+export interface WorkspaceWindowsLicense {
+  kind: "device_key" | "user" | "unlicensed";
+  activation_status: WindowsActivationStatus;
+  /** Short diagnostic such as an HRESULT when activation failed. */
+  activation_code: string;
+}
+
 export interface AuthUser {
   id: number;
   email: string;
@@ -137,6 +224,10 @@ export interface Workspace {
   base_image?: ImageVersionRef | null;
   pending_base_image?: ImageVersionRef | null;
   repos?: string[];
+  /** Guest OS of the workspace's image; older servers omit it (Linux). */
+  guest_os?: "linux" | "windows";
+  /** License state of a Windows workspace; `null` for Linux. */
+  windows_license?: WorkspaceWindowsLicense | null;
   [key: string]: unknown;
 }
 
@@ -391,6 +482,16 @@ export interface ApiKeyCreateInput {
 
 export type ImageVersionRetention = "latest" | "kept" | "expires_when_unused";
 
+/** Operating system of an image and of the workspaces started from it. */
+export type GuestOs = "linux" | "windows";
+
+/** Smallest workspace resources an image supports. */
+export interface ImageMinimums {
+  vcpus: number;
+  memory_mb: number;
+  disk_size_gb: number;
+}
+
 export interface ImageArtifact {
   id: string;
   source_workspace_id: string | null;
@@ -426,6 +527,10 @@ export interface ImageArtifact {
   retention?: ImageVersionRetention | null;
   /** How many workspaces use this version; which ones stays private to their owners. */
   workspace_count?: number;
+  /** Missing means Linux. */
+  guest_os?: GuestOs;
+  /** Guest OS minimums, raised to this version's virtual disk. */
+  minimums?: ImageMinimums;
 }
 
 /** A versioned captured image with all of its versions (newest first). */
@@ -441,6 +546,10 @@ export interface CapturedImage {
   latest_version: number | null;
   total_size_bytes: number;
   workspace_count: number;
+  /** Guest OS of the latest version; missing means Linux. */
+  guest_os?: GuestOs;
+  /** Minimum resources of the latest version. */
+  minimums?: ImageMinimums;
   versions: ImageArtifact[];
 }
 
@@ -461,6 +570,9 @@ export interface ImageDefinition {
   /** A global recipe; only custom definitions can be edited. */
   is_standard: boolean;
   base_distro: string;
+  /** Derived from `base_distro`; missing means Linux. */
+  guest_os?: GuestOs;
+  minimums?: ImageMinimums;
   packages: string[];
   env_vars: Record<string, string>;
   custom_init_script: string;
@@ -796,7 +908,7 @@ export interface ComputerUseConfig {
   screenshot_max_dimension: number;
 }
 
-/** Organization voice capabilities, without a workspace. */
+/** Voice capabilities of the organization, also per workspace. */
 export interface VoiceSettings {
   available: boolean;
   reason?: string;
@@ -805,6 +917,60 @@ export interface VoiceSettings {
   cleanup_model: string;
   max_duration_ms: number;
   max_audio_bytes: number;
+}
+
+/** A phrase and its interval relative to the recording's start. */
+export interface VoiceSegment {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  raw_text?: string;
+}
+
+/** Edited dictation with the speech model's timed source phrases. */
+export interface VoiceTranscript {
+  text: string;
+  raw_text?: string;
+  segments: VoiceSegment[];
+  timing: "provider" | "approximate";
+  segments_kind?: "source";
+  cleanup_warning?: string;
+  speech_model?: string;
+  cleanup_model?: string;
+}
+
+/** One complete, independently decodable recording. */
+export interface VoiceTranscribeInput {
+  audio_base64: string;
+  /** E.g. `audio/webm` from browsers, `audio/mp4` from the app. */
+  mime_type: string;
+  /** Ignored by current servers, which use the saved speech model. */
+  model?: string;
+  duration_ms: number;
+}
+
+/** Original image pixels or a stored desktop frame a pointer refers to. */
+export interface VoicePointerTarget {
+  kind: "image" | "desktop";
+  path: string;
+  width: number;
+  height: number;
+}
+
+export interface VoicePointer {
+  t_ms: number;
+  event: "move" | "down" | "up" | "leave";
+  x: number | null;
+  y: number | null;
+  target: VoicePointerTarget | null;
+}
+
+/** Manifest of a pointing recording; frames were uploaded beforehand. */
+export interface VoiceRecordingInput extends VoiceTranscript {
+  recording_id: string;
+  duration_ms: number;
+  pointers: VoicePointer[];
+  frames: Array<{ t_ms: number; path: string }>;
 }
 
 export interface RecentModelUsage {
@@ -823,6 +989,8 @@ export interface HarnessTimeline {
   questions?: HarnessQuestionRequest[];
   /** Queued (not yet delivered) steers; absent on older backends. */
   steers?: HarnessSteer[];
+  /** Messages scheduled for later; absent on older backends. */
+  scheduled_messages?: HarnessScheduledMessage[];
 }
 
 export interface Todo extends HarnessTodo {}
@@ -832,6 +1000,7 @@ export type {
   HarnessPartsOut,
   HarnessPermissionRequest,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
   HarnessSession,
   HarnessSteer,
   HarnessTodo,
@@ -873,49 +1042,6 @@ export interface FileFindResultEvent {
 /** Public client result; paths are normalized to full workspace-absolute strings. */
 export interface FileFindResult extends Omit<FileFindResultEvent, "paths"> {
   paths: string[];
-}
-
-export interface FileContentResult {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  content: string;
-  size: number;
-  truncated: boolean;
-  mime_type?: string;
-  chunked?: boolean;
-  total_chunks?: number;
-  error?: string;
-}
-
-export interface FileDownloadResult {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  content: string;
-  size: number;
-  filename: string;
-  is_archive: boolean;
-  chunked?: boolean;
-  total_chunks?: number;
-  error?: string;
-}
-
-export interface FileUploadResult {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  status: "success" | "error" | string;
-  error?: string;
-}
-
-export interface FileChunkEvent {
-  workspace_id: string;
-  request_id: string;
-  path: string;
-  index: number;
-  total_chunks: number;
-  content: string;
 }
 
 /** One published version of an app an agent sent to the user. */

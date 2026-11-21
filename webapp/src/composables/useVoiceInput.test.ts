@@ -5,8 +5,7 @@ import { useVoiceInput, voiceSupported, voiceUnavailableReason } from './useVoic
 import { fileToBase64 } from '@/lib/chatUpload'
 import { monitorVoiceAudio } from '@/lib/voiceAudio'
 import { startPointing } from '@/lib/voicePointing'
-import { VOICE_LEVEL_HISTORY } from '@/lib/voiceCaptureControls'
-import { VOICE_MAX_DURATION_MS } from '@/lib/voiceLimits'
+import { VOICE_LEVEL_HISTORY, VOICE_MAX_DURATION_MS } from '@opencuria/chat-core/voiceInput'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
 vi.mock('@/lib/voiceAudio', () => ({ monitorVoiceAudio: vi.fn(() => null) }))
@@ -351,6 +350,25 @@ describe('useVoiceInput microphone lifecycle', () => {
     expect(getUserMedia).toHaveBeenCalledOnce()
     expect(transcribeVoice).toHaveBeenCalledTimes(2)
     expect(onResult).toHaveBeenCalledOnce()
+  })
+
+  it('waits for the connection instead of failing and transcribes once the browser is online', async () => {
+    vi.mocked(transcribeVoice).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { voice, onResult } = create()
+    await voice.start(options)
+    now = 1000
+    const stopping = voice.stop()
+    await settle()
+    expect(voice.state.value).toBe('processing')
+    expect(voice.waiting.value).toBe(true)
+    expect(voice.error.value).toBe('')
+    expect(onResult).not.toHaveBeenCalled()
+    window.dispatchEvent(new Event('online'))
+    await stopping
+    expect(transcribeVoice).toHaveBeenCalledTimes(2)
+    expect(getUserMedia).toHaveBeenCalledOnce()
+    expect(voice.waiting.value).toBe(false)
+    expect(onResult).toHaveBeenCalledWith('Clean text.', undefined)
   })
 
   it('does not duplicate paid provider requests when retry is triggered twice', async () => {

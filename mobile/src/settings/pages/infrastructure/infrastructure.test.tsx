@@ -1,6 +1,12 @@
 import React from "react";
 import { Alert, type AlertButton } from "react-native";
-import { act, fireEvent, screen, waitFor } from "@testing-library/react-native";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react-native";
 import type {
   CapturedImage,
   ImageDefinition,
@@ -20,6 +26,7 @@ import { NewRunnerPage, RunnerTokenPage } from "./NewRunnerPage";
 import { RunnerLimitsPage } from "./RunnerLimitsPage";
 import { RunnerOperationPage } from "./RunnerOperationPage";
 import { RunnerPage } from "./RunnerPage";
+import { RunnersPage } from "./RunnersPage";
 import { setQemuBound } from "./runners";
 
 jest.mock(
@@ -243,6 +250,10 @@ describe("image definitions", () => {
     expect(navigation.push).toHaveBeenLastCalledWith(
       "deletion:assignment:b1:Python%20on%20Office",
     );
+    fireEvent.press(screen.getByRole("button", { name: "Delete definition" }));
+    expect(navigation.push).toHaveBeenLastCalledWith(
+      "deletion:definition:d1:Python",
+    );
   });
 
   it("hides definition mutations from members", async () => {
@@ -255,6 +266,7 @@ describe("image definitions", () => {
     expect(
       screen.queryByRole("button", { name: "More for Python" }),
     ).toBeNull();
+    expect(screen.queryByTestId("delete-image-definition")).toBeNull();
   });
 
   it("validates environment lines and creates a definition", async () => {
@@ -300,6 +312,47 @@ describe("image definitions", () => {
     );
     expect(navigation.replace).toHaveBeenCalledWith("image-definition:d3");
   });
+
+  it("offers Windows 11 with winget and PowerShell hints", async () => {
+    const createDefinition = jest.fn(async () => ({ ...definition, id: "d4" }));
+    renderSettingsPage(<ImageDefinitionEditorPage definitionId={null} />, {
+      client: mockClient({
+        images: { listDefinitions: jest.fn(async () => []), createDefinition },
+      }),
+    });
+    expect(
+      screen.getByText(
+        "Packages are comma-separated. One KEY=VALUE per line for the environment.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.press(screen.getByRole("button", { name: "Windows 11 Pro" }));
+    expect(
+      screen.getByText(
+        "Packages are comma-separated winget IDs. One KEY=VALUE per line for the environment.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText("Pre-installed packages").props.placeholder,
+    ).toBe("Git.Git, Python.Python.3.12");
+    expect(screen.getByLabelText("Custom init script").props.placeholder).toBe(
+      "# PowerShell",
+    );
+    fireEvent.changeText(screen.getByLabelText("Name"), "Windows");
+    fireEvent.changeText(
+      screen.getByLabelText("Pre-installed packages"),
+      "Git.Git",
+    );
+    fireEvent.press(screen.getByTestId("save-image-definition"));
+    await waitFor(() =>
+      expect(createDefinition).toHaveBeenCalledWith(
+        expect.objectContaining({
+          base_distro: "windows:11",
+          packages: ["Git.Git"],
+        }),
+      ),
+    );
+  });
 });
 
 describe("runners", () => {
@@ -344,6 +397,32 @@ describe("runners", () => {
       },
     ],
   };
+
+  it("lists runners with their connection and opens one", async () => {
+    const offline = {
+      ...runner,
+      id: "r2",
+      name: "Lab",
+      status: "offline" as const,
+      connected_at: null,
+      disconnected_at: null,
+    };
+    const { navigation } = renderSettingsPage(<RunnersPage />, {
+      client: mockClient({
+        runners: {
+          list: jest.fn(async () => [runner, offline]),
+          latestMetrics: jest.fn(async () => null),
+        },
+      }),
+    });
+    fireEvent.press(
+      await screen.findByRole("button", { name: /^Office, Online · / }),
+    );
+    expect(navigation.push).toHaveBeenCalledWith("runner:r1");
+    expect(
+      screen.getByRole("button", { name: "Lab, Never connected" }),
+    ).toBeTruthy();
+  });
 
   it("rebuilds the current generation and cancels a pending deletion", async () => {
     const updateRunnerBuild = jest.fn(async () => ({}));
@@ -492,5 +571,40 @@ describe("runners", () => {
       "acknowledge_interrupted",
     );
     alert.mockRestore();
+  });
+
+  it("retries an operation and keeps closing it apart, last", async () => {
+    const disposeOperation = jest.fn(async () => ({}));
+    const { navigation } = renderSettingsPage(
+      <RunnerOperationPage operationId="op-1" />,
+      {
+        client: mockClient({
+          runners: {
+            inspectOperation: jest.fn(async () => ({
+              operation_id: "op-1",
+              status: "interrupted",
+              diagnostic: "",
+              phase: "applying",
+              permitted_actions: ["retry", "acknowledge_interrupted"],
+              evidence: {},
+            })),
+            disposeOperation,
+          },
+        }),
+      },
+    );
+    await screen.findByTestId("dispose-retry");
+    const sections = screen.getAllByTestId(/^form-section-/);
+    expect(sections.at(-1)!.props.testID).toBe("form-section-close");
+    expect(
+      within(sections.at(-1)!).getByTestId("dispose-acknowledge_interrupted"),
+    ).toBeTruthy();
+    await act(async () =>
+      fireEvent.press(
+        within(sections[0]!).getByRole("button", { name: "Retry" }),
+      ),
+    );
+    expect(disposeOperation).toHaveBeenCalledWith("op-1", "retry");
+    expect(navigation.pop).toHaveBeenCalled();
   });
 });

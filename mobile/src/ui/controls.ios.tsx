@@ -1,7 +1,14 @@
 import React from "react";
 import { View } from "react-native";
 import { isLiquidGlassAvailable } from "expo-glass-effect";
-import { Button as SwiftButton, Host, RNHostView } from "@expo/ui/swift-ui";
+import {
+  Button as SwiftButton,
+  HStack,
+  Host,
+  Image,
+  RNHostView,
+  Text,
+} from "@expo/ui/swift-ui";
 import {
   accessibilityLabel,
   accessibilityHint,
@@ -11,8 +18,10 @@ import {
   controlSize,
   disabled,
   font,
+  foregroundStyle,
   frame,
   labelStyle,
+  lineLimit,
   onLongPressGesture,
   tint,
 } from "@expo/ui/swift-ui/modifiers";
@@ -20,16 +29,58 @@ import type {
   ButtonProps,
   IconButtonProps,
   NativeActionProps,
+  NativeSymbol,
 } from "./controls.types";
 import {
   controlContentStyle,
   controlLayout,
   hugsContent,
 } from "./controlLayout";
+import { statusColor } from "./statusColors";
 import { useTheme } from "./theme";
 
 /** Floating controls are liquid glass on iOS 26 and bordered before it. */
 const FLOATING_STYLE = isLiquidGlassAvailable() ? "glass" : "bordered";
+
+/**
+ * Label of a prominent button tinted with the ink. SwiftUI draws white on the
+ * tint, which vanishes on the near-white ink of dark mode, so an enabled label
+ * takes `primaryForeground`; a disabled one keeps the system's dimmed color.
+ */
+export function ProminentLabel({
+  title,
+  symbol,
+  enabled = true,
+}: {
+  title: string;
+  symbol?: NativeSymbol;
+  enabled?: boolean;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const color = enabled ? [foregroundStyle(theme.primaryForeground)] : [];
+  return (
+    <HStack spacing={6}>
+      {symbol ? (
+        <Image
+          systemName={symbol}
+          modifiers={[
+            font({ textStyle: "body", weight: "semibold" }),
+            ...color,
+          ]}
+        />
+      ) : null}
+      <Text
+        modifiers={[
+          font({ textStyle: "body", weight: "semibold" }),
+          lineLimit(1),
+          ...color,
+        ]}
+      >
+        {title}
+      </Text>
+    </HStack>
+  );
+}
 
 /** SwiftUI owns highlighting, hit testing, disabled state and button appearance. */
 export function Button({
@@ -42,12 +93,14 @@ export function Button({
   disabled: inactive,
   onPress,
   style,
-  accessibilityLabel: label,
+  accessibilityLabel: accessibleLabel,
   testID,
 }: ButtonProps): React.JSX.Element {
   const { theme } = useTheme();
   const layout = controlLayout(style);
   const hug = hugsContent(layout);
+  const prominent = variant === "primary";
+  const label = busy ? `${title}…` : title;
   return (
     <Host
       matchContents={{ vertical: true, horizontal: hug }}
@@ -57,8 +110,8 @@ export function Button({
       style={[{ alignSelf: "stretch" }, layout]}
     >
       <SwiftButton
-        label={busy ? `${title}…` : title}
-        systemImage={symbol}
+        label={prominent ? undefined : label}
+        systemImage={prominent ? undefined : symbol}
         testID={testID}
         role={variant === "danger" ? "destructive" : undefined}
         onPress={() => onPress?.()}
@@ -75,10 +128,25 @@ export function Button({
           frame(
             hug ? { minHeight: 44 } : { maxWidth: Infinity, minHeight: 44 },
           ),
+          // Danger fills with the system red (white label in both modes);
+          // the others take the ink (a primary label sets its own color).
+          tint(
+            variant === "danger"
+              ? statusColor("critical", theme)
+              : theme.primary,
+          ),
           disabled(Boolean(inactive || busy)),
-          accessibilityLabel(label ?? title),
+          accessibilityLabel(accessibleLabel ?? title),
         ]}
-      />
+      >
+        {prominent ? (
+          <ProminentLabel
+            title={label}
+            symbol={symbol}
+            enabled={!inactive && !busy}
+          />
+        ) : undefined}
+      </SwiftButton>
     </Host>
   );
 }
@@ -97,6 +165,8 @@ export function IconButton({
   testID,
 }: IconButtonProps): React.JSX.Element {
   const { theme } = useTheme();
+  // A filled ink circle draws its symbol itself, in the label-on-ink color.
+  const filled = tone === "primary" ? symbol : undefined;
   return (
     <Host
       colorScheme={theme.scheme}
@@ -105,8 +175,8 @@ export function IconButton({
       style={{ width: Math.max(44, size), height: Math.max(44, size) }}
     >
       <SwiftButton
-        label={symbol ? label : undefined}
-        systemImage={symbol}
+        label={symbol && !filled ? label : undefined}
+        systemImage={filled ? undefined : symbol}
         testID={testID}
         onPress={() => onPress?.()}
         modifiers={[
@@ -138,7 +208,15 @@ export function IconButton({
           ...(value?.text ? [accessibilityValue(value.text)] : []),
         ]}
       >
-        {!symbol ? (
+        {filled ? (
+          <Image
+            systemName={filled}
+            modifiers={[
+              font({ textStyle: "body", weight: "semibold" }),
+              ...(inactive ? [] : [foregroundStyle(theme.primaryForeground)]),
+            ]}
+          />
+        ) : !symbol ? (
           <RNHostView matchContents>
             <View
               style={{

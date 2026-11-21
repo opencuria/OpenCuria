@@ -76,12 +76,28 @@ exports.MediaViewerFrame = ({
   )
 exports.ComposerSurface = ({ children }) => h(View, null, children)
 exports.ComposerSheetSurface = ({ children, style }) => h(View, { style }, children)
-exports.NativeTextField = React.forwardRef(({ label, ...props }, ref) =>
-  h(TextInput, {
-    ...props,
-    accessibilityLabel: props.accessibilityLabel ?? label,
-    ref,
-  }),
+exports.ComposerSheetPeek = ({ style }) => h(View, { style })
+exports.composerSheetsFloat = false
+exports.NativeTextField = React.forwardRef(
+  ({ label, grouped, trailingAction, ...props }, ref) => {
+    const input = h(TextInput, {
+      ...props,
+      accessibilityLabel: props.accessibilityLabel ?? label,
+      ref,
+    })
+    if (!trailingAction) return input
+    return h(
+      View,
+      null,
+      input,
+      h(Pressable, {
+        accessibilityRole: 'button',
+        accessibilityLabel: trailingAction.label,
+        testID: trailingAction.testID,
+        onPress: trailingAction.onPress,
+      }),
+    )
+  },
 )
 
 exports.NativePicker = ({
@@ -133,6 +149,14 @@ exports.NativeSegmentedPicker = ({ label, value, options, onChange, testID }) =>
       ),
     ),
   )
+exports.OPTION_ROW = {
+  inset: 14,
+  indicator: 22,
+  gap: 12,
+  minHeight: 48,
+  fontSize: 17,
+  lineHeight: 22,
+}
 exports.NativeOption = ({
   label,
   description,
@@ -205,6 +229,7 @@ exports.NativeContextMenu = ({ children, label, actions, onSelect, fitContent })
     View,
     null,
     children(() => setOpen(true)),
+    open ? h(Text, { accessibilityRole: 'header' }, label) : null,
     ...(open ? actions.map((action) => h(
       Pressable,
       {
@@ -316,27 +341,46 @@ exports.Drawer = ({
   canOpenTools,
   menuActions,
   onMenuAction,
+  detail,
 }) =>
   h(
     View,
     null,
-    h(exports.IconButton, {
-      label: 'Open sidebar',
-      onPress: onOpen,
-      testID: 'main-menu',
-    }),
-    h(exports.Button, {
-      title: 'New chat',
-      onPress: onCreate,
-      disabled: !canCreate,
-      testID: 'new-chat',
-    }),
-    h(exports.IconButton, {
-      label: 'Git, Terminal & Files',
-      onPress: onTools,
-      disabled: !canOpenTools,
-      testID: 'workspace-tools',
-    }),
+    detail
+      ? h(exports.IconButton, {
+          label: `Back to ${detail.backTitle}`,
+          onPress: detail.onBack,
+          testID: 'chat-back',
+        })
+      : h(exports.IconButton, {
+          label: 'Open sidebar',
+          onPress: onOpen,
+          testID: 'main-menu',
+        }),
+    detail
+      ? h(
+          View,
+          { testID: 'chat-detail-title' },
+          h(Text, null, detail.title),
+          h(Text, null, detail.subtitle),
+        )
+      : null,
+    detail
+      ? null
+      : h(exports.Button, {
+          title: 'New chat',
+          onPress: onCreate,
+          disabled: !canCreate,
+          testID: 'new-chat',
+        }),
+    detail
+      ? null
+      : h(exports.IconButton, {
+          label: 'Git, Terminal & Files',
+          onPress: onTools,
+          disabled: !canOpenTools,
+          testID: 'workspace-tools',
+        }),
     h(
       exports.NativeMenu,
       {
@@ -370,6 +414,7 @@ exports.ModalFrame = ({
   onAction,
   primaryAction,
   search,
+  form,
   children,
 }) =>
   h(
@@ -403,7 +448,7 @@ exports.ModalFrame = ({
         )
       : null,
     // Native bars are not siblings of the modal content's accessibility root.
-    h(View, null, children),
+    h(View, null, form ? exports.NativeForm(form) : null, children),
   )
 
 const WEEKDAY_NAMES = [
@@ -485,6 +530,16 @@ function formRow(row) {
           row.subtitle ? h(Text, null, row.subtitle) : null,
           row.badge ? h(Text, null, row.badge) : null,
         ),
+        row.accessory
+          ? h(exports.Button, {
+              title: row.accessory.title,
+              accessibilityLabel: row.accessory.accessibilityLabel,
+              busy: row.accessory.busy,
+              testID: row.accessory.testID,
+              disabled: row.accessory.disabled || row.disabled,
+              onPress: row.accessory.onPress,
+            })
+          : null,
         row.onInfo
           ? h(exports.IconButton, {
               label: row.infoLabel ?? `Details for ${row.title}`,
@@ -710,15 +765,26 @@ function formRow(row) {
   }
 }
 
-exports.NativeForm = ({ sections, empty, testID }) =>
+exports.NativeForm = ({ sections, empty, loading, testID }) =>
   h(
     View,
     { testID },
-    ...(!sections.length && empty
+    ...(!sections.length && loading
+      ? [h(Text, { key: 'loading' }, 'Loading')]
+      : !sections.length && empty
       ? [
           h(Text, { key: 'empty-title' }, empty.title),
           empty.description
             ? h(Text, { key: 'empty-description' }, empty.description)
+            : null,
+          empty.action
+            ? h(exports.Button, {
+                key: 'empty-action',
+                title: empty.action.title,
+                busy: empty.action.busy,
+                testID: empty.action.testID,
+                onPress: empty.action.onPress,
+              })
             : null,
         ]
       : sections.map((section) =>
@@ -731,6 +797,8 @@ exports.NativeForm = ({ sections, empty, testID }) =>
           ),
         )),
   )
+// The host-less form a SwiftUI navigation stack renders (iOS sheets, settings).
+exports.NativeFormContent = (props) => exports.NativeForm(props)
 exports.ToastSurface = ({ children }) => h(View, null, children)
 
 // Sidebar controls: SwiftUI glass buttons / Material buttons and search field.
@@ -807,7 +875,13 @@ exports.SettingsPage = ({
   testID,
 }) => {
   const { useSettingsNavigation } = require('../src/settings/SettingsContext')
+  const { visiblePrimaryAction } = require('../src/ui/formStates')
   const navigation = useSettingsNavigation()
+  const visible = visiblePrimaryAction(primaryAction, {
+    sections,
+    empty,
+    loading,
+  })
   return h(
     View,
     { testID },
@@ -816,13 +890,14 @@ exports.SettingsPage = ({
       label: root ? 'Close settings' : 'Back',
       onPress: root ? navigation.close : navigation.pop,
     }),
-    primaryAction
+    // Both platforms hide the main action while the empty state offers the same one.
+    visible
       ? h(exports.Button, {
-          title: primaryAction.title,
-          onPress: primaryAction.onPress,
-          disabled: primaryAction.disabled,
-          busy: primaryAction.busy,
-          testID: primaryAction.testID,
+          title: visible.title,
+          onPress: visible.onPress,
+          disabled: visible.disabled,
+          busy: visible.busy,
+          testID: visible.testID,
         })
       : null,
     actions?.length

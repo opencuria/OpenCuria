@@ -21,6 +21,8 @@ from ..exceptions import (
     ImageRecipeNotFoundError,
     ImageRecipeValidationError,
 )
+from ..guest_os import distro_guest_os, is_supported_base_distro
+from ..image_recipes import validate_recipe
 from ..repositories import (
     ImageBuildJobRepository,
     ImageDefinitionRepository,
@@ -66,6 +68,7 @@ class ImageDefinitionService:
         """Create an org-owned recipe without requesting a build."""
         self._require_admin(user, organization_id)
         self._validate_base_distro(recipe["base_distro"])
+        validate_recipe(recipe["base_distro"], recipe["packages"], recipe["env_vars"])
         return ImageDefinitionRepository.create(
             organization_id=organization_id,
             created_by=user,
@@ -109,7 +112,25 @@ class ImageDefinitionService:
         definition = self._owned_definition_for_admin(
             user, organization_id, definition_id
         )
-        self._validate_base_distro(values.get("base_distro") or definition.base_distro)
+        base_distro = values.get("base_distro") or definition.base_distro
+        self._validate_base_distro(base_distro)
+        if distro_guest_os(base_distro) != distro_guest_os(
+            definition.base_distro
+        ) and ImageDefinitionRepository.has_versions(definition.id):
+            # Every version of an image line runs the same operating system.
+            raise ConflictError(
+                "The operating system of a built image cannot change",
+                code="image_os_immutable",
+            )
+        if any(
+            values.get(field) is not None
+            for field in ("base_distro", "packages", "env_vars")
+        ):
+            validate_recipe(
+                base_distro,
+                self._value_or(values, "packages", definition.packages or []),
+                self._value_or(values, "env_vars", definition.env_vars or {}),
+            )
         return ImageDefinitionRepository.update_recipe(
             definition.id,
             {field: values[field] for field in RECIPE_FIELDS if field in values},
@@ -269,10 +290,16 @@ class ImageDefinitionService:
         return definition, runner
 
     @staticmethod
+    def _value_or(values: dict[str, Any], field: str, default: Any) -> Any:
+        """The requested value of a partial update, else the stored one."""
+        value = values.get(field)
+        return default if value is None else value
+
+    @staticmethod
     def _validate_base_distro(base_distro: str | None) -> None:
-        if not (base_distro or "").strip().lower().startswith("ubuntu:"):
+        if not is_supported_base_distro(base_distro):
             raise ConflictError(
-                "QEMU image definitions currently require an ubuntu:<version> "
+                "Image definitions require an ubuntu:<version> or windows:11 "
                 "base distro",
                 code="unsupported_base_distro",
             )

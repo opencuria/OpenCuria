@@ -29,12 +29,14 @@ import { Textarea } from '@/components/ui/textarea'
 import type { ImageDefinition, ImageDefinitionInput } from '@/types'
 import {
   BASE_DISTRO_PRESETS,
+  baseDistroLabel,
   envVarsTextValid,
   formBaseDistro,
   imageDefinitionForm,
   imageDefinitionPayload,
   isBaseDistroSupported,
   isImageDefinitionFormValid,
+  recipeFieldHints,
   type ImageDefinitionForm,
 } from '@opencuria/chat-core/imageDefinitionLifecycle'
 
@@ -61,6 +63,8 @@ const form = ref<ImageDefinitionForm>(imageDefinitionForm())
 const advancedOpen = ref(false)
 
 const isValid = computed(() => isImageDefinitionFormValid(form.value))
+/** Package and script placeholders in the terms of the selected OS. */
+const hints = computed(() => recipeFieldHints(formBaseDistro(form.value)))
 const envValid = computed(() => envVarsTextValid(form.value.envVars))
 const customDistroInvalid = computed(
   () =>
@@ -79,11 +83,6 @@ watch(
   },
   { immediate: true },
 )
-
-/** "Ubuntu 24.04" for "ubuntu:24.04". */
-function distroLabel(value: string): string {
-  return value.replace(/^ubuntu:/, 'Ubuntu ')
-}
 
 function handleSave(): void {
   if (isValid.value && !props.saving) emit('saved', imageDefinitionPayload(form.value))
@@ -133,7 +132,7 @@ function setOpen(value: boolean): void {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem v-for="preset in BASE_DISTRO_PRESETS" :key="preset" :value="preset">
-                      {{ distroLabel(preset) }}
+                      {{ baseDistroLabel(preset) }}
                     </SelectItem>
                     <SelectItem value="custom">Other…</SelectItem>
                   </SelectContent>
@@ -159,7 +158,7 @@ function setOpen(value: boolean): void {
               <Input
                 id="image-definition-packages"
                 v-model="form.packages"
-                placeholder="python3, nodejs, ffmpeg"
+                :placeholder="hints.packages"
               />
             </div>
 
@@ -195,7 +194,7 @@ function setOpen(value: boolean): void {
                     v-model="form.customInitScript"
                     :rows="6"
                     class="font-mono"
-                    placeholder="#!/bin/bash"
+                    :placeholder="hints.initScript"
                   />
                 </div>
               </CollapsibleContent>

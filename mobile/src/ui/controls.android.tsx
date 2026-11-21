@@ -3,13 +3,13 @@ import { StyleSheet, View } from "react-native";
 import {
   Button as ComposeButton,
   FilledTonalButton,
-  OutlinedButton,
   TextButton,
   IconButton as ComposeIconButton,
   FilledIconButton,
   Host,
   Surface,
   Text,
+  type ButtonColors,
 } from "@expo/ui/jetpack-compose";
 import {
   defaultMinSize,
@@ -29,9 +29,14 @@ import {
   controlLayout,
   hugsContent,
 } from "./controlLayout";
-import { useTheme } from "./theme";
+import { useTheme, type OpenCuriaTheme } from "./theme";
 
-/** Material buttons retain their native sizing, shape, ripple and disabled colors. */
+const TRANSPARENT = "#00000000";
+
+/**
+ * Material buttons keep their native sizing, shape and ripple; every variant
+ * gets explicit monochrome colors instead of the seeded palette.
+ */
 export function Button({
   title,
   variant = "secondary",
@@ -44,37 +49,44 @@ export function Button({
 }: ButtonProps): React.JSX.Element {
   const { theme } = useTheme();
   const Component =
-    variant === "ghost"
+    variant === "ghost" || variant === "outline"
       ? TextButton
-      : variant === "outline"
-        ? OutlinedButton
-        : variant === "secondary"
-          ? FilledTonalButton
-          : ComposeButton;
+      : variant === "secondary"
+        ? FilledTonalButton
+        : ComposeButton;
   const layout = controlLayout(style);
   const hug = hugsContent(layout);
+  // A taller hero action (e.g. sign in) passes its height as `minHeight`.
+  const minHeight =
+    typeof layout.minHeight === "number" ? Math.max(48, layout.minHeight) : 48;
   return (
-    <View testID={testID} style={[{ alignSelf: "stretch" }, layout]}>
+    <View
+      testID={testID}
+      style={[
+        { alignSelf: "stretch" },
+        layout,
+        // Compose draws the outlined button's border from the seeded palette;
+        // a text button inside a hairline capsule keeps it neutral.
+        variant === "outline" && {
+          borderWidth: 1,
+          borderColor: theme.separator,
+          borderRadius: 999,
+        },
+      ]}
+    >
       <Host
         matchContents={{ vertical: true, horizontal: hug }}
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
         <Component
           onClick={() => onPress?.()}
           enabled={!disabled && !busy}
-          colors={
-            variant === "danger"
-              ? {
-                  containerColor: theme.danger,
-                  contentColor: theme.primaryForeground,
-                }
-              : undefined
-          }
+          colors={buttonColors(variant, theme)}
           modifiers={[
             ...(hug ? [] : [fillMaxWidth()]),
-            defaultMinSize({ minHeight: 48 }),
+            defaultMinSize({ minHeight }),
             semantics({ contentDescription: accessibilityLabel ?? title }),
           ]}
         >
@@ -83,6 +95,43 @@ export function Button({
       </Host>
     </View>
   );
+}
+
+function buttonColors(
+  variant: NonNullable<ButtonProps["variant"]>,
+  theme: OpenCuriaTheme,
+): ButtonColors {
+  switch (variant) {
+    case "primary":
+      return {
+        containerColor: theme.primary,
+        contentColor: theme.primaryForeground,
+        disabledContainerColor: theme.controlFill,
+        disabledContentColor: theme.subtleText,
+      };
+    case "danger":
+      return {
+        containerColor: theme.danger,
+        contentColor: theme.primaryForeground,
+        disabledContainerColor: theme.controlFill,
+        disabledContentColor: theme.subtleText,
+      };
+    case "secondary":
+      return {
+        containerColor: theme.controlFill,
+        contentColor: theme.text,
+        disabledContainerColor: theme.controlFill,
+        disabledContentColor: theme.subtleText,
+      };
+    case "outline":
+    case "ghost":
+      return {
+        containerColor: TRANSPARENT,
+        contentColor: theme.text,
+        disabledContainerColor: TRANSPARENT,
+        disabledContentColor: theme.subtleText,
+      };
+  }
 }
 
 export function IconButton({
@@ -111,13 +160,30 @@ export function IconButton({
     >
       <Host
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
         style={{ width: diameter, height: diameter }}
       >
         <Component
           enabled={!disabled}
           onClick={() => onPress?.()}
+          // The icon is drawn by React Native above; the content color tints
+          // the ripple.
+          colors={
+            tone === "primary"
+              ? {
+                  containerColor: theme.primary,
+                  contentColor: theme.primaryForeground,
+                  disabledContainerColor: theme.controlFill,
+                  disabledContentColor: theme.subtleText,
+                }
+              : {
+                  containerColor: TRANSPARENT,
+                  contentColor: tone === "danger" ? theme.danger : theme.text,
+                  disabledContainerColor: TRANSPARENT,
+                  disabledContentColor: theme.subtleText,
+                }
+          }
           modifiers={[
             size(diameter, diameter),
             semantics({ contentDescription: label }),
@@ -161,7 +227,7 @@ export function NativeAction({
       <Host
         style={StyleSheet.absoluteFill}
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
         <Surface

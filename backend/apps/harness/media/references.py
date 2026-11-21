@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from urllib.parse import unquote
 
 from ..access.base import sanitize_harness_path
 
@@ -47,6 +48,27 @@ def parse_markdown_link_dest(raw: str) -> str:
     return dest
 
 
+def decode_markdown_link_path(dest: str) -> str | None:
+    """Return the file path a parsed markdown dest names, or None.
+
+    Dests are URLs: query and fragment are dropped and percent-escapes are
+    decoded once (``a%20b.png`` names ``a b.png``), like the chat clients do.
+    Malformed escapes and decoded control characters return None.
+    """
+    path = re.sub(r"[?#].*", "", dest, flags=re.DOTALL)
+    if not path:
+        return None
+    try:
+        decoded = unquote(path, errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if re.search(r"%(?![0-9A-Fa-f]{2})", path) or re.search(
+        r"[\\\x00-\x1f\x7f-\x9f]", decoded
+    ):
+        return None
+    return decoded
+
+
 def resolve_workspace_image_path(raw_dest: str) -> str | None:
     """Return a sandboxed ``/workspace/...`` image path, or None.
 
@@ -55,6 +77,9 @@ def resolve_workspace_image_path(raw_dest: str) -> str | None:
     """
     dest = parse_markdown_link_dest(raw_dest)
     if not dest or _REMOTE_DEST_RE.match(dest):
+        return None
+    dest = decode_markdown_link_path(dest)
+    if dest is None or _REMOTE_DEST_RE.match(dest):
         return None
     try:
         normalized = sanitize_harness_path(dest)
@@ -132,7 +157,7 @@ def media_references(text: str) -> list[MediaReference]:
         if any(masked[match.start() : match.end()]):
             continue
         raw_dest = match.group(2)
-        dest = parse_markdown_link_dest(raw_dest)
+        dest = decode_markdown_link_path(parse_markdown_link_dest(raw_dest)) or ""
         path = resolve_workspace_image_path(raw_dest)
         if (
             path is None

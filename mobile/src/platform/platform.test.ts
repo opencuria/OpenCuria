@@ -1,204 +1,249 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { File, __directories, __files } from "./test-mocks/expo-file-system";
-import { __setNextSize } from "./test-mocks/expo-image-manipulator";
+import {
+  File,
+  UploadType,
+  __directories,
+  __downloads,
+  __files,
+  __setDownload,
+  __setUpload,
+  __uploads,
+} from "./test-mocks/expo-file-system";
 import { __setNextResult } from "./test-mocks/expo-image-picker";
-import { UPLOAD_MAX_BYTES } from "@opencuria/chat-core/fileChunks";
+import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
+import {
+  FILE_TRANSFER_MAX_BYTES,
+  MEBIBYTE,
+  type WorkspaceFileLink,
+} from "@opencuria/chat-core/workspaceFiles";
 import { FileTransferError } from "@opencuria/client";
 import { NativeSessionStorage } from "./storage";
-import {
-  MediaCache,
-  NativeMediaError,
-  MEDIA_CACHE_MAX_BYTES,
-  MEDIA_PREVIEW_MAX_BYTES,
-} from "./media";
+import { MediaCache, NativeMediaError } from "./media";
 import {
   clearPickedPhotoCache,
-  existingUploadNames,
   pickDocuments,
   pickPhoto,
   uploadAttachments,
 } from "./pickers";
 
-function readResult(path: string, content = btoa("img"), mime = "image/png") {
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function fileLink(
+  path: string,
+  size: number,
+  extra: Partial<WorkspaceFileLink> = {},
+): WorkspaceFileLink {
+  const kind = classifyWorkspaceFile(path);
   return {
-    workspace_id: "workspace-secret",
-    request_id: "request",
     path,
-    content,
-    size: atob(content).length,
-    mime_type: mime,
+    name: path.split("/").pop()!,
+    type: "file",
+    size,
+    modifiedAt: 1,
+    kind: kind === "binary" ? "binary" : kind,
+    mimeType: kind === "video" ? "video/mp4" : "image/png",
+    contentUrl: `https://curia.test/content${path}`,
+    downloadUrl: `https://curia.test/download${path}`,
+    thumbnailUrl: `https://curia.test/thumbnail${path}`,
+    expiresAt: 4_000_000_000,
+    ...extra,
   };
+}
+
+/** A client whose links have `size` bytes; downloads serve `body`. */
+function filesClient(size: number, body = "x".repeat(size)) {
+  __setDownload(() => body);
+  const link = vi.fn(async (_workspace: string, path: string) =>
+    fileLink(path, size),
+  );
+  const forget = vi.fn();
+  return { client: { files: { link, forget } } as never, link, forget };
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
   __files.clear();
   __directories.clear();
+  __downloads.length = 0;
+  __uploads.length = 0;
   clearPickedPhotoCache();
   __setNextResult({ canceled: true, assets: null });
-  __setNextSize(3);
 });
 
 describe("workspace path validation", () => {
   it.each([
     "/workspace/../private.png",
-    "/workspace/%2e%2e/private.png",
+    "/workspace/./private.png",
     "https://attacker.test/a.png",
     "//attacker.test/a.png",
     "/etc/passwd",
     "/workspace/a\\..\\b.png",
-    "/workspace/a%00.png",
+    "/workspace/a\u0000.png",
   ])("rejects unsafe path %s", async (path) => {
-    const media = new MediaCache(
-      { files: { readFile: vi.fn() } } as never,
-      "workspace-secret",
-      "scope-secret",
+    const { client, link } = filesClient(3);
+    const media = new MediaCache(client, "workspace-secret", "scope-secret");
+    await expect(media.resolvePinned(path)).rejects.toBeInstanceOf(
+      NativeMediaError,
     );
-    await expect(media.resolve(path)).rejects.toBeInstanceOf(NativeMediaError);
+    expect(link).not.toHaveBeenCalled();
+    await media.dispose();
+  });
+
+  it("requests file paths literally, without decoding them again", async () => {
+    const { client, link } = filesClient(3);
+    const media = new MediaCache(client, "workspace-secret", "scope-secret");
+    for (const path of [
+      "/workspace/shots/my shot.png",
+      "/workspace/shots/100% #1?.png",
+      "/workspace/shots/a%20b.png",
+    ]) {
+      await media.describe(path);
+      expect(link).toHaveBeenLastCalledWith("workspace-secret", path);
+    }
     await media.dispose();
   });
 });
 
 describe("MediaCache", () => {
-  it("uses authenticated client reads, coalesces duplicate paths, and disposes private files", async () => {
-    const readFile = vi.fn(async (_workspace: string, path: string) =>
-      readResult(path),
-    );
-    const media = new MediaCache(
-      { files: { readFile } } as never,
-      "workspace-secret",
-      "scope-secret",
-    );
-    const [uri, sameUri] = await Promise.all([
-      media.resolve("/workspace/image.png"),
-      media.resolve("/workspace/image.png"),
+  it("downloads images into a .part file, moves them into place, coalesces paths and disposes them", async () => {
+    const { client, link } = filesClient(3, "img");
+    const media = new MediaCache(client, "workspace-secret", "scope-secret");
+    const [first, second] = await Promise.all([
+      media.resolvePinned("/workspace/image.png"),
+      media.resolvePinned("/workspace/image.png"),
     ]);
-    expect(uri).toBe(sameUri);
-    expect(uri).toContain("/opencuria/");
-    expect(uri).not.toContain("workspace-secret");
-    expect(readFile).toHaveBeenCalledOnce();
-    expect(readFile).toHaveBeenCalledWith(
+    expect(first.uri).toBe(second.uri);
+    expect(first.uri).toContain("/opencuria/");
+    expect(first.uri).not.toContain("workspace-secret");
+    expect(link).toHaveBeenCalledWith(
       "workspace-secret",
       "/workspace/image.png",
-      MEDIA_PREVIEW_MAX_BYTES + 1,
     );
-    expect(new File(uri).exists).toBe(true);
+    expect(__downloads).toHaveLength(1);
+    const [url, destination, options] = __downloads[0]!;
+    expect(url).toBe("https://curia.test/content/workspace/image.png");
+    expect(destination).toBe(`${first.uri}.part`);
+    expect(options).toMatchObject({ idempotent: true });
+    expect(new File(first.uri).exists).toBe(true);
+    expect(new File(destination).exists).toBe(false);
     await media.dispose();
     expect(__files.size).toBe(0);
   });
 
-  it("rejects truncated reads and validates base64 byte count", async () => {
-    const readFile = vi.fn(async (_workspace: string, path: string) => ({
-      ...readResult(path),
-      size: MEDIA_PREVIEW_MAX_BYTES + 1,
-      truncated: true,
-    }));
-    const media = new MediaCache(
-      { files: { readFile } } as never,
-      "workspace",
-      "scope",
-    );
-    await expect(media.resolve("/workspace/large.png")).rejects.toMatchObject({
-      code: "size_limit",
+  it("deletes partial and incomplete downloads and signs the link again", async () => {
+    const { client, forget } = filesClient(3);
+    const media = new MediaCache(client, "workspace", "scope");
+    // Android streams into the destination and leaves what arrived.
+    __setDownload((_url, destination) => {
+      __files.set(destination, { data: "im", encoding: "utf8" });
+      throw new Error("Connection reset");
     });
+    await expect(media.resolvePinned("/workspace/a.png")).rejects.toMatchObject(
+      { code: "download_failed", retryable: true },
+    );
+    expect(__files.size).toBe(0);
+    expect(forget).toHaveBeenCalledWith("workspace", "/workspace/a.png");
+    __setDownload(() => "im");
+    await expect(media.resolvePinned("/workspace/a.png")).rejects.toMatchObject(
+      { code: "download_incomplete", retryable: true },
+    );
+    expect(__files.size).toBe(0);
     await media.dispose();
-
-    const malformed = new MediaCache(
-      {
-        files: {
-          readFile: async (_workspace: string, path: string) => ({
-            ...readResult(path),
-            size: 100,
-          }),
-        },
-      } as never,
-      "workspace",
-      "scope",
-    );
-    await expect(malformed.resolve("/workspace/bad.png")).rejects.toMatchObject(
-      { code: "invalid_payload" },
-    );
-    await malformed.dispose();
   });
 
-  it("limits active media reads to two and ignores results after clear", async () => {
-    let release!: () => void;
-    const barrier = new Promise<void>((resolve) => {
-      release = resolve;
+  it("streams videos from their link without downloading them", async () => {
+    const { client } = filesClient(80 * MEBIBYTE);
+    const media = new MediaCache(client, "workspace", "scope");
+    const video = await media.resolvePinned("/workspace/clip.mp4");
+    expect(video.uri).toBe("https://curia.test/content/workspace/clip.mp4");
+    video.release();
+    expect(__downloads).toHaveLength(0);
+    await media.dispose();
+  });
+
+  it("describes files and refuses those above the transfer limit", async () => {
+    const { client } = filesClient(FILE_TRANSFER_MAX_BYTES + 1);
+    const media = new MediaCache(client, "workspace", "scope");
+    await expect(media.describe("/workspace/huge.png")).resolves.toMatchObject({
+      size: FILE_TRANSFER_MAX_BYTES + 1,
+      thumbnailUrl: "https://curia.test/thumbnail/workspace/huge.png",
     });
-    let active = 0;
-    let maxActive = 0;
-    const readFile = vi.fn(async (_workspace: string, path: string) => {
-      active += 1;
-      maxActive = Math.max(maxActive, active);
-      await barrier;
-      active -= 1;
-      return readResult(path);
+    await expect(
+      media.resolvePinned("/workspace/huge.png"),
+    ).rejects.toMatchObject({ code: "size_limit", retryable: false });
+    await expect(media.openFile("/workspace/huge.zip")).rejects.toMatchObject({
+      code: "size_limit",
     });
+    expect(__downloads).toHaveLength(0);
+    await media.dispose();
+  });
+
+  it("keeps the codes of link failures", async () => {
+    const link = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new FileTransferError("The file does not exist.", "file_not_found"),
+      )
+      .mockRejectedValueOnce(
+        new FileTransferError(
+          "This file type cannot be opened.",
+          "unsupported_file",
+        ),
+      );
     const media = new MediaCache(
-      { files: { readFile } } as never,
+      { files: { link, forget: vi.fn() } } as never,
       "workspace",
       "scope",
     );
-    const pending = [
-      media.resolve("/workspace/a.png"),
-      media.resolve("/workspace/b.png"),
-      media.resolve("/workspace/c.png"),
-    ];
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(readFile).toHaveBeenCalledTimes(2);
-    expect(maxActive).toBe(2);
-    const clearing = media.clear();
-    release();
-    await clearing;
-    await expect(Promise.all(pending)).rejects.toMatchObject({
-      code: "scope_changed",
+    await expect(media.describe("/workspace/new.png")).rejects.toMatchObject({
+      code: "file_not_found",
+      retryable: true,
     });
+    await expect(media.describe("/workspace/odd.png")).rejects.toMatchObject({
+      code: "unsupported_file",
+      retryable: false,
+    });
+    await media.dispose();
+  });
+
+  it("limits active downloads to two and cancels them on clear", async () => {
+    const { client } = filesClient(3);
+    __setDownload(() => new Promise<string>(() => {}));
+    const media = new MediaCache(client, "workspace", "scope");
+    const pending = ["a", "b", "c"].map((name) =>
+      media.resolvePinned(`/workspace/${name}.png`),
+    );
+    await tick();
+    expect(__downloads).toHaveLength(2);
+    await media.clear();
+    expect(__downloads.every(([, , options]) => options?.signal?.aborted)).toBe(
+      true,
+    );
+    const results = await Promise.allSettled(pending);
+    expect(results.map((result) => result.status)).toEqual([
+      "rejected",
+      "rejected",
+      "rejected",
+    ]);
     expect(__files.size).toBe(0);
     await media.dispose();
   });
 
   it("keeps the LRU cache below 32 MiB while retaining newly resolved media", async () => {
-    const content = btoa("x".repeat(17 * 1024 * 1024));
-    const readFile = vi.fn(async (_workspace: string, path: string) =>
-      readResult(path, content),
-    );
-    const media = new MediaCache(
-      { files: { readFile } } as never,
-      "workspace",
-      "scope",
-    );
-    await media.resolve("/workspace/first.png");
-    await media.resolve("/workspace/second.png");
-    // Fresh reads stay reserved for their awaiting callers until the next task.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const { client } = filesClient(17 * MEBIBYTE);
+    const media = new MediaCache(client, "workspace", "scope");
+    (await media.resolvePinned("/workspace/first.png")).release();
+    (await media.resolvePinned("/workspace/second.png")).release();
+    await tick();
     expect(__files.size).toBe(1);
-    expect(
-      [...__files.values()].reduce(
-        (sum, item) =>
-          sum +
-          (item.encoding === "base64"
-            ? Math.floor((item.data.length * 3) / 4)
-            : item.data.length),
-        0,
-      ),
-    ).toBeLessThanOrEqual(MEDIA_CACHE_MAX_BYTES);
     await media.dispose();
   });
 
   it("keeps all visible media beyond the LRU budget and trims it once released", async () => {
-    const content = btoa("x".repeat(17 * 1024 * 1024));
-    const readFile = vi.fn(async (_workspace: string, path: string) =>
-      readResult(path, content),
-    );
-    const media = new MediaCache(
-      { files: { readFile } } as never,
-      "workspace",
-      "scope",
-    );
+    const { client } = filesClient(17 * MEBIBYTE);
+    const media = new MediaCache(client, "workspace", "scope");
     const first = await media.resolvePinned("/workspace/first.png");
     const second = await media.resolvePinned("/workspace/second.png");
-    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
     await tick();
     const firstFile = new File(first.uri);
     const secondFile = new File(second.uri);
@@ -213,90 +258,84 @@ describe("MediaCache", () => {
   });
 
   it("lets concurrent visible reads pin their files before the LRU trims", async () => {
-    const readFile = vi.fn(async (_workspace: string, path: string) =>
-      readResult(path, btoa("abcd")),
-    );
-    const media = new MediaCache(
-      { files: { readFile } } as never,
-      "workspace",
-      "scope",
-      { lruBytes: 4, maxBytes: 64 },
-    );
+    const { client } = filesClient(4);
+    const media = new MediaCache(client, "workspace", "scope", {
+      lruBytes: 4,
+      maxBytes: 64,
+    });
     const pinned = await Promise.all(
       ["a", "b", "c"].map((name) =>
         media.resolvePinned(`/workspace/${name}.png`),
       ),
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(pinned.every(({ uri }) => new File(uri).exists)).toBe(true);
-    expect(readFile).toHaveBeenCalledTimes(3);
+    expect(__downloads).toHaveLength(3);
     await media.dispose();
   });
 
-  it("refuses new media above the hard cap with a retryable error", async () => {
-    const readFile = vi.fn(async (_workspace: string, path: string) =>
-      readResult(path, btoa("abcd")),
-    );
-    const media = new MediaCache(
-      { files: { readFile } } as never,
-      "workspace",
-      "scope",
-      { lruBytes: 4, maxBytes: 8 },
-    );
+  it("refuses new media above the hard cap with a retryable error before downloading", async () => {
+    const { client } = filesClient(4);
+    const media = new MediaCache(client, "workspace", "scope", {
+      lruBytes: 4,
+      maxBytes: 8,
+    });
     const first = await media.resolvePinned("/workspace/a.png");
     await media.resolvePinned("/workspace/b.png");
     const refused = await media
       .resolvePinned("/workspace/c.png")
       .catch((error: NativeMediaError) => error);
     expect(refused).toMatchObject({ code: "cache_full", retryable: true });
+    expect(__downloads).toHaveLength(2);
     first.release();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expect(
       media.resolvePinned("/workspace/c.png"),
     ).resolves.toMatchObject({ uri: expect.any(String) });
     await media.dispose();
   });
 
-  it("marks only failures that a new read cannot fix as permanent", () => {
+  it("marks only failures that a new load cannot fix as permanent", () => {
     expect(new NativeMediaError("x", "size_limit").retryable).toBe(false);
-    expect(new NativeMediaError("x", "invalid_mime").retryable).toBe(false);
-    expect(new NativeMediaError("x", "read_failed").retryable).toBe(true);
+    expect(new NativeMediaError("x", "unsupported_file").retryable).toBe(false);
+    expect(new NativeMediaError("x", "file_not_found").retryable).toBe(true);
+    expect(new NativeMediaError("x", "download_failed").retryable).toBe(true);
     expect(new NativeMediaError("x", "scope_changed").retryable).toBe(true);
   });
 
-  it("reads bounded text and explicitly downloads bounded binary files", async () => {
-    const textBase64 = btoa("hello native");
-    const readFile = vi.fn(async (_workspace: string, path: string) => ({
-      ...readResult(path, textBase64, "text/plain"),
-      size: 12,
-    }));
-    const downloadFile = vi.fn(async (_workspace: string, path: string) => ({
-      ...readResult(path, btoa("pdf"), "application/pdf"),
-      size: 3,
-      filename: "report.pdf",
-      is_archive: false,
-    }));
-    const media = new MediaCache(
-      { files: { readFile, downloadFile } } as never,
-      "workspace",
-      "scope",
+  it("downloads opened documents once and keeps only the last one", async () => {
+    const { client, link } = filesClient(3, "pdf");
+    link.mockImplementation(async (_workspace: string, path: string) =>
+      fileLink(path, 3, { mimeType: "application/pdf" }),
     );
-    const text = await media.openFile("/workspace/readme.txt");
-    expect(text.text).toBe("hello native");
-    expect(readFile).toHaveBeenCalledWith(
-      "workspace",
-      "/workspace/readme.txt",
-      MEDIA_PREVIEW_MAX_BYTES + 1,
+    const media = new MediaCache(client, "workspace", "scope", {
+      lruBytes: 2,
+      maxBytes: 64,
+    });
+    const report = await media.openFile("/workspace/docs/report.pdf");
+    expect(report).toMatchObject({
+      name: "report.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(__downloads[0]![0]).toBe(
+      "https://curia.test/content/workspace/docs/report.pdf",
     );
-    const document = await media.openFile("/workspace/report.pdf");
-    expect(document.name).toBe("report.pdf");
-    expect(new File(document.uri).exists).toBe(true);
-    expect(downloadFile).toHaveBeenCalledOnce();
+    await tick();
+    expect(new File(report.uri).exists).toBe(true);
+    // Sharing the open document reuses its download.
+    await expect(
+      media.openFile("/workspace/docs/report.pdf"),
+    ).resolves.toMatchObject({ uri: report.uri });
+    expect(__downloads).toHaveLength(1);
+    const video = await media.openFile("/workspace/clip.mp4");
+    await tick();
+    expect(new File(report.uri).exists).toBe(false);
+    expect(new File(video.uri).exists).toBe(true);
     await media.dispose();
     expect(__files.size).toBe(0);
   });
 
-  it("saves and shares only bounded image/PDF data URLs", async () => {
+  it("saves and shares only image/PDF data URLs", async () => {
     const media = new MediaCache({ files: {} } as never, "workspace", "scope");
     const uri = await media.saveAttachment(
       `data:image/png;base64,${btoa("tool image")}`,
@@ -305,20 +344,41 @@ describe("MediaCache", () => {
     await expect(
       media.saveAttachment("https://example.test/private"),
     ).rejects.toMatchObject({ code: "invalid_payload" });
+    await expect(
+      media.saveAttachment(`data:text/html;base64,${btoa("<p>")}`),
+    ).rejects.toMatchObject({ code: "unsupported_attachment" });
     await media.dispose();
   });
 });
 
 describe("native picker upload adapter", () => {
+  function uploadClient(path = "/workspace/.opencuria/user-uploaded/x") {
+    const createUpload = vi.fn(async () => ({
+      uploadUrl: "https://curia.test/api/v1/files/upload/token",
+      expiresAt: 4_000_000_000,
+      maxBytes: FILE_TRANSFER_MAX_BYTES,
+    }));
+    const forget = vi.fn();
+    __setUpload(() => ({
+      status: 201,
+      body: JSON.stringify({ path, size: 5 }),
+      headers: {},
+    }));
+    return {
+      client: { files: { createUpload, forget } } as never,
+      createUpload,
+      forget,
+    };
+  }
+
   it("returns an empty list when document picker is cancelled", async () => {
     await expect(pickDocuments()).resolves.toEqual([]);
   });
 
-  it("normalizes HEIC and oversized raster photos to bounded JPEG and deletes adapter copies", async () => {
+  it("converts HEIC photos to JPEG, keeps others as picked and deletes adapter copies", async () => {
     const source = new File("file:///cache/IMG.HEIC");
     source.create();
-    source.write("x".repeat(UPLOAD_MAX_BYTES + 4));
-    __setNextSize(3);
+    source.write("x".repeat(20));
     __setNextResult({
       canceled: false,
       assets: [
@@ -345,146 +405,138 @@ describe("native picker upload adapter", () => {
     expect(new File(convertedUri).exists).toBe(false);
     expect(source.exists).toBe(true);
 
-    const oversized = new File("file:///cache/large.png");
-    oversized.create();
-    oversized.write("x".repeat(UPLOAD_MAX_BYTES + 4));
+    const large = new File("file:///cache/large.png");
+    large.create();
+    large.write("x".repeat(64));
     __setNextResult({
       canceled: false,
       assets: [
         {
-          uri: oversized.uri,
+          uri: large.uri,
           fileName: "large.png",
-          fileSize: oversized.size,
+          fileSize: large.size,
           mimeType: "image/png",
           width: 4000,
           type: "image",
         },
       ],
     });
-    const resized = await pickPhoto("library");
-    expect(resized[0]).toMatchObject({
-      name: "large.jpg",
-      mimeType: "image/jpeg",
-      size: 3,
+    const picked = await pickPhoto("library");
+    expect(picked[0]).toMatchObject({
+      uri: large.uri,
+      name: "large.png",
+      mimeType: "image/png",
+      size: 64,
     });
-    expect(new File(resized[0]!.uri).exists).toBe(true);
   });
 
-  it("allows an empty document to be uploaded without treating it as unreadable", async () => {
-    const file = new File("file:///cache/empty.txt");
-    file.create();
-    const uploadFile = vi.fn(async () => ({ status: "success" }));
-    await expect(
-      uploadAttachments(
-        {
-          files: {
-            listFiles: async () => ({ entries: [], error: undefined }),
-            uploadFile,
-          },
-        } as never,
-        "workspace",
-        [{ id: "empty", uri: file.uri, name: "empty.txt" }],
-      ),
-    ).resolves.toEqual([expect.stringMatching(/empty\.txt$/)]);
-    expect(uploadFile).toHaveBeenCalledOnce();
-  });
-
-  it("does not read base64 for files above the 10 MiB cap", async () => {
-    const file = new File("file:///cache/large.bin");
-    file.create();
-    file.write("x".repeat(UPLOAD_MAX_BYTES + 1));
-    const uploadFile = vi.fn();
-    await expect(
-      uploadAttachments(
-        { files: { listFiles: vi.fn(), uploadFile } } as never,
-        "workspace",
-        [{ id: "a", uri: file.uri, name: "large.bin" }],
-      ),
-    ).rejects.toMatchObject({ code: "size_limit" });
-    expect(uploadFile).not.toHaveBeenCalled();
-  });
-
-  it("lists before upload, uses shared names, and returns uploaded workspace paths", async () => {
+  it("uploads each file with one PUT and returns the path the server chose", async () => {
     const file = new File("file:///cache/source.txt");
     file.create();
-    file.write(btoa("small"), { encoding: "base64" });
-    const listFiles = vi.fn(async () => ({
-      entries: [
+    file.write("small");
+    const saved = "/workspace/.opencuria/user-uploaded/source_file_1.txt";
+    const { client, createUpload, forget } = uploadClient(saved);
+    const paths = await uploadAttachments(client, "workspace", [
+      { id: "a", uri: file.uri, name: "source file.txt" },
+    ]);
+    expect(createUpload).toHaveBeenCalledWith("workspace", {
+      directory: "/workspace/.opencuria/user-uploaded",
+      filename: "source_file.txt",
+      size: 5,
+      conflict: "rename",
+    });
+    expect(__uploads).toEqual([
+      [
+        "https://curia.test/api/v1/files/upload/token",
+        file.uri,
         {
-          name: "existing.txt",
-          path: "/workspace/.opencuria/user-uploaded/existing.txt",
-          type: "file",
-          size: 2,
+          httpMethod: "PUT",
+          uploadType: UploadType.BINARY_CONTENT,
+          headers: { "Content-Type": "application/octet-stream" },
         },
       ],
-      error: undefined,
-    }));
-    const uploadFile = vi.fn(async () => ({ status: "success" }));
-    const paths = await uploadAttachments(
-      { files: { listFiles, uploadFile } } as never,
-      "workspace",
-      [{ id: "a", uri: file.uri, name: "source.txt" }],
-    );
-    expect(listFiles).toHaveBeenCalledOnce();
-    expect(uploadFile).toHaveBeenCalledOnce();
-    expect(uploadFile.mock.calls[0]![1].filename).toMatch(/_source\.txt$/);
-    expect(paths[0]).toBe(
-      `/workspace/.opencuria/user-uploaded/${uploadFile.mock.calls[0]![1].filename}`,
-    );
+    ]);
+    expect(paths).toEqual([saved]);
+    expect(forget).toHaveBeenCalledWith("workspace", saved);
   });
 
-  it("ignores only explicit missing upload directory and fails safely for other listing errors", async () => {
-    const missing = await existingUploadNames(
-      {
-        files: {
-          listFiles: async () => ({
-            entries: [],
-            error:
-              "Failed to list files: find: '/workspace/.opencuria/user-uploaded': No such file or directory",
-          }),
-        },
-      } as never,
-      "workspace",
-    );
-    expect(missing.size).toBe(0);
-    const uploadFile = vi.fn();
-    const listFiles = vi.fn(async () => {
-      throw new Error("socket disconnected");
-    });
-    const file = new File("file:///cache/source.txt");
+  it("uploads an empty document", async () => {
+    const file = new File("file:///cache/empty.txt");
     file.create();
-    file.write(btoa("x"), { encoding: "base64" });
+    const saved = "/workspace/.opencuria/user-uploaded/empty.txt";
+    const { client, createUpload } = uploadClient(saved);
     await expect(
-      uploadAttachments(
-        { files: { listFiles, uploadFile } } as never,
-        "workspace",
-        [{ id: "a", uri: file.uri, name: "source.txt" }],
-      ),
-    ).rejects.toThrow("socket disconnected");
-    expect(uploadFile).not.toHaveBeenCalled();
+      uploadAttachments(client, "workspace", [
+        { id: "empty", uri: file.uri, name: "empty.txt" },
+      ]),
+    ).resolves.toEqual([saved]);
+    expect(createUpload).toHaveBeenCalledWith(
+      "workspace",
+      expect.objectContaining({ size: 0 }),
+    );
   });
 
-  it("uploads into a fresh workspace when the runner reports the missing upload directory", async () => {
-    // The shared client rejects with the runner's raw `find` stderr, which
-    // ends with a newline.
-    const listFiles = vi.fn(async () => {
-      throw new FileTransferError(
-        "Failed to list files: find: ‘/workspace/.opencuria/user-uploaded’: No such file or directory\n",
-      );
+  it("refuses files above the transfer limit before any upload", async () => {
+    const small = new File("file:///cache/small.txt");
+    small.create();
+    small.write("small");
+    const large = new File("file:///cache/large.bin");
+    large.create();
+    const sizeOf = Object.getOwnPropertyDescriptor(
+      File.prototype,
+      "size",
+    )!.get!;
+    vi.spyOn(File.prototype, "size", "get").mockImplementation(function (
+      this: File,
+    ) {
+      return this.uri === large.uri
+        ? FILE_TRANSFER_MAX_BYTES + 1
+        : sizeOf.call(this);
     });
-    const uploadFile = vi.fn(async () => ({ status: "success" }));
+    const { client, createUpload } = uploadClient();
+    await expect(
+      uploadAttachments(client, "workspace", [
+        { id: "a", uri: small.uri, name: "small.txt" },
+        { id: "b", uri: large.uri, name: "large.bin" },
+      ]),
+    ).rejects.toMatchObject({
+      code: "size_limit",
+      message: "large.bin is too large. Files up to 500 MB can be transferred.",
+    });
+    expect(createUpload).not.toHaveBeenCalled();
+    expect(__uploads).toHaveLength(0);
+  });
+
+  it("reports refused uploads with the server's message", async () => {
     const file = new File("file:///cache/source.txt");
     file.create();
-    file.write(btoa("x"), { encoding: "base64" });
-    const paths = await uploadAttachments(
-      { files: { listFiles, uploadFile } } as never,
-      "workspace",
-      [{ id: "a", uri: file.uri, name: "source.txt" }],
-    );
-    expect(uploadFile).toHaveBeenCalledOnce();
-    expect(paths[0]).toMatch(
-      /^\/workspace\/\.opencuria\/user-uploaded\/[^/]+_source\.txt$/,
-    );
+    file.write("small");
+    const { client } = uploadClient();
+    __setUpload(() => ({
+      status: 507,
+      body: JSON.stringify({
+        detail: "The workspace disk is full.",
+        code: "disk_full",
+      }),
+      headers: {},
+    }));
+    await expect(
+      uploadAttachments(client, "workspace", [
+        { id: "a", uri: file.uri, name: "source.txt" },
+      ]),
+    ).rejects.toMatchObject({
+      code: "disk_full",
+      message: "The workspace disk is full.",
+    });
+    __setUpload(() => ({ status: 502, body: "Bad gateway", headers: {} }));
+    await expect(
+      uploadAttachments(client, "workspace", [
+        { id: "a", uri: file.uri, name: "source.txt" },
+      ]),
+    ).rejects.toMatchObject({
+      code: "upload_failed",
+      message: "The upload failed (502).",
+    });
   });
 });
 

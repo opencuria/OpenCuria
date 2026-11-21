@@ -38,6 +38,23 @@ vi.mock('@/services/organizations.api', () => ({
   })),
 }))
 
+vi.mock('@/services/licensing.api', () => ({
+  getWindowsLicensing: vi.fn(async () => ({
+    mode: 'per_device',
+    kms_host: '',
+    user_license_seats: 0,
+    max_running: null,
+    product_keys: [],
+    members: [],
+    usage: { windows_workspaces: 0, running: 0, device_key: 0, user: 0, unlicensed: 0 },
+  })),
+  updateWindowsLicensing: vi.fn(),
+  addWindowsProductKey: vi.fn(),
+  updateWindowsProductKey: vi.fn(),
+  deleteWindowsProductKey: vi.fn(),
+  setWindowsUserLicensed: vi.fn(),
+}))
+
 vi.mock('@/services/api', () => ({
   getApiClient: () => ({ request: vi.fn(async () => []), get: vi.fn(async () => []) }),
   get: vi.fn(async () => []),
@@ -232,6 +249,7 @@ describe('SettingsSheet', () => {
       'runners',
       'credential-services',
       'image-definitions',
+      'windows',
     ]) {
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
     }
@@ -246,7 +264,14 @@ describe('SettingsSheet', () => {
   it('shows members only the tabs they can change something in', () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
-    for (const tab of ['general', 'agents', 'runners', 'credential-services', 'image-definitions'])
+    for (const tab of [
+      'general',
+      'agents',
+      'runners',
+      'credential-services',
+      'image-definitions',
+      'windows',
+    ])
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(false)
     for (const tab of ['provider', 'skills', 'credentials', 'plugins', 'api-keys', 'images'])
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
@@ -262,10 +287,11 @@ describe('SettingsSheet', () => {
     expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(false)
     expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Provider & Models')
-    for (const tab of ['agents', 'credential-services', 'image-definitions'] as const) {
+    for (const tab of ['agents', 'credential-services', 'image-definitions', 'windows'] as const) {
       await wrapper.setProps({ tab })
       await settleAsyncComponents()
       expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
+      expect(wrapper.findComponent({ name: 'WindowsLicensingTab' }).exists()).toBe(false)
     }
     authMock.isAdmin = true
   })
@@ -312,7 +338,7 @@ describe('SettingsSheet', () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
 
-    for (const tab of ['runners', 'general', 'image-definitions', 'nope']) {
+    for (const tab of ['runners', 'general', 'image-definitions', 'windows', 'nope']) {
       window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab } }))
       await flushPromises()
       await wrapper.vm.$nextTick()
@@ -329,6 +355,15 @@ describe('SettingsSheet', () => {
     await flushPromises()
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
+  })
+
+  it('opens the admin-only Windows licensing tab', async () => {
+    const wrapper = mountSheet()
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'windows' } }))
+    await settleAsyncComponents()
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Windows')
+    expect(wrapper.findComponent({ name: 'WindowsLicensingTab' }).exists()).toBe(true)
+    expect(wrapper.text()).toContain('License model')
   })
 
   it('opens the plugins tab via event', async () => {

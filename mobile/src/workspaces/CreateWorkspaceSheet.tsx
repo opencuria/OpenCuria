@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Alert } from "react-native";
 import {
   compatibleRunners,
   defaultWorkspaceImageOption,
@@ -8,10 +9,12 @@ import {
   workspaceImageOptions,
   type QemuResourceLimits,
   type QemuResources,
+  type WorkspaceImageOption,
 } from "@opencuria/chat-core/workspaceCreation";
+import { imageOsBadge } from "@opencuria/chat-core/imageDefinitionLifecycle";
 import type { OpenCuriaClient } from "@opencuria/client";
-import { NativeForm } from "../ui/NativeForm";
 import type { NativeFormRow, NativeFormSection } from "../ui/NativeForm.types";
+import { errorRows } from "../ui/formStates";
 import { NativeModal } from "../ui/primitives";
 import { showToast } from "../ui/toast";
 import type { WorkspaceCatalog } from "./useWorkspaceCatalog";
@@ -42,6 +45,18 @@ function repoName(url: string): string {
       .pop()
       ?.replace(/\.git$/, "") || url
   );
+}
+
+/** A picker entry for an image, e.g. "Windows 11 · Windows". */
+function imagePickerOption(option: WorkspaceImageOption): {
+  value: string;
+  label: string;
+} {
+  const badge = imageOsBadge(option.guestOs);
+  return {
+    value: option.value,
+    label: badge ? `${option.label} · ${badge}` : option.label,
+  };
 }
 
 /** "New workspace": name and image first; repositories, plugins and resources below. */
@@ -93,7 +108,8 @@ function CreateSheet({
   const runners = compatibleRunners(selected, catalog.runners);
   const runner =
     runners.find((entry) => entry.id === runnerId) ?? runners[0] ?? null;
-  const limits = qemuResourceLimits(runner);
+  // The image's minimums (e.g. Windows) raise the runner's minimums and defaults.
+  const limits = qemuResourceLimits(runner, undefined, selected?.minimums);
   const previousLimits = useRef<QemuResourceLimits>(limits);
   const effective = resources ?? {
     vcpus: limits.defaultVcpus,
@@ -147,6 +163,27 @@ function CreateSheet({
     selection.valid &&
     (captured || (Boolean(artifactId) && resourcesValid(effective, limits)));
 
+  // Anything the user entered or chose; closing then asks to discard it.
+  const dirty =
+    Boolean(name.trim() || repoInput.trim()) ||
+    repos.length > 0 ||
+    pluginIds.length > 0 ||
+    credentialIds.length > 0 ||
+    resources !== null ||
+    Boolean(runnerId) ||
+    imageValue !== initialImageValue;
+
+  const close = () => {
+    if (!dirty) {
+      onClose();
+      return;
+    }
+    Alert.alert("Discard changes?", "This workspace is not created yet.", [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Discard", style: "destructive", onPress: onClose },
+    ]);
+  };
+
   const create = async () => {
     if (!valid || !selected || submitting) return;
     setSubmitting(true);
@@ -198,10 +235,7 @@ function CreateSheet({
               ? [
                   {
                     title: "Organization images",
-                    options: options.definitions.map((option) => ({
-                      value: option.value,
-                      label: option.label,
-                    })),
+                    options: options.definitions.map(imagePickerOption),
                   },
                 ]
               : []),
@@ -209,10 +243,7 @@ function CreateSheet({
               ? [
                   {
                     title: "Captured images",
-                    options: options.captured.map((option) => ({
-                      value: option.value,
-                      label: option.label,
-                    })),
+                    options: options.captured.map(imagePickerOption),
                   },
                 ]
               : []),
@@ -221,17 +252,29 @@ function CreateSheet({
           disabled: submitting,
         },
       ]
-    : [
-        {
-          kind: "note",
-          id: "no-images",
-          text: catalog.loading
-            ? "Loading images…"
-            : (catalog.imageError ??
-              "No organization or captured images are available on an online runner."),
-          tone: catalog.loading ? "muted" : "danger",
-        },
-      ];
+    : catalog.imageError
+      ? errorRows(
+          "images",
+          catalog.imageError,
+          () => void catalog.reload(),
+          catalog.loading,
+        )
+      : [
+          catalog.loading
+            ? {
+                kind: "note",
+                id: "no-images",
+                text: "Loading images…",
+                busy: true,
+              }
+            : {
+                kind: "note",
+                id: "no-images",
+                text: "No organization or captured images are available on an online runner.",
+                tone: "danger",
+                symbol: "exclamationmark.triangle",
+              },
+        ];
 
   const sections: NativeFormSection[] = [
     {
@@ -361,10 +404,9 @@ function CreateSheet({
   return (
     <NativeModal
       visible
-      onClose={onClose}
+      onClose={close}
       title="New workspace"
-      scrollable={false}
-      swipeToDismiss={!name.trim() && !repos.length}
+      swipeToDismiss={!dirty}
       primaryAction={{
         title: captured ? "Clone" : "Create",
         onPress: () => {
@@ -375,8 +417,7 @@ function CreateSheet({
         testID: "workspace-create",
       }}
       testID="create-workspace-sheet"
-    >
-      <NativeForm sections={sections} />
-    </NativeModal>
+      form={{ sections }}
+    />
   );
 }

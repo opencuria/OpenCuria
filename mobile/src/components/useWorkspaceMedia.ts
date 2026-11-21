@@ -1,16 +1,52 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  mediaLoadMode,
+  type WorkspaceFileLink,
+} from "@opencuria/chat-core/workspaceFiles";
 
-/** A workspace media file URI, optionally held until `release()`. */
+/** A workspace media URI, optionally held until `release()`. */
 export type ResolvedChatMedia = string | { uri: string; release: () => void };
 
+/** What a media element shows before its file loads. */
+export type ChatMediaPreview = Pick<WorkspaceFileLink, "size" | "thumbnailUrl">;
+
+/**
+ * Loads workspace media for chat views. With `describe`, media above the
+ * autoload size wait for a tap (`mediaLoadMode`); `describe` resolving to
+ * null (e.g. a copy saved offline) loads the file right away.
+ */
+export interface ChatMediaResolver {
+  (path: string): Promise<ResolvedChatMedia>;
+  describe?: (path: string) => Promise<ChatMediaPreview | null>;
+}
+
 export type WorkspaceMediaState =
-  | { status: "loading" }
+  /** `preview` stays while a tapped file loads. */
+  | { status: "loading"; preview?: ChatMediaPreview }
   | { status: "ready"; uri: string }
+  /** Waits for `request(path)`, or cannot load at all. */
+  | { status: "tap" | "too_large"; preview: ChatMediaPreview }
   | { status: "failed" };
+
+/** A media element that shows its preview instead of its file. */
+export type MediaPlaceholderState = {
+  status: "tap" | "too_large" | "loading";
+  preview: ChatMediaPreview;
+};
+
+/** The placeholder `state` shows, if any. */
+export function placeholderState(
+  state: WorkspaceMediaState | undefined,
+): MediaPlaceholderState | null {
+  if (state?.status === "tap" || state?.status === "too_large") return state;
+  if (state?.status === "loading" && state.preview)
+    return { status: "loading", preview: state.preview };
+  return null;
+}
 
 /**
  * Delays before automatic retries of a failed read. Reads fail transiently
- * while the socket (re)connects, a transfer times out or a file is still
+ * while the workspace (re)connects, a transfer times out or a file is still
  * being written; once these are spent, a tap retries.
  */
 export const MEDIA_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
@@ -24,6 +60,27 @@ interface Entry {
   timer?: ReturnType<typeof setTimeout>;
   /** Invalidates in-flight reads and timers of a superseded attempt. */
   attempt: number;
+}
+
+type Describe = NonNullable<ChatMediaResolver["describe"]>;
+
+/**
+ * Paths the user asked to load, per media source (one per workspace, server
+ * and account) for the app session, so scrolled or reopened rows load them
+ * again without asking. Every view of a requested path loads it.
+ */
+const requested = new WeakMap<
+  Describe,
+  { paths: Set<string>; listeners: Set<(path: string) => void> }
+>();
+
+function requestsOf(describe: Describe) {
+  let entry = requested.get(describe);
+  if (!entry) {
+    entry = { paths: new Set(), listeners: new Set() };
+    requested.set(describe, entry);
+  }
+  return entry;
 }
 
 const LOADING: WorkspaceMediaState = { status: "loading" };
@@ -42,18 +99,21 @@ export function useWorkspaceMedia({
   active,
 }: {
   paths: readonly string[];
-  resolve?: (path: string) => Promise<ResolvedChatMedia>;
+  resolve?: ChatMediaResolver;
   scope: string;
   active: boolean;
 }): {
   media: Record<string, WorkspaceMediaState>;
   /** Read a failed path again. */
   retry: (path: string) => void;
+  /** Load a path above the autoload size; remembered for the session. */
+  request: (path: string) => void;
   /** The view could not show a ready file (e.g. it was evicted): read again once. */
   reportDisplayError: (path: string) => void;
 } {
   const resolveRef = useRef(resolve);
   resolveRef.current = resolve;
+  const describe = resolve?.describe;
   const entries = useRef(new Map<string, Entry>());
   const entriesScope = useRef(scope);
   // Published states carry their scope, so a new scope never shows old files.
@@ -80,48 +140,60 @@ export function useWorkspaceMedia({
       const attempt = ++entry.attempt;
       if (entry.timer) clearTimeout(entry.timer);
       entry.timer = undefined;
-      entry.state = LOADING;
+      const preview =
+        entry.state.status === "tap" ? entry.state.preview : undefined;
+      entry.state = preview ? { status: "loading", preview } : LOADING;
       const current = () =>
         entries.current.get(path) === entry && entry.attempt === attempt;
-      void Promise.resolve()
-        .then(() => {
-          const resolver = resolveRef.current;
-          if (!resolver) throw new Error("Media resolver unavailable.");
-          return resolver(path);
-        })
-        .then((resolved) => {
-          const uri = typeof resolved === "string" ? resolved : resolved?.uri;
-          const release =
-            typeof resolved === "string" ? undefined : resolved?.release;
-          if (!current()) {
-            release?.();
-            return;
-          }
-          if (!uri) {
-            release?.();
-            throw new Error("The media file is unavailable.");
-          }
-          entry.release = release;
+      void (async () => {
+        const resolver = resolveRef.current;
+        if (!resolver) throw new Error("Media resolver unavailable.");
+        const link = resolver.describe ? await resolver.describe(path) : null;
+        if (!current()) return;
+        const mode = link
+          ? mediaLoadMode(link, requestsOf(resolver.describe!).paths.has(path))
+          : "auto";
+        if (mode !== "auto") {
           entry.failures = 0;
-          entry.state = { status: "ready", uri };
+          entry.state = {
+            status: mode,
+            preview: { size: link!.size, thumbnailUrl: link!.thumbnailUrl },
+          };
           publish();
-        })
-        .catch((error: unknown) => {
-          if (!current()) return;
-          entry.failures += 1;
-          const delay = isRetryable(error)
-            ? MEDIA_RETRY_DELAYS_MS[entry.failures - 1]
-            : undefined;
-          if (delay === undefined) {
-            entry.state = FAILED;
-          } else {
-            entry.timer = setTimeout(() => {
-              entry.timer = undefined;
-              if (current()) load(path, entry);
-            }, delay);
-          }
-          publish();
-        });
+          return;
+        }
+        const resolved = await resolver(path);
+        const uri = typeof resolved === "string" ? resolved : resolved?.uri;
+        const release =
+          typeof resolved === "string" ? undefined : resolved?.release;
+        if (!current()) {
+          release?.();
+          return;
+        }
+        if (!uri) {
+          release?.();
+          throw new Error("The media file is unavailable.");
+        }
+        entry.release = release;
+        entry.failures = 0;
+        entry.state = { status: "ready", uri };
+        publish();
+      })().catch((error: unknown) => {
+        if (!current()) return;
+        entry.failures += 1;
+        const delay = isRetryable(error)
+          ? MEDIA_RETRY_DELAYS_MS[entry.failures - 1]
+          : undefined;
+        if (delay === undefined) {
+          entry.state = FAILED;
+        } else {
+          entry.timer = setTimeout(() => {
+            entry.timer = undefined;
+            if (current()) load(path, entry);
+          }, delay);
+        }
+        publish();
+      });
     },
     [publish],
   );
@@ -164,6 +236,22 @@ export function useWorkspaceMedia({
     publish();
   }, [enabled, load, pathKey, publish, releaseAll, scope]);
 
+  // A path requested anywhere loads in every view that waits for it.
+  useEffect(() => {
+    if (!describe) return;
+    const { listeners } = requestsOf(describe);
+    const onRequest = (path: string) => {
+      const entry = entries.current.get(path);
+      if (entry?.state.status !== "tap") return;
+      load(path, entry);
+      publish();
+    };
+    listeners.add(onRequest);
+    return () => {
+      listeners.delete(onRequest);
+    };
+  }, [describe, load, publish]);
+
   const retry = useCallback(
     (path: string) => {
       const entry = entries.current.get(path);
@@ -174,6 +262,17 @@ export function useWorkspaceMedia({
       publish();
     },
     [load, publish],
+  );
+
+  const request = useCallback(
+    (path: string) => {
+      if (!describe) return;
+      const requests = requestsOf(describe);
+      if (requests.paths.has(path)) return;
+      requests.paths.add(path);
+      for (const listener of [...requests.listeners]) listener(path);
+    },
+    [describe],
   );
 
   const reportDisplayError = useCallback(
@@ -194,6 +293,7 @@ export function useWorkspaceMedia({
   return {
     media: enabled && published.scope === scope ? published.media : NONE,
     retry,
+    request,
     reportDisplayError,
   };
 }

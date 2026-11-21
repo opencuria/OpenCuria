@@ -1,0 +1,116 @@
+import type { ChatInputStorage } from "@opencuria/chat-core/chatInputCache";
+import type { OfflineAccount, SavedDraft } from "../offline/offlineStore";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Drafts kept per account at most; the least recently edited go first. */
+export const MAX_SAVED_DRAFTS = 100;
+/** A draft that was not edited for this long is deleted. */
+export const SAVED_DRAFT_MAX_AGE_MS = 30 * DAY_MS;
+/** Edits are written at most this often while typing. */
+export const DRAFT_SAVE_DELAY_MS = 500;
+
+export type DraftAccount = Pick<OfflineAccount, "loadDrafts" | "saveDrafts">;
+
+/**
+ * One account's composer drafts. Reads are synchronous so a chat shows its
+ * draft at once. The drafts are saved with the account's offline data, which
+ * sign out deletes; without an account they are kept in memory only.
+ */
+export class ChatDraftStore implements ChatInputStorage {
+  /** Settles once the drafts saved on this device are loaded. */
+  readonly ready: Promise<void>;
+  private readonly drafts = new Map<
+    string,
+    { text: string; editedAt: number }
+  >();
+  /** Drafts edited before the saved ones were loaded; the edits win. */
+  private readonly edited = new Set<string>();
+  private loaded = false;
+  private dirty = false;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly account: DraftAccount | null,
+    private readonly now: () => number = Date.now,
+  ) {
+    this.ready = account ? this.load(account) : Promise.resolve();
+  }
+
+  getItem(key: string): string | null {
+    return this.drafts.get(key)?.text ?? null;
+  }
+
+  setItem(key: string, text: string): void {
+    this.drafts.set(key, { text, editedAt: this.now() });
+    this.changed(key);
+  }
+
+  removeItem(key: string): void {
+    if (this.drafts.delete(key) || !this.loaded) this.changed(key);
+  }
+
+  /** Write pending edits now, e.g. when the app goes to the background. */
+  async flush(): Promise<void> {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (!this.account) return;
+    await this.ready;
+    if (!this.dirty) return;
+    this.dirty = false;
+    try {
+      await this.account.saveDrafts(this.live());
+    } catch {
+      // The drafts stay in memory; the next edit or flush tries again.
+      this.dirty = true;
+    }
+  }
+
+  private changed(key: string): void {
+    if (!this.loaded) this.edited.add(key);
+    this.dirty = true;
+    if (!this.account || this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.flush();
+    }, DRAFT_SAVE_DELAY_MS);
+  }
+
+  private async load(account: DraftAccount): Promise<void> {
+    try {
+      for (const draft of await account.loadDrafts()) {
+        const editedAt = Date.parse(draft.editedAt);
+        if (this.edited.has(draft.key) || !Number.isFinite(editedAt)) continue;
+        this.drafts.set(draft.key, { text: draft.text, editedAt });
+      }
+    } catch {
+      // Unreadable drafts are gone; new ones are saved over them.
+    }
+    const kept = new Set(this.live().map((draft) => draft.key));
+    for (const key of this.drafts.keys())
+      if (!kept.has(key)) {
+        this.drafts.delete(key);
+        this.dirty = true;
+      }
+    this.edited.clear();
+    this.loaded = true;
+    // Expired drafts leave the device too, not only the composer.
+    if (this.dirty) void Promise.resolve().then(() => this.flush());
+  }
+
+  /** Drafts worth keeping, most recently edited first. */
+  private live(): SavedDraft[] {
+    const now = this.now();
+    return [...this.drafts]
+      .filter(
+        ([, draft]) =>
+          draft.text.trim() && now - draft.editedAt < SAVED_DRAFT_MAX_AGE_MS,
+      )
+      .sort(([, a], [, b]) => b.editedAt - a.editedAt)
+      .slice(0, MAX_SAVED_DRAFTS)
+      .map(([key, draft]) => ({
+        key,
+        text: draft.text,
+        editedAt: new Date(draft.editedAt).toISOString(),
+      }));
+  }
+}

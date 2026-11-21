@@ -5,6 +5,7 @@ import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import {
@@ -37,13 +38,14 @@ export function PluginPage({
         title="Plugin"
         sections={[]}
         loading={!plugins.data && !plugins.error}
-        empty={{
-          title: "Plugin unavailable",
-          description:
-            plugins.error ??
-            "This plugin is unavailable in the current organization or no longer exists.",
-          symbol: "exclamationmark.triangle.fill",
-        }}
+        empty={
+          loadFailure("plugin", plugins) ?? {
+            title: "Plugin unavailable",
+            description:
+              "This plugin is unavailable in the current organization or no longer exists.",
+            symbol: "exclamationmark.triangle",
+          }
+        }
         testID="settings-plugin"
       />
     );
@@ -198,6 +200,25 @@ export function PluginPage({
             },
           ],
     },
+    ...(editable
+      ? [
+          {
+            id: "danger",
+            rows: [
+              {
+                kind: "button" as const,
+                id: "delete",
+                title: "Delete plugin",
+                symbol: "trash" as const,
+                destructive: true,
+                busy: busy === "delete",
+                disabled: Boolean(busy),
+                onPress: remove,
+              },
+            ],
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -205,22 +226,10 @@ export function PluginPage({
       title={plugin.name}
       sections={sections}
       actions={
-        editable
-          ? [
-              { id: "edit", title: "Edit", symbol: "pencil" },
-              {
-                id: "delete",
-                title: "Delete",
-                symbol: "trash",
-                destructive: true,
-                disabled: Boolean(busy),
-              },
-            ]
-          : undefined
+        editable ? [{ id: "edit", title: "Edit", symbol: "pencil" }] : undefined
       }
       onAction={(id) => {
         if (id === "edit") openPluginEditor(resources, navigation, plugin);
-        else if (id === "delete") remove();
       }}
       testID="settings-plugin"
     />

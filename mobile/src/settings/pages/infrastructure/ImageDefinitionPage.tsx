@@ -17,6 +17,7 @@ import type { NativeSymbol } from "../../../ui/controls.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { usePolling } from "../../usePolling";
@@ -80,11 +81,13 @@ export function ImageDefinitionPage({
         title="Image definition"
         sections={[]}
         loading={!definitions.data && !definitions.error}
-        empty={{
-          title: "Definition unavailable",
-          description: definitions.error ?? "This definition no longer exists.",
-          symbol: "exclamationmark.triangle.fill",
-        }}
+        empty={
+          loadFailure("image definition", definitions) ?? {
+            title: "Definition unavailable",
+            description: "This definition no longer exists.",
+            symbol: "exclamationmark.triangle",
+          }
+        }
         testID="settings-image-definition"
       />
     );
@@ -271,18 +274,9 @@ export function ImageDefinitionPage({
               },
             ]
           : []),
-        ...(actions.canDelete || actions.canRetryDelete
-          ? [
-              {
-                id: "delete",
-                title: actions.canRetryDelete ? "Retry delete" : "Delete",
-                symbol: "trash",
-                destructive: true,
-              },
-            ]
-          : []),
       ]
     : [];
+  const deletable = isAdmin && (actions.canDelete || actions.canRetryDelete);
 
   const onMenu = (id: string) => {
     if (id === "edit")
@@ -301,13 +295,6 @@ export function ImageDefinitionPage({
         id,
         () => client.images.activateDefinition(definition.id),
         id === "enable" ? "Definition enabled" : "Definition restored",
-      );
-    else if (id === "delete")
-      navigation.push(
-        deletionRoute(
-          { target_type: "definition", target_id: definition.id },
-          definition.name,
-        ),
       );
   };
 
@@ -348,6 +335,33 @@ export function ImageDefinitionPage({
     ...(runnerList.length
       ? []
       : [{ id: "runners-footer", footer: "No runners yet.", rows: [] }]),
+    ...(deletable
+      ? [
+          {
+            id: "danger",
+            rows: [
+              {
+                kind: "button" as const,
+                id: "delete",
+                testID: "delete-image-definition",
+                title: actions.canRetryDelete
+                  ? "Retry delete"
+                  : "Delete definition",
+                symbol: "trash" as const,
+                destructive: true,
+                disabled: Boolean(busy),
+                onPress: () =>
+                  navigation.push(
+                    deletionRoute(
+                      { target_type: "definition", target_id: definition.id },
+                      definition.name,
+                    ),
+                  ),
+              },
+            ],
+          },
+        ]
+      : []),
   ];
 
   return (

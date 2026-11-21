@@ -72,6 +72,14 @@ describe('toolAttachments', () => {
     ])
   })
 
+  it('keeps workspace file paths with spaces and percent signs literally', () => {
+    const attachments = [
+      { type: 'file', mime: 'image/png', path: '/workspace/shots/my shot.png' },
+      { type: 'file', mime: 'image/png', path: '/workspace/shots/100%25.png' },
+    ]
+    expect(toolAttachments(makePart({ meta: { attachments } }))).toEqual(attachments)
+  })
+
   it(`caps the result at ${TOOL_ATTACHMENT_MAX_COUNT} entries like the backend`, () => {
     expect(TOOL_ATTACHMENT_MAX_COUNT).toBe(2)
     const part = makePart({

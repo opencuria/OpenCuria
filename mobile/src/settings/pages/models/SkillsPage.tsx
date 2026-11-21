@@ -3,7 +3,7 @@ import type { Skill } from "@opencuria/client";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 
@@ -54,29 +54,29 @@ export function SkillsPage(): React.JSX.Element {
   if (sections.length)
     sections[sections.length - 1]!.footer =
       "Appended to harness prompts. Personal skills are yours across all organizations; organization skills are shared with all members.";
+  const failure = skills.data ? undefined : loadFailure("skills", skills);
+  const create = {
+    title: "New skill",
+    symbol: "plus" as const,
+    onPress: () => navigation.push(route("skill", "new")),
+  };
 
   return (
     <SettingsPage
       title="Skills"
-      sections={
-        skills.error && !skills.data
-          ? loadErrorSections(skills.error, () => void skills.reload())
-          : sections
-      }
+      sections={failure ? [] : [...refreshError("skills", skills), ...sections]}
       loading={!skills.data && !skills.error}
       onRefresh={skills.reload}
-      empty={{
-        title: "No skills yet",
-        description:
-          "Create your first skill to inject reusable prompt context into harness sessions.",
-        symbol: "book.closed",
-      }}
-      primaryAction={{
-        title: "New skill",
-        symbol: "plus",
-        onPress: () => navigation.push(route("skill", "new")),
-        testID: "new-skill",
-      }}
+      empty={
+        failure ?? {
+          title: "No skills yet",
+          description:
+            "Create your first skill to inject reusable prompt context into harness sessions.",
+          symbol: "book.closed",
+          action: { ...create, testID: "empty-new-skill" },
+        }
+      }
+      primaryAction={{ ...create, testID: "new-skill" }}
       testID="settings-skills"
     />
   );

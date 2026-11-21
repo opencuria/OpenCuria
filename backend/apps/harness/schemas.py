@@ -96,6 +96,40 @@ class HarnessSteerOut(Schema):
     created_at: datetime
 
 
+class HarnessScheduledMessageIn(Schema):
+    """Request schema for a message sent into the conversation later.
+
+    Run options apply when the message starts a new turn; a message arriving
+    while the agent works steers the running turn instead.
+    """
+
+    prompt: str
+    send_at: datetime
+    mode: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
+    skill_ids: list[str] = []
+
+
+class HarnessScheduledMessagePatchIn(Schema):
+    """Request schema for moving a scheduled message to another time."""
+
+    send_at: datetime
+
+
+class HarnessScheduledMessageOut(Schema):
+    """A message waiting to be sent into its conversation."""
+
+    id: uuid.UUID
+    session_id: uuid.UUID
+    content: str
+    send_at: datetime
+    status: str
+    error: str = ""
+    skill_ids: list[str] = []
+    created_at: datetime
+
+
 class HarnessForkIn(Schema):
     """Copy a session through an answer, or all messages when omitted."""
 
@@ -456,6 +490,7 @@ def timeline_to_out(
     *,
     interactions: InteractionService,
     pending_steers: Callable[[uuid.UUID], list[SteerEntry]],
+    scheduled_messages: Callable[[uuid.UUID], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Present saved history with explicit interaction and live steering ports."""
     messages = conversations.list_timeline_messages(session.id)
@@ -518,6 +553,9 @@ def timeline_to_out(
         "steers": [
             entry.to_payload() for entry in pending_steers(session.id)
         ],
+        "scheduled_messages": (
+            scheduled_messages(session.id) if scheduled_messages else []
+        ),
     }
 
 

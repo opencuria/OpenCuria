@@ -25,6 +25,7 @@ from apps.runners.models import (
 from common.utils import hash_token
 
 from .test_image_definitions_api import _auth_headers, _create_api_key
+from .test_windows_images import built_image, seed
 
 _ALL_IMAGE_PERMISSIONS = [
     APIKeyPermission.IMAGE_DEFINITIONS_READ.value,
@@ -374,3 +375,138 @@ def test_workspace_and_recipe_contracts_expose_vm_configuration_only():
     for schema in (WorkspaceCreateIn, ImageDefinitionCreateIn, ImageDefinitionUpdateIn):
         assert "runtime_type" not in schema.model_fields
         assert "custom_dockerfile" not in schema.model_fields
+
+
+# ---------------------------------------------------------------------------
+# Windows recipes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("body", "status", "code"),
+    [
+        (
+            {"base_distro": "windows:11", "packages": ["git && x"]},
+            400,
+            "invalid_package_id",
+        ),
+        (
+            {"base_distro": "windows:11", "env_vars": {"A B": "1"}},
+            400,
+            "invalid_env_var_name",
+        ),
+        ({"base_distro": "windows:10"}, 409, "unsupported_base_distro"),
+    ],
+)
+def test_invalid_recipes_are_rejected_with_a_code(
+    client, recipe_org, body, status, code
+):
+    response = _post(
+        client,
+        "/api/v1/image-definitions/",
+        {"name": "Invalid", **body},
+        recipe_org["admin_headers"],
+    )
+
+    assert response.status_code == status, response.content
+    assert response.json()["code"] == code
+    assert not ImageDefinition.objects.filter(name="Invalid").exists()
+
+
+@pytest.mark.django_db
+def test_recipe_update_validates_against_the_effective_os(client, recipe_org):
+    definition = recipe_org["definition"]
+    definition.packages = ["build-essential", "libc6:amd64"]
+    definition.save()
+    url = f"/api/v1/image-definitions/{definition.id}/"
+
+    # Unbuilt recipes may switch OS, but the kept packages must fit winget.
+    switched = _patch(
+        client, url, {"base_distro": "windows:11"}, recipe_org["admin_headers"]
+    )
+    assert switched.status_code == 400
+    assert switched.json()["code"] == "invalid_package_id"
+    renamed = _patch(client, url, {"name": "Renamed"}, recipe_org["admin_headers"])
+    assert renamed.status_code == 200
+    switched = _patch(
+        client,
+        url,
+        {"base_distro": "windows:11", "packages": ["Git.Git"]},
+        recipe_org["admin_headers"],
+    )
+    assert switched.status_code == 200, switched.content
+    assert switched.json()["guest_os"] == "windows"
+
+
+@pytest.mark.django_db
+def test_members_cannot_create_windows_recipes(client, recipe_org):
+    response = _post(
+        client,
+        "/api/v1/image-definitions/",
+        {"name": "Member win", "base_distro": "windows:11"},
+        recipe_org["member_headers"],
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_windows_definition_reports_guest_os_and_minimums(client, recipe_org):
+    response = _post(
+        client,
+        "/api/v1/image-definitions/",
+        {"name": "Win", "base_distro": "windows:11", "packages": ["Git.Git"]},
+        recipe_org["admin_headers"],
+    )
+
+    assert response.status_code == 201, response.content
+    payload = response.json()
+    assert payload["guest_os"] == "windows"
+    assert payload["minimums"] == {"vcpus": 2, "memory_mb": 4096, "disk_size_gb": 64}
+    listed = client.get("/api/v1/image-definitions/", **recipe_org["member_headers"])
+    by_name = {entry["name"]: entry for entry in listed.json()}
+    assert by_name["Recipe"]["guest_os"] == "linux"
+    assert by_name["Recipe"]["minimums"] == {
+        "vcpus": 1,
+        "memory_mb": 1,
+        "disk_size_gb": 1,
+    }
+
+
+@pytest.mark.django_db
+def test_built_recipe_cannot_change_its_os(client, recipe_org, user):
+    image = built_image(recipe_org["runner"], user, "ubuntu:24.04")
+    url = f"/api/v1/image-definitions/{image.origin_definition_id}/"
+
+    response = _patch(
+        client,
+        url,
+        {"base_distro": "windows:11", "packages": []},
+        recipe_org["admin_headers"],
+    )
+    assert response.status_code == 409, response.content
+    assert response.json()["code"] == "image_os_immutable"
+    # Another Ubuntu release keeps the OS and stays allowed.
+    response = _patch(
+        client,
+        url,
+        {"base_distro": "ubuntu:22.04"},
+        recipe_org["admin_headers"],
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_windows_11_is_seeded_as_an_unbuilt_global_recipe(client, recipe_org):
+    definition = ImageDefinition.objects.get(id=seed.WINDOWS_11_ID)
+
+    assert definition.organization_id is None and definition.is_active
+    assert definition.name == "Windows 11"
+    assert definition.base_distro == "windows:11"
+    assert definition.packages == ["OpenJS.NodeJS.LTS"]
+    assert definition.env_vars == {} and definition.custom_init_script == ""
+    assert not ImageBuildJob.objects.filter(image_definition=definition).exists()
+    listed = client.get("/api/v1/image-definitions/", **recipe_org["member_headers"])
+    [entry] = [e for e in listed.json() if e["id"] == str(seed.WINDOWS_11_ID)]
+    assert entry["is_standard"] is True and entry["guest_os"] == "windows"

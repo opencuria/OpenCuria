@@ -6,6 +6,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from apps.credentials.services import CredentialSvc
+from apps.licensing.services import WindowsLicenseService
 from apps.plugins.services import PluginSelectionError, PluginService
 from apps.runners.enums import TaskType
 from common.exceptions import ConflictError, NotFoundError
@@ -28,6 +29,7 @@ class WorkspaceConfigurationService:
         self.tasks = TaskRepository
         self.repository = WorkspaceConfigurationRepository
         self.plugins = PluginService()
+        self.licenses = WindowsLicenseService()
 
     def create(
         self,
@@ -96,6 +98,8 @@ class WorkspaceConfigurationService:
                 credentials=credentials,
                 credentials_present=credentials_present,
             )
+            # Windows guests reserve their license with the workspace.
+            self.licenses.admit(workspace)
             self.plugins.replace_workspace_selection(
                 workspace.id, plugin_ids, enabled_by=user
             )

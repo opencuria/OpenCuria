@@ -150,6 +150,8 @@ describe("ModelSheet", () => {
     const { onModelChange } = renderSheet();
     fireEvent.press(screen.getByText("All models"));
     expect(screen.queryByTestId("model-sheet-effort")).toBeNull();
+    fireEvent.changeText(screen.getByLabelText("Search models"), "zzz");
+    expect(screen.getByText("No results")).toBeTruthy();
     fireEvent.changeText(screen.getByLabelText("Search models"), "model g");
     expect(screen.queryByText("Model b")).toBeNull();
     fireEvent.press(screen.getByText("Model g"));

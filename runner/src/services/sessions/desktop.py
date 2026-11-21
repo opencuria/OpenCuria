@@ -22,6 +22,7 @@ import structlog
 
 from ...models import DesktopSession, WorkspaceInfo
 from ...runtime.base import RuntimeBackend
+from ...runtime.display_stream import DisplayStream
 from ...runtime.managed_process import validate_guest_token
 from ..capture_fence import CaptureFence, live_interaction
 from ..workspace_helpers import KeyedLockMap
@@ -205,6 +206,8 @@ class DesktopManager:
     async def _managed_record_start(
         self, workspace_id: uuid.UUID, payload: dict[str, Any]
     ) -> dict[str, Any]:
+        if await self._qemu_display(workspace_id) is not None:
+            raise ValueError("Desktop recording is not available for this workspace")
         lock = await self._desktop_lock(workspace_id)
         async with lock:
             if self.capture_fence is not None:
@@ -420,7 +423,34 @@ class DesktopManager:
             "epoch": self.epoch,
         }
 
+    async def _qemu_display(self, workspace_id: uuid.UUID) -> Any | None:
+        """Return the runtime when QEMU serves this workspace's desktop.
+
+        Windows guests show QEMU's own display: there is no desktop process in
+        the guest to start, stop or probe, and the clipboard is served by an
+        agent in the guest's console session.
+        """
+        runtime = self._get_runtime(workspace_id)
+        kind = getattr(runtime, "desktop_kind", None)
+        if kind is None:
+            return None
+        info = self._get_cached(workspace_id)
+        return runtime if await kind(info.instance_id) == "qemu" else None
+
+    async def _probe_qemu_display(self, runtime: Any, workspace_id: uuid.UUID) -> bool:
+        """Whether QEMU's display of the guest completes an RFB handshake."""
+        info = self._get_cached(workspace_id)
+        try:
+            async with runtime.display_client(info.instance_id):
+                return True
+        except Exception:
+            return False
+
     async def _verify_binding(self, workspace_id: uuid.UUID) -> None:
+        if (runtime := await self._qemu_display(workspace_id)) is not None:
+            if not await self._probe_qemu_display(runtime, workspace_id):
+                raise RuntimeError("Desktop binding verification failed: display unavailable")
+            return
         # XOpenDisplay performs an actual authenticated X11 handshake. ctypes
         # uses the guest's libX11, with no Python package dependency.
         code = (
@@ -835,6 +865,8 @@ class DesktopManager:
 
     async def _is_desktop_session_live(self, workspace_id: uuid.UUID) -> bool:
         """Return whether the cached desktop session still accepts connections."""
+        if (runtime := await self._qemu_display(workspace_id)) is not None:
+            return await self._probe_qemu_display(runtime, workspace_id)
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         exit_code, _ = await runtime.exec_command_wait(
@@ -1118,6 +1150,13 @@ class DesktopManager:
             )
 
         if await self._is_desktop_session_live(workspace_id):
+            if (display := await self._qemu_display(workspace_id)) is not None:
+                # QEMU's console is always there; a desktop start applies the
+                # workspace's desktop size inside the guest session.
+                await display.set_display_size(
+                    self._get_cached(workspace_id).instance_id,
+                    *self._resolve_desktop_geometry(width, height),
+                )
             recovered = DesktopSession(
                 workspace_id=workspace_id,
                 instance_id=self._get_cached(workspace_id).instance_id,
@@ -1139,6 +1178,9 @@ class DesktopManager:
         resolved_width, resolved_height = self._resolve_desktop_geometry(width, height)
 
         log = logger.bind(workspace_id=str(workspace_id))
+        if await self._qemu_display(workspace_id) is not None:
+            # QEMU always shows the console; an unreachable display stays down.
+            raise RuntimeError("Failed to start desktop session: display unavailable")
 
         # Use the runner-owned command for existing images too: legacy baked
         # stop scripts match arbitrary argv text and can kill agent transports.
@@ -1194,6 +1236,12 @@ class DesktopManager:
             return
         runtime = self._get_runtime(workspace_id)
         info = self._get_cached(workspace_id)
+        if await self._qemu_display(workspace_id) is not None:
+            # The console belongs to the guest: ending the session only closes
+            # the viewer tunnels, it never stops anything inside Windows.
+            self._desktop_sessions.pop(workspace_id, None)
+            log.info("desktop_stopped")
+            return
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id, ["bash", "-lc", DESKTOP_STOP_COMMAND]
         )
@@ -1323,6 +1371,13 @@ class DesktopManager:
     @live_interaction
     async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
         """Write plain text into the desktop clipboard inside the workspace VM/container."""
+        if (display := await self._qemu_display(workspace_id)) is not None:
+            info = self._get_cached(workspace_id)
+            try:
+                await display.guest_clipboard(info.instance_id, "write", text)
+            except Exception:
+                raise RuntimeError("Failed to write desktop clipboard") from None
+            return
         if not await self._is_desktop_session_live(workspace_id):
             raise RuntimeError("Desktop session is not active")
 
@@ -1376,6 +1431,14 @@ class DesktopManager:
             ):
                 raise RuntimeError("Clipboard copy is unavailable during computer use")
 
+            if (display := await self._qemu_display(workspace_id)) is not None:
+                info = self._get_cached(workspace_id)
+                try:
+                    return await display.guest_clipboard(
+                        info.instance_id, "copy", shift=shift
+                    )
+                except Exception:
+                    raise RuntimeError("Failed to copy desktop selection") from None
             if not await self._is_desktop_session_live(workspace_id):
                 raise RuntimeError("Desktop session is not active")
             if self.capture_fence is not None:
@@ -1413,6 +1476,12 @@ class DesktopManager:
             )
         if shift:
             raise ValueError("shift requires copy_selection")
+        if (display := await self._qemu_display(workspace_id)) is not None:
+            info = self._get_cached(workspace_id)
+            try:
+                return await display.guest_clipboard(info.instance_id, "read")
+            except Exception:
+                raise RuntimeError("Failed to read desktop clipboard") from None
         if not await self._is_desktop_session_live(workspace_id):
             raise RuntimeError("Desktop session is not active")
 
@@ -1447,6 +1516,18 @@ class DesktopManager:
     def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
         """Return the active desktop session if any."""
         return self._desktop_sessions.get(workspace_id)
+
+    async def desktop_kind(self, workspace_id: uuid.UUID) -> str:
+        """Return where the workspace desktop is served (``guest`` or ``qemu``)."""
+        return "qemu" if await self._qemu_display(workspace_id) is not None else "guest"
+
+    async def open_display(self, workspace_id: uuid.UUID) -> DisplayStream:
+        """Open a viewer stream to QEMU's display of the workspace."""
+        runtime = await self._qemu_display(workspace_id)
+        if runtime is None:
+            raise RuntimeError("Workspace desktop is not a QEMU display")
+        reader, writer = await runtime.open_display(self._get_cached(workspace_id).instance_id)
+        return DisplayStream(reader, writer)
 
     def get_desktop_guest_ip(self, workspace_id: uuid.UUID) -> str:
         """Get the upstream IP address for the workspace desktop proxy."""

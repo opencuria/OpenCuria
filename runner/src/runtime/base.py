@@ -34,6 +34,8 @@ class WorkspaceConfig:
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    #: Guest OS the control plane expects; the image manifest is authoritative.
+    guest_os: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class RuntimeWorkspaceInfo:
     instance_id: str
     status: str  # normalised: "running", "exited", etc.
     name: str | None = None
+    guest_os: str = "linux"
 
 
 @dataclass
@@ -202,6 +205,16 @@ class RuntimeBackend(abc.ABC):
         Returns (exit_code, combined_output).
         """
 
+    async def exec_with_input(
+        self,
+        instance_id: str,
+        command: list[str],
+        data: bytes,
+        workdir: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a command with ``data`` on stdin (secrets never in argv)."""
+        raise NotImplementedError("Runtime does not support stdin execution")
+
     @abc.abstractmethod
     async def put_archive(
         self,
@@ -216,7 +229,7 @@ class RuntimeBackend(abc.ABC):
     # Limits shared by all runtime implementations of the generic stream
     # transport (MCP stdio / workspace-local TCP relay).  Chunk sizes are
     # bounded so one peer can never force unbounded buffering.
-    STREAM_CHUNK_SIZE = 64 * 1024
+    STREAM_CHUNK_SIZE = 1024 * 1024
     STREAM_READ_TIMEOUT = 300.0
 
     @property

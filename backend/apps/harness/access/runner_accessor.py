@@ -72,6 +72,7 @@ from .base import (
     sanitize_harness_path,
 )
 from .file_types import DirEntry, FileContent, guess_mime_type
+from .guest import LINUX_GUEST, GuestPlatform, guest_for_os
 
 log = structlog.get_logger(__name__)
 
@@ -237,7 +238,8 @@ def _serialize_process(process: Any) -> dict[str, Any]:
     }
 
 
-#: Bounded per-stream queue depth (chunks of at most 64KiB each).
+#: Bounded per-stream queue depth (chunks of at most
+#: ``WorkspaceByteStream.MAX_CHUNK_SIZE`` each).
 STREAM_QUEUE_DEPTH = 64
 
 #: Queued chunks from which output ACKs wait for the consumer. The runner
@@ -245,6 +247,12 @@ STREAM_QUEUE_DEPTH = 64
 #: downloading through the app gateway) slows the stream down instead of
 #: overflowing its queue.
 STREAM_PAUSE_DEPTH = STREAM_QUEUE_DEPTH // 2
+
+#: Queued bytes from which output ACKs wait for the consumer, and the most a
+#: stream may queue before it fails: large chunks must not let one slow
+#: consumer hold the depth limit times the chunk size in memory.
+STREAM_PAUSE_BYTES = 4 * 1024 * 1024
+STREAM_QUEUE_BYTES = 16 * 1024 * 1024
 
 #: Longest an output ACK waits for the consumer; below the runner's ACK
 #: timeout so a stalled consumer still ends in the queue-overflow path.
@@ -303,6 +311,7 @@ class _StreamState:
         "stdout_bytes",
         "managed",
         "drained",
+        "queued_bytes",
     )
 
     def __init__(self, connection_id: str, queue: asyncio.Queue) -> None:
@@ -324,6 +333,7 @@ class _StreamState:
         self.opened_at = 0.0
         self.stdout_bytes = 0
         self.managed = False
+        self.queued_bytes = 0
 
     def append_stderr(self, data: bytes) -> None:
         """Buffer bounded stderr bytes (newest win; unbounded total kept)."""
@@ -342,7 +352,10 @@ class _StreamState:
 
     def update_drained(self) -> None:
         """Track whether the consumer keeps up (call on the owning loop)."""
-        if self.closed or self.queue.qsize() < STREAM_PAUSE_DEPTH:
+        if self.closed or (
+            self.queue.qsize() < STREAM_PAUSE_DEPTH
+            and self.queued_bytes < STREAM_PAUSE_BYTES
+        ):
             self.drained.set()
         else:
             self.drained.clear()
@@ -405,8 +418,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         call: Callable[[str, dict[str, Any], float | None], Awaitable[dict[str, Any]]]
         | None = None,
         on_stderr: Callable[[str, bytes], None] | None = None,
+        guest: GuestPlatform = LINUX_GUEST,
     ) -> None:
         super().__init__(workspace_id)
+        self.guest = guest
         self._emit = emit
         self._default_timeout = default_timeout
         self._desktop_geometry = desktop_geometry
@@ -450,14 +465,98 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     # -- reply routing (called from Socket.IO handlers) -------------------
 
     def _deliver_result(self, data: dict[str, Any]) -> bool:
-        """Resolve the pending unary request future for *data*."""
+        """Resolve the pending unary request future for *data*.
+
+        Final results of chunked reads go through
+        :meth:`_accept_read_final`, which holds the future back until every
+        announced chunk is buffered.
+        """
         request_id = str(data.get("request_id", ""))
         future = self._pending.get(request_id)
         if future is None or future.done():
             log.warning("harness_result_no_pending", request_id=request_id)
             return False
+        state = self._file_chunks.get(request_id)
+        if state is not None:
+            self._schedule(self._accept_read_final, request_id, future, state, data)
+            return True
         self._schedule(_resolve_future, future, data)
         return True
+
+    def _accept_read_final(
+        self,
+        request_id: str,
+        future: asyncio.Future[dict[str, Any]],
+        state: dict[str, Any],
+        data: dict[str, Any],
+    ) -> None:
+        """Record the final ``harness:read_file_result`` of a read (on loop).
+
+        The runner emits all chunks before the final result, but the
+        backend does not preserve that order: Socket.IO handles every event
+        in its own task and the reply relay publishes concurrently over a
+        Redis connection pool. A chunked final therefore only pins and
+        validates the transfer metadata; the read completes once the last
+        chunk is buffered, whichever arrives last.
+        """
+        if data.get("error") or not data.get("chunked"):
+            # Runner failure or backward-compatible small inline payload.
+            _resolve_future(future, data)
+            return
+        try:
+            if state.get("final") is not None:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: duplicate final result"
+                )
+            try:
+                total = int(data.get("total_chunks", 0))
+            except (TypeError, ValueError) as exc:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: invalid total_chunks"
+                ) from exc
+            if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: invalid total_chunks"
+                )
+            # The final metadata must match the pinned chunk stream; when
+            # it overtook every chunk, it pins the total itself.
+            pinned = int(state.get("total_chunks", 0) or 0)
+            if pinned and pinned != total:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: chunk total mismatch"
+                )
+            if str(data.get("workspace_id", "")) != str(
+                state.get("workspace_id", "")
+            ):
+                raise RunnerAccessorError(
+                    "harness:read_file failed: workspace mismatch"
+                )
+            if str(data.get("path", "")) != str(state.get("path", "")):
+                raise RunnerAccessorError(
+                    "harness:read_file failed: path mismatch"
+                )
+        except RunnerAccessorError as exc:
+            self._file_chunks.pop(request_id, None)
+            _resolve_future_exception(future, exc)
+            return
+        state["total_chunks"] = total
+        state["final"] = data
+        self._complete_read_if_ready(future, state)
+
+    @staticmethod
+    def _complete_read_if_ready(
+        future: asyncio.Future[dict[str, Any]],
+        state: dict[str, Any],
+    ) -> None:
+        """Resolve a chunked read once its final and all chunks are in."""
+        final = state.get("final")
+        total = int(state.get("total_chunks", 0) or 0)
+        if final is None or not total:
+            return
+        # Chunk indices are validated in range and unique, so the count
+        # alone proves completeness.
+        if len(state["chunks"]) == total:
+            _resolve_future(future, final)
 
     def _deliver_file_chunk(self, data: dict[str, Any]) -> bool:
         """Buffer one ``harness:read_file_chunk`` slice for *data*.
@@ -537,6 +636,9 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             except Exception as exc:
                 self._file_chunks.pop(request_id, None)
                 _resolve_future_exception(future, exc)
+                return
+            # The final result may have overtaken this chunk.
+            self._complete_read_if_ready(future, state)
 
         self._schedule(_store)
         return True
@@ -626,7 +728,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
     ) -> ExecResult:
         """Execute a command and return the buffered result."""
-        safe_workdir = sanitize_exec_workdir(workdir)
+        safe_workdir = sanitize_exec_workdir(workdir, self.guest)
         normalized = _normalize_command(command)
         timeout_s = self._resolve_timeout(timeout)
         request_id = uuid.uuid4().hex
@@ -664,7 +766,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         compatibility. Incomplete or invalid chunk streams fail closed
         and clean up routing state.
         """
-        safe_path = sanitize_harness_path(path)
+        safe_path = sanitize_harness_path(path, self.guest)
         request_id = uuid.uuid4().hex
         result = await self._await_chunked_read_result(
             request_id,
@@ -757,10 +859,12 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     ) -> dict[str, Any]:
         """Emit ``harness:read_file`` and reassemble chunked replies.
 
-        Registers a bounded chunk buffer for *request_id*, waits for the
-        final ``harness:read_file_result``, then joins ``total_chunks``
-        slices in order (or uses the inline ``content`` when the runner
-        sent a small backward-compatible payload).
+        Registers a bounded chunk buffer for *request_id*, waits until the
+        final ``harness:read_file_result`` and every announced chunk have
+        arrived (in any order), then joins ``total_chunks`` slices in order
+        (or uses the inline ``content`` when the runner sent a small
+        backward-compatible payload). Chunks still missing when the read
+        times out after the final fail as an incomplete transfer.
         """
         timeout_s = self._resolve_timeout(timeout)
         future: asyncio.Future[dict[str, Any]] = (
@@ -790,50 +894,27 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             "workspace_id": str(payload.get("workspace_id", "")),
             "path": str(payload.get("path", "")),
             "max_chars": max_chars,
+            # Validated chunked final; set by _accept_read_final.
+            "final": None,
         }
+        state = self._file_chunks[request_id]
         completed = False
         try:
             await self._emit("harness:read_file", payload)
             result = await asyncio.wait_for(future, timeout_s)
             completed = True
-            state = self._file_chunks.get(request_id, {})
-            chunks: dict[int, str] = state.get("chunks", {})
             if result.get("error"):
                 return result
             if result.get("chunked"):
-                try:
-                    total = int(result.get("total_chunks", 0))
-                except (TypeError, ValueError) as exc:
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: invalid total_chunks"
-                    ) from exc
-                if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: invalid total_chunks"
-                    )
-                # The final metadata must match the pinned chunk stream.
-                pinned = int(state.get("total_chunks", 0) or 0)
-                if pinned and pinned != total:
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: chunk total mismatch"
-                    )
-                if not pinned:
-                    state["total_chunks"] = total
-                if str(result.get("workspace_id", "")) != str(
-                    state.get("workspace_id", "")
-                ):
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: workspace mismatch"
-                    )
-                if str(result.get("path", "")) != str(state.get("path", "")):
-                    raise RunnerAccessorError(
-                        "harness:read_file failed: path mismatch"
-                    )
-                missing = [i for i in range(total) if i not in chunks]
-                if missing:
+                # _accept_read_final validated the metadata and the future
+                # resolved only with every chunk buffered; re-check anyway.
+                total = int(state.get("total_chunks", 0) or 0)
+                chunks: dict[int, str] = state["chunks"]
+                missing = self._missing_chunks(state)
+                if not total or missing:
                     raise RunnerAccessorError(
                         "harness:read_file failed: incomplete transfer "
-                        f"(missing {len(missing)} of {total} chunks)"
+                        f"(missing {missing} of {total} chunks)"
                     )
                 joined = "".join(chunks[i] for i in range(total))
                 merged = dict(result)
@@ -843,6 +924,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             # Backward-compatible small inline payload.
             return result
         except TimeoutError as exc:
+            if state.get("final") is not None:
+                # The runner finished, but chunks never reached us.
+                raise RunnerAccessorError(
+                    "harness:read_file failed: incomplete transfer "
+                    f"(missing {self._missing_chunks(state)} of "
+                    f"{state['total_chunks']} chunks)"
+                ) from exc
             raise TimeoutError(
                 "Harness request 'harness:read_file' timed out "
                 f"after {timeout_s:.1f}s"
@@ -852,6 +940,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             if not completed:
                 future.cancel()
                 await self._emit_cancel(request_id)
+
+    @staticmethod
+    def _missing_chunks(state: dict[str, Any]) -> int:
+        """Return how many announced chunks of a read are not buffered."""
+        total = int(state.get("total_chunks", 0) or 0)
+        chunks = state.get("chunks", {})
+        return sum(1 for i in range(total) if i not in chunks)
 
     @staticmethod
     def _chunk_b64_slices(payload_b64: str) -> list[str]:
@@ -873,7 +968,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         All writes use start/chunk/finish with bounded base64 slices.
         Empty files announce zero chunks and finish without a chunk event.
         """
-        safe_path = sanitize_harness_path(path)
+        safe_path = sanitize_harness_path(path, self.guest)
         if not isinstance(content, (bytes, bytearray)):
             raise ValueError("content must be bytes")
         # Exact raw cap: len(content) decides, no base64 slack involved.
@@ -940,7 +1035,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
 
     async def list_dir(self, path: str) -> list[DirEntry]:
         """List directory entries in the workspace VM."""
-        safe_path = sanitize_harness_path(path)
+        safe_path = sanitize_harness_path(path, self.guest)
         request_id = uuid.uuid4().hex
         result = await self._await_result(
             request_id,
@@ -1031,7 +1126,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         """
         if not (command or "").strip():
             raise ValueError("command must not be empty")
-        safe_workdir = sanitize_exec_workdir(workdir or "/workspace")
+        safe_workdir = sanitize_exec_workdir(workdir or "/workspace", self.guest)
         service = self._runner_service()
         try:
             process = await service.process_manager.start_process(
@@ -1295,12 +1390,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             )
             return False
         try:
-            decoded_len = len(base64.b64decode(raw, validate=True))
+            decoded = base64.b64decode(raw, validate=True)
         except Exception:
             log.warning(
                 "stream_output_bad_base64", connection_id=connection_id
             )
             return False
+        decoded_len = len(decoded)
         if decoded_len > WorkspaceByteStream.MAX_CHUNK_SIZE:
             log.warning(
                 "stream_output_oversize", connection_id=connection_id
@@ -1311,6 +1407,8 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             if state.closed:
                 return
             try:
+                if state.queued_bytes + decoded_len > STREAM_QUEUE_BYTES:
+                    raise asyncio.QueueFull
                 # Count stdout bytes at enqueue time (secret-free size
                 # only; content never leaves the queue into logs).
                 if stream == "stdout":
@@ -1319,15 +1417,16 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                     # Stderr is captured per stream (bounded, newest
                     # win): it stays out of the MCP stdout framing and
                     # is only ever surfaced as a sanitized excerpt.
-                    try:
-                        state.append_stderr(
-                            base64.b64decode(raw, validate=True)
-                        )
-                    except Exception:  # pragma: no cover - validated above
-                        pass
+                    state.append_stderr(decoded)
                 state.queue.put_nowait(
-                    {"type": "chunk", "stream": stream, "data": raw}
+                    {
+                        "type": "chunk",
+                        "stream": stream,
+                        "data": decoded,
+                        "size": decoded_len,
+                    }
                 )
+                state.queued_bytes += decoded_len
                 state.update_drained()
             except asyncio.QueueFull:
                 # Overflow: mark the failure AND best-effort remote close
@@ -1505,6 +1604,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise StreamClosedError(f"stream {connection_id!r} is not open")
         while True:
             item = await state.queue.get()
+            state.queued_bytes = max(0, state.queued_bytes - int(item.get("size", 0)))
             state.update_drained()
             kind = item.get("type")
             if kind == "closed":
@@ -1517,13 +1617,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             if item.get("stream") == "stderr":
                 if self._on_stderr is not None:
                     try:
-                        raw = "".join(
-                            str(item.get("data", "")).split()
-                        )
-                        self._on_stderr(
-                            connection_id,
-                            base64.b64decode(raw, validate=True),
-                        )
+                        self._on_stderr(connection_id, bytes(item.get("data", b"")))
                     except Exception:
                         log.warning(
                             "stream_stderr_callback_failed",
@@ -1535,15 +1629,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                         connection_id=connection_id,
                     )
                 continue
-            try:
-                return base64.b64decode(
-                    "".join(str(item.get("data", "")).split()),
-                    validate=True,
-                )
-            except Exception as exc:
-                raise StreamClosedError(
-                    f"stream {connection_id!r}: invalid chunk"
-                ) from exc
+            data = item.get("data")
+            if not isinstance(data, bytes):
+                raise StreamClosedError(f"stream {connection_id!r}: invalid chunk")
+            return data
 
     async def _stream_send(self, connection_id: str, data: bytes) -> None:
         """Write bounded bytes to one stream (ACK each input event)."""
@@ -1728,7 +1817,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 raise ValueError("Process profiles require a managed owner")
             if process_profile == "helper" and env:
                 raise ValueError("Helper processes require an empty environment")
-        safe_workdir = sanitize_exec_workdir(workdir)
+        safe_workdir = sanitize_exec_workdir(workdir, self.guest)
         if not isinstance(command, list) or not command:
             raise ValueError("command must be a non-empty argv list")
         argv = [str(part) for part in command]
@@ -1832,6 +1921,8 @@ async def create_harness_accessor(
         allow_lease_cleanup: Let only lease release bypass interaction admission,
             so recovery can clean failed or lifecycle-fenced workspaces.
 
+    The accessor serves the guest OS of the workspace's image.
+
     Raises:
         WorkspaceNotFoundError: If the workspace does not exist.
         RunnerOfflineError: If the owning runner is offline.
@@ -1928,4 +2019,5 @@ async def create_harness_accessor(
         desktop_geometry=_desktop_geometry,
         call=_call,
         on_stderr=_on_stderr,
+        guest=guest_for_os(workspace.guest_os),
     )

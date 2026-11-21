@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { getConfig } from '@/services/config'
 import { useRunnerStore } from '@/stores/runners'
 import { Button } from '@/components/ui/button'
 import CopyButton from '@/components/common/CopyButton.vue'
@@ -21,6 +22,17 @@ const open = ref(false)
 const name = ref('')
 const createdToken = ref<string | null>(null)
 const submitting = ref(false)
+
+const INSTALL_SCRIPT_URL = 'https://raw.githubusercontent.com/opencuria/OpenCuria/main/install.sh'
+
+/** One-line runner setup for a KVM host, pointing at this control plane. */
+const installCommand = computed(() => {
+  const backendUrl = getConfig().wsBaseUrl || window.location.origin
+  return (
+    `curl -fsSL ${INSTALL_SCRIPT_URL} | sudo bash -s -- runner ` +
+    `--url ${backendUrl} --token ${createdToken.value}`
+  )
+})
 
 async function handleSubmit(): Promise<void> {
   submitting.value = true
@@ -85,6 +97,17 @@ function handleClose(): void {
           </div>
         </div>
 
+        <div>
+          <p class="mb-2 text-sm font-medium text-foreground">Install on a Linux host with KVM</p>
+          <div class="flex items-center gap-2">
+            <code
+              class="flex-1 break-all rounded-md border border-border bg-card px-3 py-2 font-mono text-xs select-all"
+            >
+              {{ installCommand }}
+            </code>
+            <CopyButton :text="installCommand" label="install command" variant="outline" />
+          </div>
+        </div>
       </div>
       </DialogBody>
 

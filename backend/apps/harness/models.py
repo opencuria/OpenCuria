@@ -869,3 +869,4 @@ from .provider_turn_models import ProviderTurn, ProviderTurnMutex  # noqa: E402,
 from .command_models import HarnessCommand  # noqa: E402,F401
 from .command_models import HarnessExecutionHeartbeat  # noqa: E402,F401
 from .command_models import HarnessSteeringSnapshot  # noqa: E402,F401
+from .scheduled_message_models import HarnessScheduledMessage  # noqa: E402,F401

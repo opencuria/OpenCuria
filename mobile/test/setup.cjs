@@ -44,3 +44,11 @@ jest.mock('expo-video', () => ({
     return React.createElement(View, props)
   },
 }))
+
+// React Native's TextInput moves the caret with `setSelection`; its Jest mock
+// lacks the method.
+{
+  const TextInput =
+    require('react-native/Libraries/Components/TextInput/TextInput').default
+  TextInput.prototype.setSelection ??= jest.fn()
+}

@@ -2,7 +2,7 @@ import React from "react";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { pluginStatus, pluginSubtitle } from "./plugins";
@@ -40,31 +40,32 @@ export function PluginsPage(): React.JSX.Element {
         },
       ]
     : [];
+  const failure = plugins.data ? undefined : loadFailure("plugins", plugins);
+  // Creating plugins is an admin setting.
+  const create = isAdmin
+    ? {
+        title: "New plugin",
+        symbol: "plus" as const,
+        onPress: () => openPluginEditor(resources, navigation, null),
+      }
+    : undefined;
   return (
     <SettingsPage
       title="Plugins"
       sections={
-        plugins.error && !plugins.data
-          ? loadErrorSections(plugins.error, () => void plugins.reload())
-          : sections
+        failure ? [] : [...refreshError("plugins", plugins), ...sections]
       }
       loading={!plugins.data && !plugins.error}
       onRefresh={plugins.reload}
-      empty={{
-        title: "No plugins yet",
-        description: "Plugins available to this organization appear here.",
-        symbol: "puzzlepiece.extension",
-      }}
-      primaryAction={
-        isAdmin
-          ? {
-              title: "New plugin",
-              symbol: "plus",
-              onPress: () => openPluginEditor(resources, navigation, null),
-              testID: "new-plugin",
-            }
-          : undefined
+      empty={
+        failure ?? {
+          title: "No plugins yet",
+          description: "Plugins available to this organization appear here.",
+          symbol: "puzzlepiece.extension",
+          action: create && { ...create, testID: "empty-new-plugin" },
+        }
       }
+      primaryAction={create && { ...create, testID: "new-plugin" }}
       testID="settings-plugins"
     />
   );

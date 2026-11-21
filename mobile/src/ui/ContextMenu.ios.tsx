@@ -3,11 +3,12 @@ import { View } from "react-native";
 import {
   Button,
   ContextMenu,
+  Group,
   Host,
   RNHostView,
   Section,
 } from "@expo/ui/swift-ui";
-import { disabled } from "@expo/ui/swift-ui/modifiers";
+import { contentShape, disabled, shapes } from "@expo/ui/swift-ui/modifiers";
 import type { NativeContextMenuProps } from "./ContextMenu.types";
 import type { NativeSymbol } from "./controls.types";
 import { useTheme } from "./theme";
@@ -18,9 +19,22 @@ export function NativeContextMenu({
   actions,
   onSelect,
   fitContent,
+  previewRadius,
   children,
 }: NativeContextMenuProps): React.JSX.Element {
   const { theme } = useTheme();
+  const content = (
+    // RNHostView preserves the row's touch target and intrinsic height.
+    <RNHostView matchContents={fitContent ? true : { vertical: true }}>
+      {/*
+        RNHostView lays out its first child as a separate Yoga root that
+        SwiftUI also frames, so a margin on it would race between both
+        and shift the row. A plain, unflattened root keeps the content's
+        own margins inside Yoga.
+      */}
+      <View collapsable={false}>{children()}</View>
+    </RNHostView>
+  );
   return (
     <Host
       matchContents={fitContent ? true : { vertical: true }}
@@ -31,16 +45,20 @@ export function NativeContextMenu({
     >
       <ContextMenu>
         <ContextMenu.Trigger>
-          {/* RNHostView preserves the row's touch target and intrinsic height. */}
-          <RNHostView matchContents={fitContent ? true : { vertical: true }}>
-            {/*
-              RNHostView lays out its first child as a separate Yoga root that
-              SwiftUI also frames, so a margin on it would race between both
-              and shift the row. A plain, unflattened root keeps the content's
-              own margins inside Yoga.
-            */}
-            <View collapsable={false}>{children()}</View>
-          </RNHostView>
+          {previewRadius === undefined ? (
+            content
+          ) : (
+            <Group
+              modifiers={[
+                contentShape(
+                  shapes.roundedRectangle({ cornerRadius: previewRadius }),
+                  "contextMenuPreview",
+                ),
+              ]}
+            >
+              {content}
+            </Group>
+          )}
         </ContextMenu.Trigger>
         <ContextMenu.Items>
           <Section title={label}>

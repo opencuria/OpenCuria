@@ -143,4 +143,25 @@ describe('WorkspaceStatusPanel', () => {
     await flushPromises()
     expect(failed.find('[data-testid="workspace-status-memory"]').exists()).toBe(false)
   })
+
+  it('shows the license state of Windows workspaces only', async () => {
+    const windows = mountPanel(
+      makeWorkspace({
+        guest_os: 'windows',
+        windows_license: {
+          kind: 'user',
+          activation_status: 'failed',
+          activation_code: '0xC004F074',
+        },
+      }),
+    )
+    await flushPromises()
+    expect(windows.get('[data-testid="workspace-status-system"]').text()).toContain(
+      'Windows · Activation failed (0xC004F074)',
+    )
+
+    const linux = mountPanel(makeWorkspace({ guest_os: 'linux' }))
+    await flushPromises()
+    expect(linux.find('[data-testid="workspace-status-system"]').exists()).toBe(false)
+  })
 })

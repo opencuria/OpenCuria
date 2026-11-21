@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,6 +14,7 @@ import * as Sharing from "expo-sharing";
 import { SvgXml } from "react-native-svg";
 import type { OpenCuriaClient } from "@opencuria/client";
 import { ChatMarkdown } from "../../components/ChatMarkdown";
+import type { ChatMediaResolver } from "../../components/useWorkspaceMedia";
 import type { MediaCache } from "../../platform";
 import { Button } from "../../ui/controls";
 import type { NativeMenuAction } from "../../ui/NativeMenu";
@@ -87,6 +88,16 @@ export function FileViewerSheet({
   const [attempt, setAttempt] = useState(0);
   const path = typeof target === "string" ? target : null;
   const attachment = typeof target === "object" ? target : null;
+  // Pictures in a Markdown file load like those in the chat.
+  const resolveMedia = useMemo<ChatMediaResolver | undefined>(
+    () =>
+      media
+        ? Object.assign((target: string) => media.resolvePinned(target), {
+            describe: (target: string) => media.describe(target),
+          })
+        : undefined,
+    [media],
+  );
 
   useEffect(() => {
     if (!path && !attachment) return;
@@ -396,12 +407,7 @@ export function FileViewerSheet({
           ]}
         >
           {notice}
-          <ChatMarkdown
-            markdown={file.text}
-            resolveMedia={
-              media ? (target) => media.resolvePinned(target) : undefined
-            }
-          />
+          <ChatMarkdown markdown={file.text} resolveMedia={resolveMedia} />
         </ScrollView>
       );
     else if (mode === "preview" && delimiter)

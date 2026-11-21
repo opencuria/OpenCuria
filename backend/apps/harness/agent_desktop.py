@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import anyio
 
+from .access.guest import guest_of
 from .computer_use.recordings import is_valid_recording_path
 from .desktop_leases import DesktopLease, cleanup_rpc
 
@@ -49,11 +50,11 @@ class AgentDesktop:
 
     @property
     def environment(self) -> dict[str, str]:
-        """Address the runner binding even while its display is inactive."""
-        return {
-            "DISPLAY": self.binding["display"],
-            "XAUTHORITY": self.binding["xauthority"],
-        }
+        """Address the runner binding even while its display is inactive.
+
+        Guests without an X11 desktop need no environment.
+        """
+        return guest_of(self.accessor).desktop_environment(self.binding)
 
     async def prepare(self) -> None:
         """Reserve a binding without starting the desktop."""

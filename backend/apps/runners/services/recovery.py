@@ -6,11 +6,21 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from apps.licensing.services import WindowsLicenseService
+
 from ..deletion_repository import DeletionRepository
 from ..operations import OperationRepository
 from .capture import CaptureService
 from .image_retention import ImageRetentionService
 from .recreate import RecreateService
+from .windows_activation import windows_activation_payload
+
+#: Deliveries that boot a workspace and carry its Windows activation input.
+BOOT_EVENTS = {
+    "task:create_workspace",
+    "task:create_workspace_from_image_artifact",
+    "task:resume_workspace",
+}
 
 logger = structlog.get_logger(__name__)
 
@@ -65,6 +75,7 @@ class RecoveryService:
                     failures.append(("notification", error))
                     logger.exception("lifecycle_recovery_notification_failed")
         await stage("retention", ImageRetentionService.tick)
+        await stage("windows_licenses", WindowsLicenseService().release_deleted)
         from ..inventory_repository import InventoryRepository
 
         refreshes = await stage("inventory", InventoryRepository.refresh_candidates)
@@ -102,9 +113,7 @@ class RecoveryService:
                     command
                 )
                 if command.task.workspace_id and command.event in {
-                    "task:create_workspace",
-                    "task:create_workspace_from_image_artifact",
-                    "task:resume_workspace",
+                    *BOOT_EVENTS,
                     "task:inject_credentials",
                 }:
                     from apps.credentials.services import CredentialSvc
@@ -116,6 +125,12 @@ class RecoveryService:
                     )(command.task.workspace)
                     payload.update(
                         CredentialSyncService.resolved_credentials_payload(resolved)
+                    )
+                if command.task.workspace_id and command.event in BOOT_EVENTS:
+                    payload.update(
+                        await sync_to_async(windows_activation_payload)(
+                            command.task.workspace
+                        )
                     )
                 data = OperationRepository.envelope(command, payload)
                 await transport.emit(command.event, data, room=command.task.runner.sid)

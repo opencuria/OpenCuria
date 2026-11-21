@@ -146,3 +146,55 @@ it("leaves the overflow menu out when it has no commands", () => {
     }),
   ]);
 });
+
+describe("subagent detail", () => {
+  const detail = {
+    title: "Map the auth middleware",
+    subtitle: "Explorer · Working…",
+    backTitle: "Audit auth flow",
+    onBack: jest.fn(),
+  };
+
+  it("swaps the sidebar button for a native back chevron", () => {
+    const { props, rerender } = setup();
+    rerender({ ...props, detail });
+    const { options } = mockScreen.mock.calls.at(-1)![0];
+    const [back, ...rest] =
+      options.unstable_headerLeftItems() as NativeStackHeaderItem[];
+    expect(rest).toEqual([]);
+    expect(back).toMatchObject({
+      type: "button",
+      icon: { type: "sfSymbol", name: "chevron.backward" },
+      accessibilityLabel: "Back to Audit auth flow",
+    });
+    if (back.type !== "button") throw new Error("Expected back button");
+    const nextOnBack = jest.fn();
+    rerender({ ...props, detail: { ...detail, onBack: nextOnBack } });
+    back.onPress();
+    expect(nextOnBack).toHaveBeenCalledTimes(1);
+    expect(props.onOpen).not.toHaveBeenCalled();
+  });
+
+  it("titles the bar with the subagent and keeps only the overflow menu", () => {
+    const { props, rerender } = setup();
+    rerender({ ...props, detail });
+    const { options } = mockScreen.mock.calls.at(-1)![0];
+    const items = options.unstable_headerRightItems() as NativeStackHeaderItem[];
+    expect(items.map((item) => item.type)).toEqual(["menu"]);
+    const title = render(<ThemeProvider>{options.headerTitle()}</ThemeProvider>);
+    expect(title.getByTestId("chat-detail-title")).toHaveTextContent(
+      "Map the auth middlewareExplorer · Working…",
+    );
+  });
+
+  it("returns to the regular chat header without detail", () => {
+    const { props, rerender } = setup();
+    rerender({ ...props, detail });
+    rerender(props);
+    const { options } = mockScreen.mock.calls.at(-1)![0];
+    expect(options.headerTitle).toBeUndefined();
+    expect(options.unstable_headerLeftItems()).toEqual([
+      expect.objectContaining({ label: "Open sidebar" }),
+    ]);
+  });
+});

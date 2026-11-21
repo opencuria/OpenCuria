@@ -3,18 +3,26 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { useFileExplorerStore } from './fileExplorer'
 import { useEditorStore } from './editor'
-import { downloadWorkspaceFile, listWorkspaceFiles, findWorkspaceFiles } from '@/services/socket'
+import { listWorkspaceFiles, findWorkspaceFiles } from '@/services/socket'
 import { readEditorFile } from '@/services/editor.api'
+import {
+  makeFileLink,
+  resetWorkspaceFiles,
+  startDownload,
+  workspaceFiles,
+} from '@/services/workspaceFiles.fixtures'
+import { FileTransferError } from '@opencuria/client/files'
+import type { WorkspaceFileLink } from '@opencuria/chat-core/workspaceFiles'
 import { flushPromises } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
-import type { FileContentResult, FileDownloadResult } from '@opencuria/client/types'
 
 vi.mock('@/services/socket', () => ({
   listWorkspaceFiles: vi.fn(),
   findWorkspaceFiles: vi.fn(),
-  downloadWorkspaceFile: vi.fn(),
-  sendFilesUpload: vi.fn(),
 }))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
+
+const files = workspaceFiles()
 
 vi.mock('@/services/editor.api', () => ({
   readEditorFile: vi.fn(),
@@ -43,20 +51,10 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function readResult(content = 'hello'): FileContentResult {
-  return {
-    workspace_id: WS_ID,
-    request_id: 'read',
-    path: PATH_A,
-    content: btoa(content),
-    size: content.length,
-    truncated: false,
-  }
-}
-
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  resetWorkspaceFiles()
   vi.mocked(readEditorFile).mockReset()
   vi.mocked(listWorkspaceFiles).mockResolvedValue({
     workspace_id: WS_ID,
@@ -65,12 +63,6 @@ beforeEach(() => {
     entries: [],
   })
   vi.useRealTimers()
-  // jsdom has no object-URL support.
-  Object.assign(URL, {
-    createObjectURL: vi.fn(() => 'blob:mock-url'),
-    revokeObjectURL: vi.fn(),
-  })
-  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
 })
 
 afterEach(() => {
@@ -137,112 +129,72 @@ describe('fileExplorer directory and search state', () => {
   })
 })
 
-describe('fileExplorer tracked upload cancellation', () => {
-  it('deduplicates terminal upload results until TTL expiry and refreshes once', async () => {
+describe('fileExplorer uploads', () => {
+  it('uploads over HTTP and refreshes the target directory', async () => {
     const store = useFileExplorerStore()
-    const refresh = vi.mocked(listWorkspaceFiles)
-    const upload = store.trackAndUpload(WS_ID, 'upload-once', '/workspace', 'once.txt', 'eA==')
-
-    expect(
-      store.handleUploadResult('unknown-from-other-client', '/workspace', 'success', WS_ID),
-    ).toBe(false)
-    expect(refresh).not.toHaveBeenCalled()
-    vi.mocked(listWorkspaceFiles).mockClear()
-    expect(store.handleUploadResult('upload-once', '/workspace', 'success', WS_ID)).toBe(true)
-    await upload
-    expect(store.handleUploadResult('upload-once', '/workspace', 'success', WS_ID)).toBe(false)
-    expect(refresh).toHaveBeenCalledTimes(1)
-    expect(refresh).toHaveBeenCalledWith(WS_ID, '/workspace', expect.any(AbortSignal))
+    const body = new File(['hello'], 'a.txt')
+    await expect(
+      store.uploadFile(WS_ID, {
+        directory: '/workspace/docs',
+        filename: 'a.txt',
+        body,
+        conflict: 'replace',
+      }),
+    ).resolves.toEqual({ path: '/workspace/docs/a.txt', size: 5 })
+    expect(files.upload).toHaveBeenCalledWith(WS_ID, {
+      directory: '/workspace/docs',
+      filename: 'a.txt',
+      body,
+      conflict: 'replace',
+    })
+    expect(listWorkspaceFiles).toHaveBeenCalledWith(
+      WS_ID,
+      '/workspace/docs',
+      expect.any(AbortSignal),
+    )
   })
 
-  it('deduplicates errors and keeps cancelled tombstones through repeated late results', async () => {
-    const { toast } = await import('vue-sonner')
+  it('reports failures once and stays silent for cancelled or isolated uploads', async () => {
     const store = useFileExplorerStore()
-    const refresh = vi.mocked(listWorkspaceFiles)
-    refresh.mockClear()
-    const failed = store.trackAndUpload(
-      WS_ID,
-      'upload-failed-once',
-      '/workspace',
-      'failed.txt',
-      'eA==',
+    const body = new File(['x'], 'b.txt')
+    files.upload.mockRejectedValueOnce(new FileTransferError('Disk full', 'http_507'))
+    await expect(
+      store.uploadFile(WS_ID, {
+        directory: '/workspace',
+        filename: 'b.txt',
+        body,
+        conflict: 'rename',
+      }),
+    ).resolves.toBeNull()
+    expect(toast.error).toHaveBeenCalledExactlyOnceWith(
+      'Upload failed',
+      expect.objectContaining({ description: 'Disk full' }),
     )
-    const rejected = expect(failed).rejects.toThrow('Disk full')
-    expect(
-      store.handleUploadResult('upload-failed-once', '/workspace', 'error', WS_ID, 'Disk full'),
-    ).toBe(true)
-    await rejected
-    expect(
-      store.handleUploadResult('upload-failed-once', '/workspace', 'error', WS_ID, 'Disk full'),
-    ).toBe(false)
 
-    const cancelled = store.trackAndUpload(
-      WS_ID,
-      'upload-cancelled-twice',
-      '/workspace',
-      'cancel.txt',
-      'eA==',
-    )
-    const cancelledRejected = expect(cancelled).rejects.toThrow('Upload cancelled.')
-    store.cancelUpload('upload-cancelled-twice')
-    await cancelledRejected
-    expect(
-      store.handleUploadResult(
-        'upload-cancelled-twice',
-        '/workspace',
-        'error',
-        WS_ID,
-        'late error',
-      ),
-    ).toBe(false)
-    expect(
-      store.handleUploadResult(
-        'upload-cancelled-twice',
-        '/workspace',
-        'error',
-        WS_ID,
-        'late error',
-      ),
-    ).toBe(false)
+    const controller = new AbortController()
+    files.upload.mockImplementationOnce(async () => {
+      controller.abort()
+      throw new DOMException('Aborted', 'AbortError')
+    })
+    await expect(
+      store.uploadFile(WS_ID, {
+        directory: '/workspace',
+        filename: 'b.txt',
+        body,
+        conflict: 'rename',
+        signal: controller.signal,
+      }),
+    ).resolves.toBeNull()
 
-    expect(refresh).not.toHaveBeenCalled()
-    expect(vi.mocked(toast.error)).toHaveBeenCalledTimes(1)
-  })
-
-  it('cancels only the requested upload silently and ignores its late result', async () => {
-    const { toast } = await import('vue-sonner')
-    const store = useFileExplorerStore()
-    const otherUpload = store.trackAndUpload(
-      WS_ID,
-      'upload-other',
-      '/workspace',
-      'other.txt',
-      'eA==',
-    )
-    const cancelledUpload = store.trackAndUpload(
-      WS_ID,
-      'upload-owned',
-      '/workspace',
-      'owned.txt',
-      'eA==',
-      false,
-    )
-    const otherRejected = expect(otherUpload).rejects.toThrow('Upload cancelled.')
-    const cancelledRejected = expect(cancelledUpload).rejects.toThrow('Upload cancelled.')
-
-    store.cancelUpload('upload-owned')
-    await cancelledRejected
-    expect(store.shouldRefreshUploadResult('upload-owned')).toBe(true)
-    expect(store.shouldRefreshUploadResult('upload-other')).toBe(true)
-    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
-
-    store.handleUploadResult('upload-owned', '/workspace', 'success', WS_ID)
-    expect(vi.mocked(listWorkspaceFiles)).not.toHaveBeenCalled()
-    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
-
-    store.cancelUpload('upload-other')
-    await otherRejected
-    store.reset()
+    await store.uploadFile(WS_ID, {
+      directory: '/workspace',
+      filename: 'b.txt',
+      body,
+      conflict: 'rename',
+      refreshExplorer: false,
+    })
+    expect(toast.error).toHaveBeenCalledTimes(1)
+    expect(listWorkspaceFiles).not.toHaveBeenCalled()
   })
 })
 
@@ -261,53 +213,60 @@ describe('fileExplorer editor integration and downloads', () => {
     expect(useEditorStore().activeTab).toMatchObject({ path: PATH_A, content: 'hello' })
   })
 
-  it('saves a validated archive and revokes its URL after the browser click', async () => {
-    vi.useFakeTimers()
-    vi.mocked(downloadWorkspaceFile).mockResolvedValueOnce({
-      ...readResult(),
-      filename: 'workspace.tar.gz',
-      is_archive: true,
-    })
+  it('downloads files and folders from their signed download URL', async () => {
+    files.link.mockResolvedValueOnce(
+      makeFileLink('/workspace', { type: 'directory', size: 0, contentUrl: '' }),
+    )
     await useFileExplorerStore().downloadFile(WS_ID, '/workspace')
-    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob
-    expect(blob.size).toBe(5)
-    expect(blob.type).toBe('application/gzip')
-    const anchor = vi.mocked(HTMLAnchorElement.prototype.click).mock
-      .contexts[0] as HTMLAnchorElement
-    expect(anchor.download).toBe('workspace.tar.gz')
-    expect(document.body.contains(anchor)).toBe(false)
-    expect(URL.revokeObjectURL).not.toHaveBeenCalled()
-    vi.advanceTimersByTime(1000)
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+    expect(files.link).toHaveBeenCalledWith(WS_ID, '/workspace', expect.any(AbortSignal))
+    expect(startDownload).toHaveBeenCalledExactlyOnceWith('https://files.test/download/workspace')
+
+    await useFileExplorerStore().downloadFile(WS_ID, PATH_A)
+    expect(startDownload).toHaveBeenLastCalledWith(`https://files.test/download${PATH_A}`)
+  })
+
+  it('refuses downloads above the transfer limit', async () => {
+    files.link.mockResolvedValueOnce(makeFileLink(PATH_A, { size: 600 * 1024 * 1024 }))
+    await useFileExplorerStore().downloadFile(WS_ID, PATH_A)
+    expect(startDownload).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledWith(
+      'Download failed',
+      expect.objectContaining({ description: 'Files up to 500 MB can be transferred.' }),
+    )
   })
 
   it('resets the explorer and cancels downloads while preserving open editor tabs', async () => {
     const read = deferred<Awaited<ReturnType<typeof readEditorFile>>>()
-    const download = deferred<FileDownloadResult>()
+    const link = deferred<WorkspaceFileLink>()
     vi.mocked(readEditorFile).mockReturnValueOnce(read.promise)
-    vi.mocked(downloadWorkspaceFile).mockReturnValueOnce(download.promise)
+    files.link.mockReturnValueOnce(link.promise)
     const store = useFileExplorerStore()
     store.selectFile(PATH_A, WS_ID)
     const pendingDownload = store.downloadFile(WS_ID, PATH_A)
     const readSignal = vi.mocked(readEditorFile).mock.calls[0]![2]!
-    const downloadSignal = vi.mocked(downloadWorkspaceFile).mock.calls[0]![2]!
+    const downloadSignal = files.link.mock.calls[0]![2] as AbortSignal
     store.reset()
     expect(readSignal.aborted).toBe(false)
     expect(downloadSignal.aborted).toBe(true)
     read.resolve({ path: PATH_A, content: 'open editor', revision: 'v1' })
-    download.resolve({ ...readResult(), filename: 'a.txt', is_archive: false })
+    link.resolve(makeFileLink(PATH_A))
     await pendingDownload
     await flushPromises()
     expect(store.selectedPath).toBeNull()
     expect(useEditorStore().activeTab!.content).toBe('open editor')
-    expect(URL.createObjectURL).not.toHaveBeenCalled()
+    expect(startDownload).not.toHaveBeenCalled()
     expect(toast.error).not.toHaveBeenCalled()
   })
 
-  it('reports a rejected download once without creating a browser URL', async () => {
-    vi.mocked(downloadWorkspaceFile).mockRejectedValueOnce(new Error('Invalid file payload size'))
+  it('reports a failed link once without starting a download', async () => {
+    files.link.mockRejectedValueOnce(
+      new FileTransferError('The file does not exist.', 'file_not_found'),
+    )
     await useFileExplorerStore().downloadFile(WS_ID, PATH_A)
-    expect(URL.createObjectURL).not.toHaveBeenCalled()
-    expect(toast.error).toHaveBeenCalledOnce()
+    expect(startDownload).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledExactlyOnceWith(
+      'Download failed',
+      expect.objectContaining({ description: 'The file does not exist.' }),
+    )
   })
 })

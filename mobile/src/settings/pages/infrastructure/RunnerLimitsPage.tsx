@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { RUNNERS } from "./ImageDefinitionsPage";
@@ -169,11 +170,15 @@ export function RunnerLimitsPage({
       title="QEMU limits"
       sections={sections}
       loading={!form && !runners.data && !runners.error}
-      empty={{
-        title: "Runner unavailable",
-        description: runners.error ?? "This runner no longer exists.",
-        symbol: "exclamationmark.triangle.fill",
-      }}
+      empty={
+        (form && runner
+          ? undefined
+          : loadFailure("runner limits", runners)) ?? {
+          title: "Runner unavailable",
+          description: "This runner no longer exists.",
+          symbol: "exclamationmark.triangle",
+        }
+      }
       primaryAction={{
         title: "Save",
         onPress: () => void save(),

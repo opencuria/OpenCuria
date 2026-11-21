@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createClient, type OpenCuriaClient } from "@opencuria/client";
+import {
+  ApiRequestError,
+  createClient,
+  type OpenCuriaClient,
+} from "@opencuria/client";
 import type {
   HarnessMessage,
   HarnessPermissionRequest,
@@ -150,6 +154,27 @@ function makeClient(initialSessions: HarnessSession[] = []) {
     dismissNotice: vi.fn(async () => undefined),
     resolvePermission: vi.fn(async () => ({ decision: "once" })),
     resolveQuestion: vi.fn(async () => ({ status: "answered" })),
+    steer: vi.fn(async (_id: string, prompt: string) => ({
+      id: `steer-${prompt}`,
+      content: prompt,
+      created_at: "2026-01-01T00:00:00.000Z",
+    })),
+    withdraw: vi.fn(async (_id: string, steerId: string) => ({
+      id: steerId,
+      content: "withdrawn text",
+      created_at: "2026-01-01T00:00:00.000Z",
+    })),
+    scheduleMessage: vi.fn(async (id: string, input: any) => ({
+      id: "scheduled-1",
+      session_id: id,
+      content: input.prompt,
+      send_at: input.send_at,
+      status: "pending",
+      created_at: "2026-01-01T00:00:00.000Z",
+    })),
+    rescheduleMessage: vi.fn(),
+    withdrawScheduledMessage: vi.fn(),
+    sendScheduledMessage: vi.fn(async (id: string) => rows.get(id)!),
   };
   const api = { get: vi.fn(async () => [] as any[]) };
   return {
@@ -828,6 +853,149 @@ describe("ChatController", () => {
     expect(controller.getSnapshot().sessions).toEqual([]);
   });
 
+  it("shows a follow-up at once and keeps its row through the server echo", async () => {
+    const root = session("root");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(root, [{ ...message("u1", "user", "existing"), position: 0 }]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const accepted = deferred<HarnessSession>();
+    vi.mocked(client.harness.send).mockReturnValueOnce(accepted.promise);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(session("root", { status: "busy" }), [
+        { ...message("u1", "user", "existing"), position: 0 },
+        { ...message("u2", "user", "next step"), position: 1 },
+        {
+          ...message("a2", "assistant", ""),
+          position: 2,
+          completed_at: null,
+        },
+      ]),
+    );
+
+    const sending = controller.send("next step ", { skillIds: ["skill"] });
+
+    const shown = controller.getSnapshot().messages;
+    expect(shown.map((row) => row.content)).toEqual(["existing", "next step"]);
+    const prompt = shown[1]!;
+    expect(prompt.id).toMatch(/^local-user-/);
+    expect(prompt.skill_ids).toEqual(["skill"]);
+    expect(Object.isFrozen(prompt)).toBe(true);
+
+    accepted.resolve(session("root", { status: "busy" }));
+    await sending;
+
+    const rows = controller.getSnapshot().messages;
+    expect(rows.map((row) => row.id)).toEqual(["u1", "u2", "a2"]);
+    expect(rows[1]?.client_key).toBe(prompt.id);
+    controller.dispose();
+  });
+
+  it("shows a new chat's first prompt while the chat is created", async () => {
+    const { client, rows } = makeClient();
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a");
+    const created = deferred<HarnessSession>();
+    vi.mocked(client.harness.createSession).mockImplementationOnce(
+      () => created.promise,
+    );
+    vi.mocked(client.harness.timeline).mockImplementation(async (id) =>
+      timeline(rows.get(id)!, [
+        { ...message("u1", "user", "build it"), session_id: id, position: 0 },
+      ]),
+    );
+
+    const sending = controller.send("build it");
+
+    const pending = controller.getSnapshot().messages;
+    expect(controller.getSnapshot().activeSessionId).toBeNull();
+    expect(pending.map((row) => row.content)).toEqual(["build it"]);
+    const key = pending[0]!.client_key;
+
+    const result = session("created-1", { status: "busy" });
+    rows.set(result.id, result);
+    created.resolve(result);
+    await sending;
+
+    const transcript = controller.getSnapshot().messages;
+    expect(transcript.map((row) => row.id)).toEqual(["u1"]);
+    expect(transcript[0]?.client_key).toBe(key);
+    controller.dispose();
+  });
+
+  it("shows a prompt while its attachments upload and sends the same row", async () => {
+    const root = session("root");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(root, [{ ...message("u1", "user", "existing"), position: 0 }]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+
+    const dropPreview = controller.previewPrompt("What is this?");
+    const preview = controller.getSnapshot().messages.at(-1)!;
+    expect(preview.content).toBe("What is this?");
+
+    const prompt =
+      "What is this?\n@file:/workspace/.opencuria/user-uploaded/a.png";
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(session("root", { status: "busy" }), [
+        { ...message("u1", "user", "existing"), position: 0 },
+        { ...message("u2", "user", prompt), position: 1 },
+      ]),
+    );
+    const sending = controller.send(prompt);
+    const sent = controller.getSnapshot().messages;
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ id: preview.id, content: prompt });
+    await sending;
+    dropPreview();
+
+    const rows = controller.getSnapshot().messages;
+    expect(rows.map((row) => row.id)).toEqual(["u1", "u2"]);
+    expect(rows[1]?.client_key).toBe(preview.id);
+    controller.dispose();
+  });
+
+  it("takes back a previewed prompt that is not sent", async () => {
+    const root = session("root");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(root, [{ ...message("u1", "user", "existing"), position: 0 }]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const before = controller.getSnapshot().messages;
+
+    const dropPreview = controller.previewPrompt("upload fails");
+    expect(controller.getSnapshot().messages).toHaveLength(2);
+    dropPreview();
+
+    expect(controller.getSnapshot().messages).toEqual(before);
+    await controller.newChat("workspace-a");
+    const dropNew = controller.previewPrompt("new chat upload fails");
+    expect(controller.getSnapshot().messages).toHaveLength(1);
+    dropNew();
+    expect(controller.getSnapshot().messages).toEqual([]);
+    controller.dispose();
+  });
+
+  it("clears a new chat's prompt when the chat cannot be created", async () => {
+    const { client } = makeClient();
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a");
+    vi.mocked(client.harness.createSession).mockRejectedValueOnce(
+      new Error("No provider"),
+    );
+
+    await expect(controller.send("build it")).rejects.toThrow("No provider");
+
+    expect(controller.getSnapshot().messages).toEqual([]);
+    controller.dispose();
+  });
+
   it("keeps failed-send transcripts server-owned and does not add a duplicate prompt", async () => {
     const root = session("root");
     const { client } = makeClient([root]);
@@ -851,6 +1019,8 @@ describe("ChatController", () => {
         .messages.some((row) => row.content === "possibly persisted"),
     ).toBe(false);
     expect(controller.getSnapshot().error).toBe("network timeout");
+    controller.dismissError();
+    expect(controller.getSnapshot().error).toBeNull();
     controller.dispose();
   });
 
@@ -894,6 +1064,191 @@ describe("ChatController", () => {
     const controller = new ChatController(client);
     await openRoot(controller);
     expect(client.harness.markRead).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("marks the open chat read when a reconnect finds its run finished meanwhile", async () => {
+    const { client, realtime, rows } = makeClient([
+      session("root", { status: "busy" }),
+    ]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    expect(client.harness.markRead).not.toHaveBeenCalled();
+
+    // The run finished while the app was in the background.
+    rows.set("root", session("root", { status: "idle", unread: true }));
+    realtime.reconnect!();
+    await vi.waitFor(() =>
+      expect(client.harness.markRead).toHaveBeenCalledWith("root"),
+    );
+    expect(controller.getSnapshot().sessions[0]).toMatchObject({
+      status: "idle",
+      unread: false,
+    });
+    controller.dispose();
+  });
+
+  it("keeps a manual-unread marker when a refresh reconciles the open chat", async () => {
+    const { client, rows } = makeClient([session("root", { status: "busy" })]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+
+    rows.set(
+      "root",
+      session("root", { status: "idle", unread: true, manual_unread: true }),
+    );
+    await controller.refresh();
+    expect(client.harness.markRead).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().sessions[0]?.unread).toBe(true);
+    controller.dispose();
+  });
+});
+
+describe("ChatController steering and scheduled messages", () => {
+  it("queues a steer for the running turn and keeps socket snapshots authoritative", async () => {
+    const root = session("root", { status: "busy" });
+    const { client, realtime } = makeClient([root]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+
+    await controller.steer("Use pnpm", { model: "model-v1" });
+
+    expect(client.harness.steer).toHaveBeenCalledWith("root", "Use pnpm");
+    expect(controller.getSnapshot().steers.map((steer) => steer.id)).toEqual([
+      "steer-Use pnpm",
+    ]);
+    realtime.emit("harness.steer_queue", {
+      workspace_id: "workspace-a",
+      session_id: "root",
+      steers: [],
+    });
+    expect(controller.getSnapshot().steers).toEqual([]);
+    realtime.emit("harness.steer_queue", {
+      workspace_id: "workspace-b",
+      session_id: "root",
+      steers: [{ id: "foreign", content: "x", created_at: "now" }],
+    });
+    expect(controller.getSnapshot().steers).toEqual([]);
+    controller.dispose();
+  });
+
+  it("sends a regular turn when the run ended before the steer arrived", async () => {
+    const root = session("root", { status: "busy" });
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.steer).mockRejectedValueOnce(
+      new ApiRequestError(409, "ended", "no_active_run"),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+
+    await controller.steer("Also add tests", { model: "model-v2" });
+
+    expect(client.harness.send).toHaveBeenCalledWith(
+      "root",
+      expect.objectContaining({ prompt: "Also add tests", model: "model-v2" }),
+    );
+    controller.dispose();
+  });
+
+  it("returns undelivered steers on stop and drops withdrawn ones", async () => {
+    const root = session("root", { status: "busy" });
+    const { client, realtime } = makeClient([root]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    realtime.emit("harness.steer_queue", {
+      workspace_id: "workspace-a",
+      session_id: "root",
+      steers: [
+        { id: "a", content: "First", created_at: "now" },
+        { id: "b", content: "Second", created_at: "now" },
+      ],
+    });
+
+    expect(await controller.withdrawSteer("a")).toBe("withdrawn text");
+    expect(controller.getSnapshot().steers.map((steer) => steer.id)).toEqual([
+      "b",
+    ]);
+    expect(await controller.stop()).toEqual(["Second"]);
+    expect(client.harness.abort).toHaveBeenCalledWith("root");
+    expect(controller.getSnapshot().steers).toEqual([]);
+    controller.dispose();
+  });
+
+  it("hydrates scheduled messages from the timeline and follows snapshots", async () => {
+    const root = session("root");
+    const { client, realtime } = makeClient([root]);
+    const later = {
+      id: "s-2",
+      session_id: "root",
+      content: "Later",
+      send_at: "2026-01-03T09:00:00.000Z",
+      status: "pending" as const,
+      created_at: "2026-01-01T00:00:00.000Z",
+    };
+    vi.mocked(client.harness.timeline).mockResolvedValueOnce({
+      ...timeline(root),
+      scheduled_messages: [later],
+    });
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    expect(controller.getSnapshot().scheduled).toEqual([later]);
+
+    const sendAt = new Date("2026-01-02T09:00:00.000Z");
+    await controller.schedule("Check CI", sendAt, { model: "model-v1" });
+    expect(client.harness.scheduleMessage).toHaveBeenCalledWith(
+      "root",
+      expect.objectContaining({
+        prompt: "Check CI",
+        send_at: sendAt.toISOString(),
+        model: "model-v1",
+      }),
+    );
+    // Earliest first, whatever order the messages arrived in.
+    expect(controller.getSnapshot().scheduled.map((row) => row.id)).toEqual([
+      "scheduled-1",
+      "s-2",
+    ]);
+    realtime.emit("harness.scheduled_messages", {
+      workspace_id: "workspace-a",
+      session_id: "root",
+      messages: [{ ...later, status: "failed", error: "Workspace stopped" }],
+    });
+    expect(controller.getSnapshot().scheduled).toEqual([
+      { ...later, status: "failed", error: "Workspace stopped" },
+    ]);
+
+    vi.mocked(client.harness.withdrawScheduledMessage).mockRejectedValueOnce(
+      new ApiRequestError(404, "gone", "not_found"),
+    );
+    expect(await controller.withdrawScheduled("s-2")).toBeNull();
+    expect(controller.getSnapshot().scheduled).toEqual([]);
+
+    await controller.sendScheduledNow("s-3");
+    expect(client.harness.sendScheduledMessage).toHaveBeenCalledWith(
+      "root",
+      "s-3",
+    );
+    controller.dispose();
+  });
+
+  it("loads the user message of a run this client did not start", async () => {
+    const root = session("root");
+    const { client, realtime } = makeClient([root]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    vi.mocked(client.harness.timeline).mockClear();
+
+    realtime.emit("harness.session_status", {
+      workspace_id: "workspace-a",
+      session_id: "root",
+      status: "busy",
+      message_id: "assistant-9",
+      user_message_id: "user-9",
+    });
+
+    await vi.waitFor(() =>
+      expect(client.harness.timeline).toHaveBeenCalledWith("root"),
+    );
     controller.dispose();
   });
 });

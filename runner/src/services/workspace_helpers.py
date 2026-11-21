@@ -29,20 +29,6 @@ def sanitize_exec_workdir(path: str) -> str:
     return normalized
 
 
-def sanitize_filename(filename: str) -> str:
-    """Validate and return a safe filename for workspace uploads."""
-    if not filename:
-        raise ValueError("Filename must not be empty")
-
-    if filename != os.path.basename(filename):
-        raise ValueError("Filename must not contain path separators")
-
-    if filename in {".", ".."}:
-        raise ValueError("Invalid filename")
-
-    return filename
-
-
 def credential_path_helpers(
     *,
     credential_environment: str = "/etc/environment",
@@ -144,6 +130,5 @@ __all__ = [
     "KeyedLockMap",
     "credential_path_helpers",
     "sanitize_exec_workdir",
-    "sanitize_filename",
     "sanitize_path",
 ]

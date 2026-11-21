@@ -13,9 +13,10 @@ import type {
   NativeFormRow,
   NativeFormSection,
 } from "../../../ui/NativeForm.types";
+import { errorRows, loadErrorState } from "../../../ui/formStates";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { autosaveSection, loadErrorSections } from "../../sections";
+import { refreshError, autosaveSection } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { useAutosave } from "../../useAutosave";
@@ -215,11 +216,17 @@ export function ProvidersPage(): React.JSX.Element {
         {
           id: "voice",
           title: "Voice input",
-          footer: voice.error
-            ? "Speech models could not be loaded. You can enter a model ID manually."
-            : "Models used for dictation. Audio is sent to your selected speech provider.",
-          footerTone: voice.error ? "warning" : "muted",
+          footer:
+            "Models used for dictation. Audio is sent to your selected speech provider.",
           rows: [
+            ...(voice.error
+              ? errorRows(
+                  "speech-models",
+                  "Couldn’t load speech models. You can enter a model ID manually.",
+                  () => void voice.reload(),
+                  voice.loading,
+                )
+              : []),
             modelRow(
               "speech-model",
               "Speech recognition",
@@ -252,17 +259,20 @@ export function ProvidersPage(): React.JSX.Element {
   const visible = isAdmin ? sections : ready ? [providers] : [];
 
   const error = accounts.error ?? (isAdmin ? config.error : null);
+  const failure =
+    error && !ready
+      ? loadErrorState("providers", error, () => {
+          void accounts.reload();
+          if (isAdmin) void config.reload();
+        })
+      : undefined;
   return (
     <SettingsPage
       title="Provider & Models"
       sections={
-        error && !ready
-          ? loadErrorSections(error, () => {
-              void accounts.reload();
-              if (isAdmin) void config.reload();
-            })
-          : visible
+        failure ? [] : [...refreshError("accounts", accounts), ...visible]
       }
+      empty={failure}
       loading={!ready && !error}
       onRefresh={async () => {
         await Promise.allSettled([

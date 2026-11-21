@@ -143,6 +143,20 @@ class LifecycleCommands:
             )
         return evidence
 
+    async def _activation(self, workspace_id: uuid.UUID, data: dict) -> dict:
+        """Apply a requested Windows license; the result travels with the event.
+
+        The request may carry a product key and is never journaled; the result
+        is ``{status, code}`` only and uses its own key so it is kept.
+        """
+        service = getattr(self._service, "windows_activation", None)
+        request = data.get("windows_activation")
+        if service is None or request is None:
+            return {}
+        return {
+            "windows_activation_result": await service.activate(workspace_id, request)
+        }
+
     async def on_create_workspace(self, data: dict) -> CommandResult:
         """Create workspace and return one terminal outcome."""
         task_id = data.get("task_id", str(uuid.uuid4()))
@@ -161,6 +175,7 @@ class LifecycleCommands:
                 ssh_keys=data.get("ssh_keys", []),
                 workspace_id=workspace_id,
                 base_image_path=data.get("base_image_path") or None,
+                guest_os=data.get("guest_os"),
             )
             result = CommandResult(
                 "workspace:created",
@@ -169,6 +184,7 @@ class LifecycleCommands:
                     "workspace_id": str(ws_id),
                     "status": "created",
                     "credentials_present": credentials_present,
+                    **await self._activation(ws_id, data),
                 },
             )
             log.info("task_completed", workspace_id=str(ws_id))
@@ -271,6 +287,7 @@ class LifecycleCommands:
                     "task_id": task_id,
                     "workspace_id": str(workspace_id),
                     "credentials_present": credentials_present,
+                    **await self._activation(workspace_id, data),
                 },
             )
             log.info("workspace_resumed")
@@ -479,6 +496,7 @@ class LifecycleCommands:
                 env_vars=data.get("env_vars", {}),
                 files=data.get("files", []),
                 ssh_keys=data.get("ssh_keys", []),
+                guest_os=data.get("guest_os"),
             )
             result = CommandResult(
                 "workspace:created",
@@ -487,6 +505,7 @@ class LifecycleCommands:
                     "workspace_id": str(ws_id),
                     "status": "created",
                     "credentials_present": credentials_present,
+                    **await self._activation(ws_id, data),
                 },
             )
             log.info("workspace_created_from_image_artifact", workspace_id=str(ws_id))

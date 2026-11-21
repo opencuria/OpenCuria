@@ -275,8 +275,8 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
     service.conversation_events.emit_sync = lambda *_: None
     original_tools = harness_tools.default_tool_registry
 
-    def registered_mcp_tools():
-        registry = original_tools()
+    def registered_mcp_tools(*args, **kwargs):
+        registry = original_tools(*args, **kwargs)
         registry.register(McpWriteTool())
         return registry
 
@@ -938,9 +938,12 @@ async def test_parent_stop_cancels_real_child_and_releases_both_owners(runtime):
     session = new_session(data)
     assistant, task = await start(data, session)
     await asyncio.wait_for(data.provider.blocked.wait(), 20)
-    # Child inference may start before its queued notification reaches the host.
+    # Child inference may start before its queued notification reaches the host,
+    # and the host creates the child session before the child's assistant message.
     async with asyncio.timeout(10):
-        while not HarnessSession.objects.filter(parent=session).exists():
+        while not HarnessMessage.objects.filter(
+            session__parent=session, role="assistant"
+        ).exists():
             if task.done():
                 await task
                 pytest.fail("Native child ended before its timeline was created")
@@ -1380,8 +1383,8 @@ async def test_real_native_codex_child_mcp_retains_separate_agent_scope(
 
     original_registry = harness_tools.default_tool_registry
 
-    def registry():
-        tools = original_registry()
+    def registry(*args, **kwargs):
+        tools = original_registry(*args, **kwargs)
         tools.register(ProbeDesktop(None))
         return tools
 

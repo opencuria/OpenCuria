@@ -1,12 +1,7 @@
 import React from "react";
 import { Text } from "react-native";
 import { act, render, screen, waitFor } from "@testing-library/react-native";
-import {
-  avatarColor,
-  isOrganizationAdmin,
-  profileInitials,
-  profileName,
-} from "./profile";
+import { isOrganizationAdmin, profileInitials, profileName } from "./profile";
 import { ResourceStore, useResource } from "./resources";
 import { useAutosave, autosaveText } from "./useAutosave";
 
@@ -29,7 +24,6 @@ describe("profile", () => {
     expect(profileName(anonymous)).toBe("grace.hopper@navy.mil");
     expect(profileInitials(anonymous)).toBe("GH");
     expect(profileInitials({ ...anonymous, email: "x@y.z" })).toBe("X");
-    expect(avatarColor(ada)).toBe(avatarColor({ email: "ada@example.com" }));
   });
 
   it("derives admin from the active organization's role", () => {

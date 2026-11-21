@@ -2,9 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import HarnessMarkdown from './HarnessMarkdown.vue'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 
-vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn(() => new Promise(() => {})) }))
+vi.mock('@/services/workspaceFiles', () => import('@/services/workspaceFiles.fixtures'))
 vi.mock('@/components/common/CopyButton.vue', () => ({
   default: {
     props: ['text', 'label', 'disabled'],
@@ -19,7 +18,6 @@ function mountMarkdown(text: string, streaming = false) {
 describe('HarnessMarkdown code block copying', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    useWorkspaceImageStore().reset()
   })
 
   it('adds a copy action with exact decoded source text and keeps prose boundaries', () => {

@@ -208,6 +208,6 @@ export const ACTIVITY_GROUPS = [
 /** Button titles of operation dispositions, as in the webapp. */
 export const DISPOSITION_TITLES = {
   reconcile: "Apply confirmed result",
-  retry: "Try again",
+  retry: "Retry",
   acknowledge_interrupted: "Close interrupted operation",
 } as const;

@@ -12,6 +12,7 @@ from collections.abc import Callable
 import structlog
 
 from apps.credentials.services import CredentialSvc
+from apps.licensing.services import WindowsLicenseService
 from common.exceptions import ConflictError, NotFoundError
 
 from ..capture_repository import CaptureRepository
@@ -128,6 +129,14 @@ class CaptureService:
             raise ConflictError(
                 "New versions must be captured on the runner that stores the image"
             )
+        line_guest_os = CaptureRepository.line_guest_os(line)
+        if line_guest_os is not None and line_guest_os != ws.guest_os:
+            # Workspaces update within a line, so its OS (and license) is fixed.
+            raise ConflictError(
+                "New versions must use the operating system of the image; "
+                "capture a new image instead",
+                code="image_os_mismatch",
+            )
         if CaptureRepository.version_capturing(line):
             raise ConflictError("Another version of this image is being captured")
         return line
@@ -191,8 +200,13 @@ class CaptureService:
                         and not request.resume_suppressed
                         and ws.status == "stopped"
                     ):
-                        CaptureService._child(request, ws, "resume")
-                        return
+                        try:
+                            WindowsLicenseService().admit(ws)
+                        except ConflictError as exc:
+                            request.diagnostic += f"; workspace remains stopped: {exc}"
+                        else:
+                            CaptureService._child(request, ws, "resume")
+                            return
                 else:
                     CaptureService._child(request, ws, "capture")
                     return
@@ -222,6 +236,7 @@ class CaptureService:
                             disk_size_gb=ws.qemu_disk_size_gb,
                             exclude_workspace_id=ws.id,
                         )
+                        WindowsLicenseService().admit(ws)
                     except ConflictError as exc:
                         request.diagnostic += f"; workspace remains stopped: {exc}"
                     else:
@@ -287,6 +302,14 @@ class CaptureService:
             return (
                 f"Image saved as v{image.generation}, but replacement cannot reserve "
                 f"runner resources: {exc}; the workspace stays on its previous version"
+            )
+        try:
+            # The replacement boots the stopped source again (running cap).
+            WindowsLicenseService().admit_recreate(ws)
+        except ConflictError as exc:
+            return (
+                f"Image saved as v{image.generation}, but the workspace cannot "
+                f"start: {exc} It stays on its previous version"
             )
         return None
 
