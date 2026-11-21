@@ -333,3 +333,29 @@ async def test_runner_register_resolves_the_session_runner(runner_sio, runner):
 
     await handlers["runner:register"](runner.sid, {})
     runner.refresh_from_db()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_frontend_clients_join_their_user_room(monkeypatch):
+    """Owner-scoped events reach every client of a user without subscriptions."""
+    user = get_user_model().objects.create_user(
+        email=f"sio-room-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
+    server = socketio.AsyncServer(async_mode="asgi")
+    sio_server._register_frontend_handlers(server)
+    server.save_session = AsyncMock()
+    server.enter_room = AsyncMock()
+    backend = Mock(validate_access_token=Mock(return_value=user))
+    monkeypatch.setattr("apps.accounts.auth_backends.get_auth_backend", lambda: backend)
+    connect = server.handlers["/frontend"]["connect"]
+
+    await connect("sid-1", {}, {"token": "jwt"})
+    server.enter_room.assert_awaited_once_with(
+        "sid-1", f"user:{user.id}", namespace="/frontend"
+    )
+
+    with pytest.raises(ConnectionRefusedError):
+        await connect("sid-2", {}, {})
+    server.enter_room.assert_awaited_once()
+    sio_server.drop_frontend("sid-1")

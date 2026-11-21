@@ -1223,7 +1223,8 @@ print_summary() {
       "${PUBLIC_URL#https://}"
   fi
   if [[ "${ACTION}" != update ]]; then
-    printf '  - Build an image under Settings > Image Definitions, then create a workspace.\n'
+    printf '  - Build an image under Settings > Image Definitions and connect a model\n'
+    printf '    provider under Settings > Provider & Models; the home screen guides you.\n'
   fi
   printf '  - Update or uninstall: run the install command again.\n'
 }

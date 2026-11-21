@@ -379,19 +379,6 @@ def reply_since(
     return data
 
 
-async def _discard_empty_chat(session_id: uuid.UUID) -> None:
-    """Remove a just-created chat whose first run never started."""
-    service = get_harness_service()
-    try:
-        messages = await sync_to_async(ConversationService().list_timeline_messages)(
-            session_id
-        )
-        if not messages:
-            await service.delete_session(session_id)
-    except Exception:
-        log.warning("mcp_empty_chat_cleanup_failed", session_id=str(session_id))
-
-
 async def wait_for_chat(ctx: ToolContext, session_id: uuid.UUID, seconds: int) -> None:
     """Block until the chat is idle or waiting for input, or *seconds* pass."""
     if seconds <= 0:
@@ -662,7 +649,9 @@ async def chat_start(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             skill_ids=list(session.skill_ids or []),
         )
     except Exception:
-        await _discard_empty_chat(session.id)
+        await ConversationService().discard_empty_chat(
+            session.id, service.delete_session
+        )
         raise
     await wait_for_chat(ctx, session.id, args.get("wait_seconds", 0))
 

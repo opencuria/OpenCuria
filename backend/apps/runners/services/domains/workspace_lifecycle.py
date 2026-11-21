@@ -328,6 +328,8 @@ class WorkspaceLifecycleService:
             credentials_present=resolved is not None and resolved.has_material,
             task_type=command.task_type,
         )
+        # The owner's other clients list the new workspace right away.
+        self.frontend_bus.forward_workspace_status(workspace, task_id=str(task_id))
         # Dispatch to runner — include workspace_id so the runner
         # uses the same UUID the backend assigned.
         await self.task_dispatch.dispatch_workspace_task(
@@ -1338,6 +1340,8 @@ class WorkspaceLifecycleService:
                 "guest_os": image.guest_os,
             },
         )
+        # The owner's other clients list the new workspace right away.
+        self.frontend_bus.forward_workspace_status(workspace, task_id=str(task_id))
 
         await self.task_dispatch.dispatch_workspace_task(
             runner=runner,

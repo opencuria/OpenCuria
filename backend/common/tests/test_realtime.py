@@ -98,3 +98,18 @@ async def test_room_delivery_failure_does_not_abort_later_publication(transport)
         "workspace:one",
         "workspace:two",
     ]
+
+
+@pytest.mark.asyncio
+async def test_owner_events_reach_the_workspace_room_and_the_user_room(transport):
+    """One emit to both rooms: a client in both receives the event once."""
+    payload = {"workspace_id": "workspace", "status": "creating"}
+    await realtime.emit_to_frontend(
+        "workspace:status_changed", payload, "workspace", user_id="7"
+    )
+    transport.emit.assert_awaited_once_with(
+        "workspace:status_changed",
+        payload,
+        to=["workspace:workspace", "user:7"],
+        namespace="/frontend",
+    )

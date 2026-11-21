@@ -199,6 +199,19 @@ describe("ChatComposer", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("keeps the draft but waits for a model before sending a new chat", () => {
+    const { onSend } = renderComposer({ missingModel: true });
+    fireEvent.changeText(
+      screen.getByTestId("chat-composer-input"),
+      "First prompt",
+    );
+    const send = screen.getByTestId("chat-composer-send");
+    expect(send).toBeDisabled();
+    expect(send.props.accessibilityHint).toBe("Choose a model first");
+    fireEvent.press(send);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("sends an attachment without requiring a text draft", async () => {
     const attachment = {
       id: "document",

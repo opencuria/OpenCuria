@@ -27,6 +27,7 @@ import {
   mentionFileSearchQuery,
 } from "@opencuria/chat-core/harnessMentions";
 import { isWorkspaceReadyForChat } from "@opencuria/chat-core/workspaceReadiness";
+import { isModelProviderConnected } from "@opencuria/chat-core/workspaceSetup";
 import {
   formatEffort,
   resolveCatalogModel,
@@ -34,6 +35,7 @@ import {
   harnessAgentDefaults,
   harnessEngineLabel,
   harnessSessionModels,
+  isNewChatModelMissing,
 } from "@opencuria/chat-core/harnessModels";
 import type {
   HarnessId,
@@ -89,6 +91,7 @@ import type { NotificationTarget } from "../notifications/target";
 import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
 import { FileViewerSheet, type FileViewerTarget } from "../tools/files";
 import { WorkspacesSheet } from "../workspaces/WorkspacesSheet";
+import { WorkspaceSetupGuide } from "../workspaces/WorkspaceSetupGuide";
 import { workspacePickerActions } from "../workspaces/workspacePresentation";
 import { ScheduledTaskSheet } from "../scheduledTasks/ScheduledTaskSheet";
 import { ScheduledTasksSheet } from "../scheduledTasks/ScheduledTasksSheet";
@@ -101,7 +104,11 @@ import { appScope, pendingAppCount } from "../apps/appPresentation";
 import { useApps } from "../apps/useApps";
 import { useAppsWidgetRequests } from "../widgets/AppsWidgetProvider";
 import { showToast } from "../ui/toast";
-import { profileInitials, profileName } from "../settings/profile";
+import {
+  isOrganizationAdmin,
+  profileInitials,
+  profileName,
+} from "../settings/profile";
 import { offlineStore } from "../offline/offlineStore";
 import {
   SavedChatView,
@@ -292,6 +299,8 @@ export function MainScreen(): React.JSX.Element {
   } = useChatDraft(saved, draftScope);
   /** Settings opens on this page next, e.g. to set up voice input. */
   const [settingsPath, setSettingsPath] = useState<string[]>([]);
+  /** Counts Settings closes; the setup guide re-checks after each. */
+  const [settingsClosed, setSettingsClosed] = useState(0);
   // Dictation's text goes to the draft of the chat it was recorded in.
   const voice = useVoiceDictation({
     client,
@@ -366,6 +375,15 @@ export function MainScreen(): React.JSX.Element {
   );
   /** The chat cannot take a message, as opposed to one being on its way. */
   const chatUnavailable = !navigationReady || !ready || activeIsSubtask;
+  /** A new chat cannot start without a model; the server would refuse it. */
+  const missingModel =
+    !offline && !chat.activeSessionId && isNewChatModelMissing(harness, model);
+  /** No usable workspace yet: the empty chat shows the first-run guide. */
+  const needsSetup =
+    !offline &&
+    !loading &&
+    !workspacesError &&
+    workspaces.every((item) => HIDDEN.has(item.status));
   /** The agent is working: a message goes into its running turn. */
   const steering =
     navigationReady &&
@@ -1752,6 +1770,11 @@ export function MainScreen(): React.JSX.Element {
     void KeyboardController.dismiss().catch(() => undefined);
     setSheet(name);
   };
+  /** Opens Settings on a page, e.g. `["providers"]`. */
+  const openSettings = (path: string[]) => {
+    setSettingsPath(path);
+    openSheet("profile");
+  };
   const insertIntoChat = chatUnavailable
     ? undefined
     : (text: string) => {
@@ -1877,6 +1900,7 @@ export function MainScreen(): React.JSX.Element {
               // Offline a prompt can be written, not sent.
               disabled={offline ? false : chatUnavailable}
               canSend={!offline}
+              missingModel={missingModel}
               placeholder={
                 steering && !activeEdit ? "Steer the agent…" : "Ask OpenCuria"
               }
@@ -1998,6 +2022,22 @@ export function MainScreen(): React.JSX.Element {
                   ? "Open a saved chat from the sidebar."
                   : "No chats are saved on this device yet."
                 : undefined
+            }
+            emptyContent={
+              needsSetup ? (
+                <WorkspaceSetupGuide
+                  client={client}
+                  organizationId={session?.organizationId ?? null}
+                  isAdmin={isOrganizationAdmin(
+                    organizations,
+                    session?.organizationId,
+                  )}
+                  providerConnected={isModelProviderConnected(models, engines)}
+                  refreshKey={settingsClosed}
+                  onOpenSettings={openSettings}
+                  onCreated={() => loadOverview(true)}
+                />
+              ) : undefined
             }
             // Subtasks take no prompts from the user.
             onEdit={offline || activeIsSubtask ? undefined : startEdit}
@@ -2125,6 +2165,7 @@ export function MainScreen(): React.JSX.Element {
         initialPath={settingsPath}
         onClose={() => {
           setSettingsPath([]);
+          setSettingsClosed((count) => count + 1);
           setSheet((current) => (current === "profile" ? null : current));
         }}
         client={client}
@@ -2167,6 +2208,7 @@ export function MainScreen(): React.JSX.Element {
           catalogError ??
           `${harnessEngineLabel(harness, engines)} models unavailable. Check the provider account in Settings.`
         }
+        onUnavailablePress={() => openSettings(["providers"])}
         onModelChange={selectModel}
         onEffortChange={(value) => {
           selectionDirty.current = true;

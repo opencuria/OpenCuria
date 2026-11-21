@@ -143,6 +143,8 @@ export interface ChatComposerProps {
    * e.g. offline.
    */
   canSend?: boolean;
+  /** A new chat has no model yet: the draft stays, Send waits for one. */
+  missingModel?: boolean;
   placeholder?: string;
   /** Workspace picker above the editor; hosts pass it only for new chats. */
   workspace?: ComposerWorkspace;
@@ -216,6 +218,7 @@ export function ChatComposer({
   steering = false,
   disabled = false,
   canSend = true,
+  missingModel = false,
   placeholder = "Ask OpenCuria",
   workspace,
   settings,
@@ -624,6 +627,7 @@ export function ChatComposer({
       if (
         disabled ||
         !canSend ||
+        missingModel ||
         (busy && !steering) ||
         pickerInFlight.current ||
         (!text && currentAttachments.length === 0)
@@ -693,6 +697,7 @@ export function ChatComposer({
     [
       busy,
       canSend,
+      missingModel,
       cancelSearch,
       disabled,
       dismissKeyboard,
@@ -772,7 +777,8 @@ export function ChatComposer({
   const hasPicker = Boolean(onTakePhoto || onChoosePhotos || onChooseFiles);
   const hasDraft = draft.trim().length > 0 || attachments.length > 0;
   // While the agent works a draft steers it; a send still on its way blocks.
-  const canSubmit = !disabled && canSend && hasDraft && (!busy || steering);
+  const canSubmit =
+    !disabled && canSend && !missingModel && hasDraft && (!busy || steering);
   const primaryIsStop = busy && !(steering && hasDraft);
   const attachDisabled = disabled || !canSend;
   const attachmentButton = hasPicker ? (
@@ -894,7 +900,13 @@ export function ChatComposer({
         void send();
       }}
       onLongPress={showMenu}
-      accessibilityHint={canSchedule ? "Hold to send later" : undefined}
+      accessibilityHint={
+        missingModel
+          ? "Choose a model first"
+          : canSchedule
+            ? "Hold to send later"
+            : undefined
+      }
       testID="chat-composer-send"
     />
   );

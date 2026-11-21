@@ -906,8 +906,8 @@ def test_mode_switch_needs_run_permission(harness_setup, fake_harness_service):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_missing_provider_config_is_4xx(harness_setup, monkeypatch):
-    """Creating a session without provider/model config returns 404, not a hang."""
+def test_missing_model_is_explained_and_leaves_no_chat(harness_setup, monkeypatch):
+    """Without a model or agent default the API names the fix, not an internal id."""
     service = HarnessService(emit=_drop_emit)
     monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
     client = _client(
@@ -918,8 +918,35 @@ def test_missing_provider_config_is_4xx(harness_setup, monkeypatch):
         data=json.dumps({"prompt": "no provider"}),
         content_type="application/json",
     )
-    assert response.status_code == 404
-    assert response.json()["code"] == "not_found"
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert body["detail"].startswith("No model selected.")
+    assert str(harness_setup["org"].id) not in body["detail"]
+    # The refused first prompt does not leave an empty chat in the sidebar.
+    assert not HarnessSession.objects.filter(
+        workspace=harness_setup["owned"]
+    ).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unconnected_provider_model_leaves_no_chat(harness_setup, monkeypatch):
+    """A model whose provider has no account is refused before a chat persists."""
+    service = HarnessService(emit=_drop_emit)
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "model": "openrouter/some-model"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Provider 'openrouter' is not connected"
+    assert not HarnessSession.objects.filter(
+        workspace=harness_setup["owned"]
+    ).exists()
 
 
 @pytest.mark.django_db(transaction=True)

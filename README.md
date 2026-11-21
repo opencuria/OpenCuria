@@ -65,7 +65,10 @@ files stream through `/api/v1/workspace-files/`: allow request bodies of 500 MB 
 No image is built during installation. Once the runner is online, an admin builds
 an image definition on it under **Settings → Image Definitions**: the bundled
 `Ubuntu 24.04`, `Windows 11` or a custom one. Workspaces can be created once the
-build is ready. Windows workspaces follow the license model chosen under
+build is ready. Agents answer once a model provider is connected under
+**Settings → Provider & Models** (an organization-shared account serves every
+member); the home screen of the web and mobile app walks through these steps.
+Windows workspaces follow the license model chosen under
 **Settings → Windows** (product keys, per-user licenses with KMS, or explicitly
 without license).
 

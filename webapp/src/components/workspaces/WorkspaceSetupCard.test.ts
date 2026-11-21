@@ -24,6 +24,17 @@ const imageStore = reactive({
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => authStore }))
 vi.mock('@/stores/runners', () => ({ useRunnerStore: () => runnerStore }))
 vi.mock('@/stores/images', () => ({ useImageStore: () => imageStore }))
+const providerCatalog = vi.hoisted(() => ({
+  models: [] as Array<{ id: string }>,
+  engines: [] as Array<{ id: string; connected: boolean }>,
+}))
+vi.mock('@/lib/providerCatalog', () => ({
+  loadEngineModelsCached: vi.fn(async () => providerCatalog.models),
+}))
+vi.mock('@/services/harness.api', () => ({
+  HARNESS_ENGINE_CONNECTION_CHANGED_EVENT: 'harness:engine-connection-changed',
+  listHarnessEngines: vi.fn(async () => providerCatalog.engines),
+}))
 vi.mock('@/composables/usePolling', () => ({
   usePolling: (fetch: () => Promise<void>) => ({
     start: () => void fetch(),
@@ -58,6 +69,8 @@ describe('WorkspaceSetupCard', () => {
     imageStore.capturedImages = []
     imageStore.error = null
     imageStore.definitionsError = null
+    providerCatalog.models = []
+    providerCatalog.engines = [{ id: 'native', connected: true }]
   })
 
   afterEach(() => {
@@ -82,8 +95,36 @@ describe('WorkspaceSetupCard', () => {
     imageStore.runnerBuildsByDefinition = readyBuild
     await flushPromises()
     expect(state(wrapper, 'image')).toBe('done')
-    expect(state(wrapper, 'workspace')).toBe('current')
-    expect(wrapper.get('[data-testid="workspace-setup-progress"]').text()).toBe('2 of 3')
+    expect(state(wrapper, 'provider')).toBe('current')
+    // The workspace can already be created; it is offered, but not as the next step.
+    expect(wrapper.find('[data-testid="workspace-setup-action-workspace"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="workspace-setup-progress"]').text()).toBe('2 of 4')
+  })
+
+  it('offers the provider step while the image is still building', async () => {
+    runnerStore.runners = [{ id: 'runner-1', name: 'local-qemu', status: 'online' }]
+    const listener = vi.fn()
+    window.addEventListener(OPEN_SETTINGS_EVENT, listener)
+    const wrapper = mountCard()
+    await flushPromises()
+    expect(state(wrapper, 'image')).toBe('current')
+    expect(state(wrapper, 'provider')).toBe('upcoming')
+    // No workspace without an image, so its action waits.
+    expect(wrapper.find('[data-testid="workspace-setup-action-workspace"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="workspace-setup-action-provider"]').trigger('click')
+    expect((listener.mock.calls[0]![0] as CustomEvent).detail).toEqual({ tab: 'provider' })
+    window.removeEventListener(OPEN_SETTINGS_EVENT, listener)
+  })
+
+  it('marks the provider step done once models are listed and re-checks on changes', async () => {
+    const wrapper = mountCard()
+    await flushPromises()
+    expect(state(wrapper, 'provider')).not.toBe('done')
+    providerCatalog.models = [{ id: 'openrouter/model' }]
+    window.dispatchEvent(new Event('harness:engine-connection-changed'))
+    await flushPromises()
+    expect(state(wrapper, 'provider')).toBe('done')
+    expect(wrapper.text()).toContain('Models are ready for your agents.')
   })
 
   it('opens the matching settings tab and emits create from the last step', async () => {
@@ -93,6 +134,9 @@ describe('WorkspaceSetupCard', () => {
     await flushPromises()
     await wrapper.get('[data-testid="workspace-setup-action-runner"]').trigger('click')
     expect((listener.mock.calls[0]![0] as CustomEvent).detail).toEqual({ tab: 'runners' })
+    runnerStore.runners = [{ id: 'runner-1', name: 'local-qemu', status: 'online' }]
+    imageStore.runnerBuildsByDefinition = readyBuild
+    await flushPromises()
     await wrapper.get('[data-testid="workspace-setup-action-workspace"]').trigger('click')
     expect(wrapper.emitted('create')).toHaveLength(1)
     window.removeEventListener(OPEN_SETTINGS_EVENT, listener)
@@ -111,24 +155,23 @@ describe('WorkspaceSetupCard', () => {
     expect(runnerStore.fetchRunners).toHaveBeenCalledTimes(2)
   })
 
-  it('holds members back with a neutral note until an image is ready', async () => {
+  it('shows members only their own steps until an image is ready', async () => {
     authStore.isAdmin = false
     const wrapper = mountCard()
     await flushPromises()
-    const create = wrapper.get('[data-testid="workspace-setup-create"]')
-    expect(create.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="workspace-setup-step-runner"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-setup-step-image"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-setup-action-workspace"]').exists()).toBe(false)
     const text = wrapper.text()
-    expect(text).toContain('No workspace image is available yet')
-    expect(wrapper.find('ol').exists()).toBe(false)
+    expect(text).toContain('Available as soon as a workspace image is ready.')
     // No admin details or hints for members.
     expect(text).not.toMatch(/runner|admin|settings/i)
 
     runnerStore.runners = [{ id: 'runner-1', name: 'local-qemu', status: 'online' }]
     imageStore.runnerBuildsByDefinition = readyBuild
     await flushPromises()
-    expect(create.attributes('disabled')).toBeUndefined()
-    expect(wrapper.text()).not.toContain('No workspace image is available yet')
-    await create.trigger('click')
+    expect(wrapper.text()).not.toContain('Available as soon as a workspace image is ready.')
+    await wrapper.get('[data-testid="workspace-setup-action-workspace"]').trigger('click')
     expect(wrapper.emitted('create')).toHaveLength(1)
   })
 
@@ -137,8 +180,6 @@ describe('WorkspaceSetupCard', () => {
     imageStore.definitionsError = 'Failed to load image definitions'
     const wrapper = mountCard()
     await flushPromises()
-    expect(
-      wrapper.get('[data-testid="workspace-setup-create"]').attributes('disabled'),
-    ).toBeUndefined()
+    expect(wrapper.find('[data-testid="workspace-setup-action-workspace"]').exists()).toBe(true)
   })
 })

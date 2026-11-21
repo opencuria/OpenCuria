@@ -39,10 +39,13 @@ class FrontendBusService:
         event: str,
         data: dict,
         workspace_id: str,
+        *,
+        owner_id: str | None = None,
     ) -> None:
         """
         Schedule a Socket.IO emit to subscribed frontend clients.
 
+        With *owner_id* every client of the workspace owner receives it too.
         Since service methods are called synchronously (via sync_to_async),
         this schedules the async emit on the running event loop.
         """
@@ -50,20 +53,29 @@ class FrontendBusService:
             asyncio.get_running_loop()
         except RuntimeError:
             transaction.on_commit(
-                lambda: self._emit_frontend_event(event, dict(data), workspace_id)
+                lambda: self._emit_frontend_event(
+                    event, dict(data), workspace_id, owner_id
+                )
             )
         else:
-            self._emit_frontend_event(event, data, workspace_id)
+            self._emit_frontend_event(event, data, workspace_id, owner_id)
 
-    def _emit_frontend_event(self, event: str, data: dict, workspace_id: str) -> None:
+    def _emit_frontend_event(
+        self, event: str, data: dict, workspace_id: str, owner_id: str | None = None
+    ) -> None:
         """Deliver an event only after its originating transaction committed."""
+        recipients = {"user_id": owner_id} if owner_id else {}
         try:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                async_to_sync(realtime.emit_to_frontend)(event, data, workspace_id)
+                async_to_sync(realtime.emit_to_frontend)(
+                    event, data, workspace_id, **recipients
+                )
             else:
-                loop.create_task(realtime.emit_to_frontend(event, data, workspace_id))
+                loop.create_task(
+                    realtime.emit_to_frontend(event, data, workspace_id, **recipients)
+                )
         except Exception:
             logger.exception(
                 "Failed forwarding event to frontend",
@@ -161,7 +173,11 @@ class FrontendBusService:
         task_id: str | None = None,
         status: str | None = None,
     ) -> None:
-        """Forward workspace status and credential presence to the frontend."""
+        """Forward workspace status and credential presence to the frontend.
+
+        The owner's clients receive it even without a subscription, so their
+        workspace lists pick up workspaces created or changed elsewhere.
+        """
         payload = {
             "workspace_id": str(workspace.id),
             "status": status or workspace.status,
@@ -169,10 +185,12 @@ class FrontendBusService:
         }
         if task_id:
             payload["task_id"] = task_id
+        owner_id = workspace.created_by_id
         self.forward_to_frontend(
             "workspace:status_changed",
             payload,
             str(workspace.id),
+            owner_id=str(owner_id) if owner_id is not None else None,
         )
 
     def push_process_status(

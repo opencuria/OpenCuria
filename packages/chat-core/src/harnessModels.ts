@@ -189,6 +189,14 @@ export function harnessAgentDefaults(
   };
 }
 
+/**
+ * A new chat on the built-in engine cannot start without a model; Claude and
+ * Codex fall back to their engine defaults. Composers keep Send disabled.
+ */
+export function isNewChatModelMissing(engine: HarnessId, model: string): boolean {
+  return engine === "native" && !model.trim();
+}
+
 /** The session model is the public routing binding; never derive it from a draft model. */
 export function sessionProvider(model: string): string {
   const separator = model.indexOf("/");

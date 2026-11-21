@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -88,6 +88,23 @@ class ConversationService:
         """Return message headers without duplicate assistant text bodies."""
         self.get_session(session_id)
         return self.messages.list_timeline_for_session(session_id)
+
+    async def discard_empty_chat(
+        self,
+        session_id: uuid.UUID,
+        delete_session: Callable[[uuid.UUID], Awaitable[None]],
+    ) -> None:
+        """Delete a just-created chat whose first run never started.
+
+        Best effort: a chat that already holds messages is kept, and a failed
+        cleanup only logs, so the caller can report the original error.
+        """
+        try:
+            messages = await sync_to_async(self.list_timeline_messages)(session_id)
+            if not messages:
+                await delete_session(session_id)
+        except Exception:
+            log.warning("empty_chat_cleanup_failed", session_id=str(session_id))
 
     def list_todos(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
         """Return persisted todos of a session as plain dicts."""

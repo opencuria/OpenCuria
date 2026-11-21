@@ -66,6 +66,8 @@ export interface ModelSheetProps {
   mode: HarnessSessionMode;
   /** Shown instead of model rows when the engine catalog is empty. */
   unavailableMessage?: string;
+  /** Opens where models become available, e.g. the provider settings. */
+  onUnavailablePress?: () => void;
   onModelChange: (id: string) => void;
   onEffortChange: (effort: string) => void;
   onAgentChange: (engine: HarnessId, mode: HarnessSessionMode) => void;
@@ -88,6 +90,7 @@ export function ModelSheet({
   engine,
   mode,
   unavailableMessage,
+  onUnavailablePress,
   onModelChange,
   onEffortChange,
   onAgentChange,
@@ -220,6 +223,9 @@ export function ModelSheet({
           {
             id: "models-unavailable",
             title: unavailableMessage ?? "No models available",
+            ...(onUnavailablePress
+              ? { symbol: "gearshape" as const, onPress: onUnavailablePress }
+              : {}),
           },
         ],
       };

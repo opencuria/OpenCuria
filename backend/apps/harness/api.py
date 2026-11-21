@@ -232,14 +232,21 @@ async def create_harness_session(
             skill_ids=payload.skill_ids or [],
             user_id=request.user.id,
         )
-        await service.start_run(
-            session,
-            payload.prompt,
-            organization_id=org_id,
-            workspace_id=str(workspace.id),
-            user_id=request.user.id,
-            skill_ids=payload.skill_ids or [],
-        )
+        try:
+            await service.start_run(
+                session,
+                payload.prompt,
+                organization_id=org_id,
+                workspace_id=str(workspace.id),
+                user_id=request.user.id,
+                skill_ids=payload.skill_ids or [],
+            )
+        except Exception:
+            # No empty chat stays behind when the first run is refused.
+            await ConversationService().discard_empty_chat(
+                session.id, service.delete_session
+            )
+            raise
         fresh = await sync_to_async(ConversationService().get_session)(session.id)
         return 201, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), fresh

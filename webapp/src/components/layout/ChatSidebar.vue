@@ -289,6 +289,11 @@ function setupSocketListeners(): void {
 
   cleanupFns.push(
     onEvent('workspace:status_changed', (data) => {
+      // Owners also hear about workspaces created on another device or tab.
+      if (!workspaceStore.workspaces.some((workspace) => workspace.id === data.workspace_id)) {
+        void workspaceStore.fetchWorkspaces()
+        return
+      }
       workspaceStore.updateWorkspaceStatus(
         data.workspace_id,
         data.status as WorkspaceStatus,
