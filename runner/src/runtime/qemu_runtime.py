@@ -29,6 +29,7 @@ from pathlib import Path
 import asyncssh
 import libvirt
 import structlog
+from asyncssh.constants import PTY_IUTF8
 
 from ..config import RunnerSettings
 from .base import (
@@ -113,6 +114,10 @@ _LABEL_PREFIX = "opencuria"
 _SSH_KEEPALIVE_INTERVAL = 30
 _SSH_KEEPALIVE_COUNT_MAX = 5
 _SSH_CLOSE_TIMEOUT = 2.0
+
+# Terminal clients send UTF-8. Without IUTF8 the guest line discipline erases
+# one byte per Backspace and leaves invisible fragments in line-buffered input.
+_TERMINAL_MODES = {PTY_IUTF8: 1}
 
 # Guest filesystem whose usage is reported with the VM metrics.
 _GUEST_DISK_PATH = "/workspace"
@@ -2208,6 +2213,7 @@ class QemuRuntime(RuntimeBackend):
             cmd_str,
             term_type="xterm-256color",
             term_size=(cols, rows),
+            term_modes=_TERMINAL_MODES,
             encoding=None,  # binary mode
         )
 

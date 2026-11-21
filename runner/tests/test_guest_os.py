@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from asyncssh.constants import PTY_IUTF8
 
 libvirt = pytest.importorskip("libvirt")
 
@@ -565,6 +566,21 @@ async def test_linux_terminals_keep_the_inline_command(tmp_path) -> None:
 
     assert "'/bin/bash' '-l'" in ssh.create_process.await_args.args[0]
     runtime.exec_with_input.assert_not_awaited()
+
+
+@pytest.mark.parametrize("guest", [LINUX, WINDOWS])
+async def test_terminals_request_utf8_line_editing(tmp_path, guest) -> None:
+    """Backspace must erase whole UTF-8 characters, not single bytes."""
+    runtime = _runtime(tmp_path)
+    runtime._guest_cache["ws"] = guest
+    ssh, _ = _upload_ssh()
+    runtime._get_ssh = AsyncMock(return_value=ssh)
+
+    await runtime.exec_pty("ws", 80, 24)
+
+    pty_request = ssh.create_process.await_args.kwargs
+    assert pty_request["term_type"] == "xterm-256color"
+    assert pty_request["term_modes"] == {PTY_IUTF8: 1}
 
 
 async def test_clipboard_text_travels_on_stdin_to_the_session_task(tmp_path) -> None:
