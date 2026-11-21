@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react-native";
+import { rejectHaptic } from "../ui/haptics";
 import { ThemeProvider } from "../ui/theme";
 import { LoginScreen } from "./LoginScreen";
 import { useSession } from "./SessionContext";
@@ -21,6 +22,7 @@ jest.mock("./SessionContext", () => ({
   ...jest.requireActual("./SessionContext"),
   useSession: jest.fn(),
 }));
+jest.mock("../ui/haptics", () => ({ rejectHaptic: jest.fn() }));
 
 const mockUseSession = useSession as jest.MockedFunction<typeof useSession>;
 const login = jest.fn().mockResolvedValue(undefined);
@@ -43,7 +45,10 @@ function renderLogin() {
   );
 }
 
-beforeEach(() => login.mockClear());
+beforeEach(() => {
+  login.mockClear();
+  (rejectHaptic as jest.Mock).mockClear();
+});
 
 describe("LoginScreen", () => {
   it("asks for the server first when none is configured", () => {
@@ -102,6 +107,30 @@ describe("LoginScreen", () => {
     );
     expect(screen.getByTestId("login-server")).toBeTruthy();
     expect(screen.getByTestId("login-error")).toBeTruthy();
+  });
+
+  it("signals a rejected sign-in, but not an error it opened with", async () => {
+    mockSession("Your session expired.");
+    const view = render(
+      <ThemeProvider initialMode="light">
+        <LoginScreen />
+      </ThemeProvider>,
+    );
+    expect(rejectHaptic).not.toHaveBeenCalled();
+
+    fireEvent.changeText(screen.getByTestId("login-server"), "curia.example");
+    fireEvent.changeText(screen.getByTestId("login-email"), "me@example.com");
+    fireEvent.changeText(screen.getByTestId("login-password"), "wrong");
+    fireEvent.press(screen.getByTestId("login-submit"));
+    await waitFor(() => expect(login).toHaveBeenCalled());
+    mockSession("Invalid email or password.");
+    view.rerender(
+      <ThemeProvider initialMode="light">
+        <LoginScreen />
+      </ThemeProvider>,
+    );
+    expect(rejectHaptic).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Invalid email or password.")).toBeTruthy();
   });
 
   it("toggles password visibility", () => {

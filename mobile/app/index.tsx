@@ -10,6 +10,7 @@ import { useSession } from "../src/screens/SessionContext";
 export default function IndexRoute(): React.JSX.Element {
   const {
     booting,
+    signingIn,
     session,
     client,
     user,
@@ -19,6 +20,8 @@ export default function IndexRoute(): React.JSX.Element {
     signOut,
   } = useSession();
   const { theme } = useTheme();
+  // Signing in keeps the form, its input and its busy action on screen.
+  if (signingIn && !user) return <LoginScreen />;
   if (booting && (!session || !user)) {
     return (
       <View style={[styles.loading, { backgroundColor: theme.background }]}>

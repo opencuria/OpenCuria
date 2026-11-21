@@ -78,12 +78,26 @@ exports.ComposerSurface = ({ children }) => h(View, null, children)
 exports.ComposerSheetSurface = ({ children, style }) => h(View, { style }, children)
 exports.ComposerSheetPeek = ({ style }) => h(View, { style })
 exports.composerSheetsFloat = false
-exports.NativeTextField = React.forwardRef(({ label, ...props }, ref) =>
-  h(TextInput, {
-    ...props,
-    accessibilityLabel: props.accessibilityLabel ?? label,
-    ref,
-  }),
+exports.NativeTextField = React.forwardRef(
+  ({ label, grouped, trailingAction, ...props }, ref) => {
+    const input = h(TextInput, {
+      ...props,
+      accessibilityLabel: props.accessibilityLabel ?? label,
+      ref,
+    })
+    if (!trailingAction) return input
+    return h(
+      View,
+      null,
+      input,
+      h(Pressable, {
+        accessibilityRole: 'button',
+        accessibilityLabel: trailingAction.label,
+        testID: trailingAction.testID,
+        onPress: trailingAction.onPress,
+      }),
+    )
+  },
 )
 
 exports.NativePicker = ({

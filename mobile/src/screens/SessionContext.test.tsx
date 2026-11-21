@@ -190,6 +190,82 @@ describe("SessionProvider", () => {
     );
   });
 
+  it("reports a sign-in while it runs and ends it when the server rejects it", async () => {
+    const client = makeClient();
+    clients.push(client);
+    const answer = deferred<never>();
+    mockCreateClient.mockImplementation(() => {
+      const instance = clients.shift()!;
+      (instance.auth.login as jest.Mock).mockReturnValue(answer.promise);
+      return instance;
+    });
+    const current = jest.fn();
+    render(
+      <SessionProvider>
+        <Harness onValue={current} />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(current.mock.lastCall?.[0].booting).toBe(false));
+    expect(current.mock.lastCall?.[0].signingIn).toBe(false);
+
+    let signIn!: Promise<void>;
+    act(() => {
+      signIn = current.mock.lastCall![0].login(
+        "https://curia.example",
+        "user@example.test",
+        "wrong",
+      );
+    });
+    expect(current.mock.lastCall?.[0]).toMatchObject({
+      signingIn: true,
+      booting: true,
+    });
+
+    await act(async () => {
+      answer.reject(
+        Object.assign(new Error("Invalid email or password."), { status: 401 }),
+      );
+      await signIn;
+    });
+    expect(current.mock.lastCall?.[0]).toMatchObject({
+      signingIn: false,
+      booting: false,
+      session: null,
+      user: null,
+      error: "Invalid email or password.",
+    });
+  });
+
+  it("names the server when a sign-in gets no answer", async () => {
+    const client = makeClient();
+    clients.push(client);
+    mockCreateClient.mockImplementation(() => {
+      const instance = clients.shift()!;
+      (instance.auth.login as jest.Mock).mockRejectedValue(
+        new TypeError("fetch failed: java.net.UnknownHostException"),
+      );
+      return instance;
+    });
+    const current = jest.fn();
+    render(
+      <SessionProvider>
+        <Harness onValue={current} />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(current.mock.lastCall?.[0].booting).toBe(false));
+
+    await act(async () => {
+      await current.mock.lastCall![0].login(
+        "curia.example",
+        "user@example.test",
+        "secret",
+      );
+    });
+    expect(current.mock.lastCall?.[0].error).toBe(
+      "Can't reach curia.example. Check the address and your connection.",
+    );
+  });
+
   it("preserves a saved session when profile returns 401 but refresh is unavailable offline", async () => {
     const client = makeClient({
       auth: {

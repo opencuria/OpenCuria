@@ -33,6 +33,17 @@ export function gestureThresholdHaptic(): void {
   void feedback.catch(() => undefined);
 }
 
+/** The system's rejection pattern, e.g. when a sign-in fails. */
+export function rejectHaptic(): void {
+  const module = haptics();
+  if (!module) return;
+  const feedback =
+    Platform.OS === "android"
+      ? module.performAndroidHapticsAsync(module.AndroidHaptics.Reject)
+      : module.notificationAsync(module.NotificationFeedbackType.Error);
+  void feedback.catch(() => undefined);
+}
+
 /** A light tick for a discrete action under the finger, such as a click. */
 export function lightTapHaptic(): void {
   const module = haptics();

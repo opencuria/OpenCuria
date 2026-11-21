@@ -1,6 +1,8 @@
 import React, { useEffect, useImperativeHandle, useRef } from "react";
 import {
   Host,
+  Icon,
+  IconButton,
   OutlinedTextField,
   Shape,
   Text,
@@ -10,6 +12,7 @@ import {
   type TextFieldRef,
 } from "@expo/ui/jetpack-compose";
 import { fillMaxWidth, semantics } from "@expo/ui/jetpack-compose/modifiers";
+import { androidIcon } from "./androidIcons";
 import type { NativeTextFieldProps } from "./NativeTextField.types";
 import { useTheme, type OpenCuriaTheme } from "./theme";
 
@@ -84,6 +87,8 @@ export function NativeTextField(
     },
   }));
   const submit = () => props.onSubmitEditing?.();
+  const action = props.trailingAction;
+  const actionIcon = androidIcon(action?.symbol);
   return (
     <Host
       matchContents={{ vertical: true }}
@@ -143,6 +148,17 @@ export function NativeTextField(
           <OutlinedTextField.Placeholder>
             <Text>{props.placeholder}</Text>
           </OutlinedTextField.Placeholder>
+        ) : null}
+        {action && actionIcon ? (
+          <OutlinedTextField.TrailingIcon>
+            <IconButton
+              onClick={action.onPress}
+              colors={{ contentColor: theme.mutedText }}
+              modifiers={[semantics({ contentDescription: action.label })]}
+            >
+              <Icon source={actionIcon} size={24} />
+            </IconButton>
+          </OutlinedTextField.TrailingIcon>
         ) : null}
       </OutlinedTextField>
     </Host>

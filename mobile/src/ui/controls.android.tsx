@@ -56,6 +56,9 @@ export function Button({
         : ComposeButton;
   const layout = controlLayout(style);
   const hug = hugsContent(layout);
+  // A taller hero action (e.g. sign in) passes its height as `minHeight`.
+  const minHeight =
+    typeof layout.minHeight === "number" ? Math.max(48, layout.minHeight) : 48;
   return (
     <View
       testID={testID}
@@ -83,7 +86,7 @@ export function Button({
           colors={buttonColors(variant, theme)}
           modifiers={[
             ...(hug ? [] : [fillMaxWidth()]),
-            defaultMinSize({ minHeight: 48 }),
+            defaultMinSize({ minHeight }),
             semantics({ contentDescription: accessibilityLabel ?? title }),
           ]}
         >
