@@ -88,6 +88,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
     },
     plugins: [
+      // First: Expo runs Xcode mods in reverse order, so it sees the widget target.
+      "./plugins/withExtensionVersions",
       "expo-router",
       "expo-secure-store",
       [

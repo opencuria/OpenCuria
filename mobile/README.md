@@ -70,6 +70,7 @@ hosts; public hosts need `https://`.
 - `src/scheduledTasks/`, `src/notifications/`, `src/widgets/`, `src/offline/`,
   `src/platform/` (secure storage, pickers, uploads, media cache).
 - `modules/`: local Expo modules (app runtime, terminal, highlighter, PDF, toolbar).
+- `plugins/`: local config plugins (app extensions take the app's version and build number).
 
 ## Checks
 
