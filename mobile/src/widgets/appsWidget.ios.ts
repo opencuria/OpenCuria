@@ -2,7 +2,7 @@ import { requireOptionalNativeModule } from "expo";
 import { Directory } from "expo-file-system";
 import type { AppsWidgetTarget } from "./appsWidget";
 
-/** iOS draws the widget with expo-widgets (`AppsWidget.tsx`). */
+/** iOS draws the widget with expo-widgets (`AppsWidgetLayout.tsx`). */
 export const appsWidget: AppsWidgetTarget = {
   available: requireOptionalNativeModule("ExpoWidgets") !== null,
   async iconDirectory() {
@@ -14,7 +14,7 @@ export const appsWidget: AppsWidgetTarget = {
   },
   async publish(snapshot) {
     // Loading the layout stores it for the widget extension.
-    const { AppsWidget } = await import("./AppsWidget");
+    const { AppsWidget } = await import("./AppsWidgetLayout");
     AppsWidget.updateSnapshot(snapshot);
   },
 };

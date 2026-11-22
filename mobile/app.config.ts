@@ -104,7 +104,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           enablePushNotifications: true,
           widgets: [
             {
-              // Layout: src/widgets/AppsWidget.tsx.
+              // Layout: src/widgets/AppsWidgetLayout.tsx.
               name: "OpenCuriaApps",
               displayName: "Apps",
               description: "Open your apps from the Home Screen.",
