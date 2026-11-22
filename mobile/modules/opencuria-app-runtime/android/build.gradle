@@ -35,7 +35,6 @@ dependencies {
   implementation 'androidx.appcompat:appcompat:1.7.0'
   // The app menu sheet; the version react-native-screens and @expo/ui ship.
   implementation 'com.google.android.material:material:1.13.0'
-  // Installed apps get their own constants and SecureStore scope.
+  // Installed apps get their own constants (`SandboxConstantsService`).
   compileOnly expoModule('expo-constants', 'expo.modules.constants')
-  compileOnly expoModule('expo-secure-store', 'expo.modules.securestore')
 }

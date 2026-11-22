@@ -16,12 +16,14 @@
     "test:mobile": "npm run test -w mobile",
     "type-check": "npm run type-check -w webapp && npm run type-check -w mobile && tsc -p packages/client/tsconfig.json && npm run type-check -w packages/computer-use",
     "test": "npm run test:computer-use && npm run test:shared && npm run test:mobile && npm test -w webapp",
-    "test:computer-use": "npm test -w packages/computer-use"
+    "test:computer-use": "npm test -w packages/computer-use",
+    "postinstall": "patch-package --error-on-fail"
   },
   "devDependencies": {
     "typescript": "~5.9.3",
     "vitest": "^3.2.7",
-    "jsdom": "29.0.1"
+    "jsdom": "29.0.1",
+    "patch-package": "8.0.1"
   },
   "overrides": {
     "@expo/ui": "57.0.26",

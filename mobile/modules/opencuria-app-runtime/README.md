@@ -12,8 +12,19 @@ data and draws the Android Apps widget.
   to OpenCuria when the app closes.
 - **Offline:** an app-only `ExpoUpdates` module maps asset hashes to downloaded files
   and provides the app's Expo config.
-- **Sandbox:** each app has its own document, cache, SQLite and SecureStore scope.
-  Notifications, AsyncStorage and background tasks are not scoped.
+- **Sandbox:** each app has its own document, cache and SecureStore scope (own
+  Keystore/Keychain namespace); SQLite databases only on iOS. Native code derives
+  an app's directories from its id and never shows apps OpenCuria's own modules
+  (`opencuria-*`, dev client, widgets; `src/apps/appRuntimeHostModules.test.ts`).
+  One file policy (`AppFileAccess`) gates Expo modules, React Native's networking
+  and ImageStore and `expo/fetch`: an app reads and writes its data and cache,
+  reads its installed files and nothing else of OpenCuria. On iOS the Expo part
+  needs `patches/expo-modules-core+57.0.23.patch` (root `postinstall`); without it
+  the runtime does not compile. After an Expo upgrade regenerate it with
+  `npx patch-package expo-modules-core --include '^ios/FileSystemUtilities/'`.
+  Notifications, AsyncStorage and background tasks are not scoped, and libraries
+  that open paths on their own (expo-sqlite, WebView file access, Skia and others)
+  are not confined yet.
 - **Workspace backends:** `AppGateway` rewrites `http://<process>.opencuria.local[:port]`
   to the API gateway and adds the session token, which the app never sees. Android
   routes clients created through `OkHttpClientProvider` only.

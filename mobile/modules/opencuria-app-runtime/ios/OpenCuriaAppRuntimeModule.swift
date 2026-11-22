@@ -45,7 +45,10 @@ public final class OpenCuriaAppRuntimeModule: Module {
   }
 }
 
-/// Routes `expo/fetch` requests for app backends through `AppGatewayURLProtocol`.
+/**
+ Routes `expo/fetch` requests for app backends through `AppGatewayURLProtocol`
+ and keeps it from loading files the open app may not read (`AppFileURLProtocol`).
+ */
 @MainActor
 enum AppGatewayFetch {
   private static var installed = false
@@ -56,7 +59,7 @@ enum AppGatewayFetch {
     ExpoFetchCustomExtension.setCustomURLSessionConfigurationProvider(configuration)
   }
 
-  /// Expo's default fetch configuration plus the gateway protocol (any queue).
+  /// Expo's default fetch configuration plus the gateway and file protocols (any queue).
   nonisolated static func configuration() -> URLSessionConfiguration? {
     let config = URLSessionConfiguration.default
     config.httpShouldSetCookies = true
@@ -65,7 +68,7 @@ enum AppGatewayFetch {
     if Bundle.main.infoDictionary?["ReactNetworkForceWifiOnly"] as? Bool == true {
       config.allowsCellularAccess = false
     }
-    config.protocolClasses = [AppGatewayURLProtocol.self] + (config.protocolClasses ?? [])
+    config.protocolClasses = [AppFileURLProtocol.self, AppGatewayURLProtocol.self] + (config.protocolClasses ?? [])
     return config
   }
 }

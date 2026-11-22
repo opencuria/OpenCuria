@@ -13,14 +13,20 @@ enum AppLaunchError: LocalizedError {
   }
 }
 
-/// Everything needed to run one installed app version, as sent by JavaScript.
+/**
+ Everything needed to run one installed app version, as sent by JavaScript.
+
+ Where the app's files live follows from its id alone
+ (`AppSandbox.installDirectory`); paths in the request are ignored, so no
+ request can widen the app's sandbox.
+ */
 struct AppLaunch {
   let appId: String
   let versionId: String
   let name: String
   /// Hermes bytecode or JavaScript bundle produced by `expo export`.
   let bundleURL: URL
-  /// Installed version directory; the app may read it but never write.
+  /// Installed app directory; the app may read it but never write.
   let installDir: URL
   /// The app's persistent data directory (kept across versions).
   let dataDir: URL
@@ -61,33 +67,33 @@ struct AppLaunch {
       let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       let appId = root["appId"] as? String, isValidId(appId),
       let versionId = root["versionId"] as? String, isValidId(versionId),
-      let bundlePath = root["bundlePath"] as? String,
-      let installDir = root["installDir"] as? String,
-      let dataDir = root["dataDir"] as? String,
       let manifest = root["manifest"] as? [String: Any]
     else {
       throw AppLaunchError.invalid("The app cannot be opened; reinstall it.")
     }
-    guard FileManager.default.fileExists(atPath: bundlePath) else {
+    let installDir = AppSandbox.installDirectory(appId: appId)
+    let bundleURL = installDir
+      .appendingPathComponent("versions", isDirectory: true)
+      .appendingPathComponent(versionId, isDirectory: true)
+      .appendingPathComponent("index.bundle")
+    guard FileManager.default.fileExists(atPath: bundleURL.path) else {
       throw AppLaunchError.invalid("The app bundle is missing; reinstall the app.")
     }
     let manifestData = try JSONSerialization.data(withJSONObject: manifest)
-    let iconPath = (root["iconPath"] as? String).flatMap {
-      FileManager.default.fileExists(atPath: $0) ? $0 : nil
-    }
+    let iconPath = installDir.appendingPathComponent("icon.png").path
     return AppLaunch(
       appId: appId,
       versionId: versionId,
       name: (root["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "App",
-      bundleURL: URL(fileURLWithPath: bundlePath),
-      installDir: URL(fileURLWithPath: installDir, isDirectory: true),
-      dataDir: URL(fileURLWithPath: dataDir, isDirectory: true),
+      bundleURL: bundleURL,
+      installDir: installDir,
+      dataDir: installDir.appendingPathComponent("data", isDirectory: true),
       manifest: manifest,
       manifestString: String(data: manifestData, encoding: .utf8) ?? "{}",
       localAssets: root["localAssets"] as? [String: String] ?? [:],
       orientation: root["orientation"] as? String ?? "default",
       backgroundColor: (root["backgroundColor"] as? String).flatMap(UIColor.init(hex:)),
-      iconPath: iconPath,
+      iconPath: FileManager.default.fileExists(atPath: iconPath) ? iconPath : nil,
       gateway: AppGateway.session(fromJSON: root["gateway"] as? [String: Any])
     )
   }

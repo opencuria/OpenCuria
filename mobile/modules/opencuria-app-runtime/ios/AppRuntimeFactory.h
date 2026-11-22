@@ -10,15 +10,23 @@ NS_ASSUME_NONNULL_BEGIN
  React Native factory of one installed app. Like Expo's factory it creates the
  Expo `AppContext` when the runtime starts, but takes it from `makeAppContext`
  so the context carries the app's sandbox before native modules register,
- reports fatal JavaScript errors instead of letting React Native abort the
- whole OpenCuria process, and leaves React Native's process-wide provider of
- third-party Fabric components with OpenCuria's own factory.
+ lets `registerModules` pick the Expo modules, confines React Native's
+ networking (fetch, XMLHttpRequest, uploads, images) to `canReadFile` for
+ `file:` URLs, reports fatal JavaScript errors instead of letting React Native
+ abort the whole OpenCuria process, and leaves React Native's process-wide
+ provider of third-party Fabric components with OpenCuria's own factory.
  */
 NS_SWIFT_NAME(AppRuntimeFactory)
 @interface OCAppRuntimeFactory : EXReactNativeFactory
 
 /// Called on the JS thread for the instance's context, before modules register.
 @property (nonatomic, copy, nullable) EXAppContext *_Nonnull (^makeAppContext)(void);
+
+/// Called on the JS thread to register the instance's Expo modules.
+@property (nonatomic, copy, nullable) void (^registerModules)(EXAppContext *appContext);
+
+/// Whether the app may read a `file:` URL; without it React Native's networking reads none.
+@property (nonatomic, copy, nullable) BOOL (^canReadFile)(NSURL *url);
 
 /// Called with the message of a fatal JavaScript error.
 @property (nonatomic, copy, nullable) void (^onFatalError)(NSString *message);

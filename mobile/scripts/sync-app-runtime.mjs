@@ -16,11 +16,14 @@ const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const target = resolve(mobileRoot, "../backend/apps/mobile_apps/runtime.json");
 const require = createRequire(join(mobileRoot, "package.json"));
 
-/** Host-only packages that apps must not depend on. */
-const PRIVATE = [/^opencuria-/, /^expo-dev-/, /^expo-widgets$/];
+/**
+ * Host-only packages that apps must not depend on. The app runtime hides
+ * their native modules from apps (`src/apps/appRuntimeHostModules.test.ts`).
+ */
+export const PRIVATE = [/^opencuria-/, /^expo-dev-/, /^expo-widgets$/];
 
 /** Installed directory of a dependency, as Node would resolve it. */
-function packageDir(name) {
+export function packageDir(name) {
   for (const base of require.resolve.paths(name) ?? []) {
     const dir = join(base, name);
     if (existsSync(join(dir, "package.json"))) return dir;

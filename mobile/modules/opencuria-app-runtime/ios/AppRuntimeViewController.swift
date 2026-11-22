@@ -80,12 +80,14 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
       NotificationCenter.default.removeObserver(keyboardObserver)
     }
     AppGateway.close(launch.gateway)
+    AppFileAccess.close(sandbox.files)
   }
 
   override func viewDidLoad() {
     super.viewDidLoad()
     AppRuntimeViewController.current = self
     AppGateway.open(launch.gateway)
+    AppFileAccess.open(sandbox.files)
     view.backgroundColor = launch.backgroundColor ?? .systemBackground
     view.addGestureRecognizer(menuGesture)
     view.addSubview(menuButton)
@@ -168,6 +170,12 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
         self.restart()
       })
     }
+    // Without OpenCuria's own modules (`SandboxModulesProvider`).
+    factory.registerModules = { appContext in
+      appContext.registerNativeModules(provider: SandboxModulesProvider())
+    }
+    let files = sandbox.files
+    factory.canReadFile = { url in files.canRead(url) }
     factory.onFatalError = { [weak self] message in
       guard let self, self.instance == id else { return }
       self.showError(message)
@@ -218,6 +226,7 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
   func close(animated: Bool = true) {
     stop()
     AppGateway.close(launch.gateway)
+    AppFileAccess.close(sandbox.files)
     if AppRuntimeViewController.current === self {
       AppRuntimeViewController.current = nil
     }

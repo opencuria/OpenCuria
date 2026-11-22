@@ -62,10 +62,14 @@ object AppGateway {
     if (!installed.compareAndSet(false, true)) return
     // Provider clients carry no HTTP response cache: React Native only adds
     // one to its networking module, and gateway or API responses are not
-    // cacheable anyway.
+    // cacheable anyway. `expo/fetch` builds on these clients and adds its
+    // file interceptor after the open app's file policy.
     OkHttpClientProvider.setOkHttpClientFactory(
       OkHttpClientFactory {
-        OkHttpClientProvider.createClientBuilder().addInterceptor(interceptor).build()
+        OkHttpClientProvider.createClientBuilder()
+          .addInterceptor(interceptor)
+          .addInterceptor(AppFileAccess.fileUrlGuard)
+          .build()
       }
     )
     // Per request too, for clients created before this factory existed.

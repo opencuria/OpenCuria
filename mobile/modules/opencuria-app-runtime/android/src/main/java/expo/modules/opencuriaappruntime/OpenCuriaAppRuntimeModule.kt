@@ -21,7 +21,7 @@ class OpenCuriaAppRuntimeModule : Module() {
     AsyncFunction("open") { request: String ->
       val activity = appContext.currentActivity ?: throw Exceptions.MissingActivity()
       val launch = try {
-        AppLaunch.parse(request)
+        AppLaunch.parse(activity, request)
       } catch (e: Exception) {
         throw InvalidLaunchException(e)
       }

@@ -14,25 +14,22 @@ export interface AppGatewayLaunch {
   domain: string;
 }
 
-/** What the native runtime needs to open one installed app version. */
+/**
+ * What the native runtime needs to open one installed app version. The
+ * runtime finds the app's files from its id (`appLayout` in
+ * `appInstaller.ts`), never from paths in the request, so an app can only
+ * ever reach its own sandbox.
+ */
 export interface AppLaunchRequest {
   appId: string;
   versionId: string;
   name: string;
-  /** Absolute path of the Hermes bundle. */
-  bundlePath: string;
-  /** Absolute path of the app's installed files (read-only for the app). */
-  installDir: string;
-  /** Absolute path of the app's own data directory. */
-  dataDir: string;
   /** Updates-style manifest; `extra.expoClient` is the app's Expo config. */
   manifest: Record<string, unknown>;
   /** Metro asset hash -> `file://` URI of the downloaded asset. */
   localAssets: Record<string, string>;
   orientation: "default" | "portrait" | "landscape";
   backgroundColor?: string;
-  /** Absolute path of the app icon, shown while the app starts. */
-  iconPath?: string;
   /** Missing offline: backend requests then fail like without network. */
   gateway?: AppGatewayLaunch;
 }
