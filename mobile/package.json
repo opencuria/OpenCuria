@@ -132,6 +132,11 @@
         "buildFromSource": [
           "expo-gl"
         ]
+      },
+      "ios": {
+        "buildFromSource": [
+          "expo-modules-core"
+        ]
       }
     }
   }
