@@ -2,28 +2,37 @@
 
 Downloads up to 5 MiB, converts HTML to markdown/text by default, and
 relies on the registry's 50 KiB truncation + spill for model-facing
-bounds. SSRF blocking of private/loopback/metadata hosts is an
-OpenCuria overlay OpenCode does not have.
+bounds. OpenCuria overlay OpenCode does not have: the backend may only
+reach public internet addresses. Every hop resolves its host once, is
+rejected unless all answers are public, and connects only to those
+addresses; redirects are followed here, never by httpx
+(``common.public_egress``).
 """
 
 from __future__ import annotations
 
-import ipaddress
-import socket
+import asyncio
 from html.parser import HTMLParser
 from typing import Literal
-from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 from markdownify import ATX, markdownify
 from pydantic import BaseModel, ConfigDict, Field
 
+from common.public_egress import (
+    NonPublicAddressError,
+    UnresolvableHostError,
+    async_pinned_transport,
+    resolve_public_addresses,
+)
+
 from .base import Tool, ToolContext, ToolError, ToolResult
 
 WEBFETCH_MAX_BYTES = 5 * 1024 * 1024
 WEBFETCH_DEFAULT_TIMEOUT = 30.0
 WEBFETCH_MAX_TIMEOUT = 120.0
+WEBFETCH_MAX_REDIRECTS = 10
 
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -60,88 +69,32 @@ class WebfetchArgs(BaseModel):
     )
 
 
-#: Hostnames that always resolve to local/cloud-metadata targets.
-WEBFETCH_BLOCKED_HOSTS = frozenset(
-    {
-        "localhost",
-        "metadata.google.internal",
-    }
-)
-
-#: IP literal blocked as a cloud-metadata endpoint.
-WEBFETCH_BLOCKED_IP = "169.254.169.254"
-
-
-def _host_is_blocked(host: str) -> bool:
-    """Return True when *host* is a localhost/metadata name."""
-    normalized = (host or "").strip().lower().rstrip(".")
-    if not normalized:
-        return True
-    if normalized in WEBFETCH_BLOCKED_HOSTS:
-        return True
-    if normalized == WEBFETCH_BLOCKED_IP:
-        return True
-    if normalized.endswith(".localhost"):
-        return True
-    return False
-
-
-def _ip_is_blocked(address: ipaddress._BaseAddress) -> bool:
-    """Return True for private/loopback/link-local/reserved IPs."""
-    return (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-    )
-
-
-def is_blocked_url(url: str) -> bool:
-    """Return True when *url* targets a blocked SSRF host.
-
-    Checks the hostname blocklist, IP-literal classification, and a
-    best-effort DNS lookup (``socket.gethostbyname``): a resolvable
-    private IP blocks, an unresolvable name does not fail closed.
-    """
+def _http_url(url: str) -> httpx.URL:
+    """Parse *url* as an absolute http(s) URL, or raise ToolError."""
     try:
-        host = urlparse(url).hostname or ""
-    except ValueError:
-        return True
-    if _host_is_blocked(host):
-        return True
-    try:
-        literal = ipaddress.ip_address(host)
-    except ValueError:
-        literal = None
-    if literal is not None:
-        return _ip_is_blocked(literal)
-    try:
-        resolved = socket.gethostbyname(host)
-    except (OSError, ValueError):
-        return False
-    if resolved == WEBFETCH_BLOCKED_IP:
-        return True
-    try:
-        return _ip_is_blocked(ipaddress.ip_address(resolved))
-    except ValueError:
-        return False
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, TypeError, ValueError):
+        parsed = None
+    if parsed is None or parsed.scheme not in {"http", "https"} or not parsed.host:
+        raise ToolError(f"URL must use http:// or https://: {url}", tool="webfetch")
+    return parsed
 
 
-def _assert_http_url(url: str) -> None:
-    """Raise ToolError when *url* is not http(s)."""
+async def _public_addresses(url: httpx.URL) -> tuple[str, tuple[str, ...]]:
+    """Resolve *url*'s host once; raise ToolError unless every answer is public."""
+    host = url.raw_host.decode("ascii")
+    port = url.port or (443 if url.scheme == "https" else 80)
     try:
-        parsed = urlparse(url)
-    except ValueError as exc:
+        addresses = await asyncio.to_thread(resolve_public_addresses, host, port)
+    except NonPublicAddressError:
         raise ToolError(
-            f"URL must use http:// or https://: {url}",
-            tool="webfetch",
-        ) from exc
-    if parsed.scheme not in {"http", "https"}:
+            f"Blocked private/internal URL: {url}", tool="webfetch"
+        ) from None
+    except UnresolvableHostError:
         raise ToolError(
-            f"URL must use http:// or https://: {url}",
-            tool="webfetch",
-        )
+            f"Unable to fetch {url}: host could not be resolved", tool="webfetch"
+        ) from None
+    return host, addresses
 
 
 def _accept_header(fmt: WebfetchFormat) -> str:
@@ -300,11 +253,11 @@ class WebfetchTool(Tool):
     args_schema: type[BaseModel] = WebfetchArgs
     permission_key = "webfetch"
 
-    def __init__(
-        self,
-        transport: httpx.AsyncBaseTransport | httpx.BaseTransport | None = None,
-    ) -> None:
-        """Optionally inject an httpx transport (tests use MockTransport)."""
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        """Optionally replace the pinned transport (tests use MockTransport).
+
+        Address checks still run for every hop; only the socket layer changes.
+        """
         self._transport = transport
 
     def title(self, args: BaseModel) -> str:
@@ -320,24 +273,10 @@ class WebfetchTool(Tool):
         assert isinstance(validated, WebfetchArgs)
         args = validated
         url = args.url.strip()
-        _assert_http_url(url)
-        if is_blocked_url(url):
-            raise ToolError(
-                f"Blocked private/internal URL: {url}",
-                tool=self.name,
-            )
+        target = _http_url(url)
         timeout = args.timeout if args.timeout is not None else WEBFETCH_DEFAULT_TIMEOUT
-        client_kwargs: dict[str, object] = {
-            "timeout": timeout,
-            "follow_redirects": True,
-        }
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
         try:
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                raw, content_type = await self._fetch_body(
-                    client, url, args.format
-                )
+            raw, content_type = await self._fetch_body(target, args.format, timeout)
         except ToolError:
             raise
         except httpx.TimeoutException as exc:
@@ -360,55 +299,51 @@ class WebfetchTool(Tool):
         )
 
     async def _fetch_body(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-        fmt: WebfetchFormat,
+        self, url: httpx.URL, fmt: WebfetchFormat, timeout: float
     ) -> tuple[bytes, str]:
         """GET *url*, retrying once on a Cloudflare challenge."""
-        body = await self._stream_get(
-            client, url, _headers(fmt, BROWSER_USER_AGENT)
-        )
+        body = await self._get(url, _headers(fmt, BROWSER_USER_AGENT), timeout)
         if body is not None:
             return body
-        retried = await self._stream_get(
-            client, url, _headers(fmt, HONEST_USER_AGENT)
-        )
+        retried = await self._get(url, _headers(fmt, HONEST_USER_AGENT), timeout)
         if retried is None:
             raise ToolError(f"Unable to fetch {url}", tool=self.name)
         return retried
 
-    async def _stream_get(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-        headers: dict[str, str],
+    async def _get(
+        self, url: httpx.URL, headers: dict[str, str], timeout: float
     ) -> tuple[bytes, str] | None:
-        """Stream one GET. Return None to signal a Cloudflare retry."""
-        async with client.stream("GET", url, headers=headers) as response:
-            if (
-                _is_cloudflare_challenge(response)
-                and headers.get("User-Agent") != HONEST_USER_AGENT
-            ):
-                return None
-            return await self._consume_response(response)
+        """GET *url* hop by hop. Return None to signal a Cloudflare retry.
+
+        Each hop gets a fresh client pinned to that hop's checked addresses,
+        so neither a redirect nor a second DNS answer can reach another host.
+        """
+        target = url
+        for _ in range(WEBFETCH_MAX_REDIRECTS + 1):
+            host, addresses = await _public_addresses(target)
+            transport = self._transport or async_pinned_transport(host, addresses)
+            async with httpx.AsyncClient(
+                transport=transport,
+                timeout=timeout,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                async with client.stream("GET", target, headers=headers) as response:
+                    redirect = response.next_request
+                    if redirect is None:
+                        if (
+                            _is_cloudflare_challenge(response)
+                            and headers.get("User-Agent") != HONEST_USER_AGENT
+                        ):
+                            return None
+                        return await self._consume_response(response)
+            target = _http_url(str(redirect.url))
+        raise ToolError(f"Too many redirects fetching {url}", tool=self.name)
 
     async def _consume_response(
         self, response: httpx.Response
     ) -> tuple[bytes, str]:
-        """Validate the final URL/MIME and read a size-capped body."""
-        final_url = str(response.url)
-        scheme = str(response.url.scheme or "").lower()
-        if scheme not in {"http", "https"}:
-            raise ToolError(
-                f"URL must use http:// or https://: {final_url}",
-                tool=self.name,
-            )
-        if is_blocked_url(final_url):
-            raise ToolError(
-                f"Blocked private/internal URL: {final_url}",
-                tool=self.name,
-            )
+        """Validate the MIME type and read a size-capped body."""
         content_type = response.headers.get("content-type") or ""
         mime = _mime_from(content_type)
         if _is_image_attachment(mime):

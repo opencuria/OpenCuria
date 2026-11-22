@@ -38,6 +38,7 @@ import {
   harnessEngineLabel,
   harnessEngineDefaults,
   harnessSessionModels,
+  isNewChatModelMissing,
   type HarnessEngine,
   type ProviderModel,
 } from '@opencuria/chat-core/harnessModels'
@@ -262,8 +263,23 @@ const selectedSkills = computed(() =>
 )
 
 const hasText = computed(() => prompt.value.trim().length > 0)
+/** A new chat cannot start without a model; the backend would refuse it. */
+const modelMissing = computed(
+  () =>
+    !isScheduledTask.value &&
+    !props.sessionId &&
+    !props.stoppable &&
+    !props.stopping &&
+    isNewChatModelMissing(localHarnessId.value, localModel.value),
+)
 const canSend = computed(
-  () => hasText.value && !voiceBusy.value && !props.disabled && !props.sending && !props.stopping,
+  () =>
+    hasText.value &&
+    !voiceBusy.value &&
+    !props.disabled &&
+    !props.sending &&
+    !props.stopping &&
+    !modelMissing.value,
 )
 const canStop = computed(() => Boolean(props.stoppable) && !props.sending && !props.stopping)
 const stopTitle = computed(() => (props.stopping ? 'Stopping…' : 'Stop current run'))
@@ -273,7 +289,9 @@ const steering = computed(
 )
 /** Empty composer while steering: the primary action is Stop. */
 const primaryIsStop = computed(() => steering.value && !hasText.value)
-const sendTitle = computed(() => (steering.value ? 'Steer the agent' : 'Send'))
+const sendTitle = computed(() =>
+  steering.value ? 'Steer the agent' : modelMissing.value ? 'Choose a model first' : 'Send',
+)
 /** Both halves of the send pill share one look: primary, or muted while unavailable. */
 const sendTone = computed(() =>
   canSend.value
@@ -456,7 +474,11 @@ function openProviderSettings(): void {
 }
 
 function applyModeDefaults(mode: HarnessSessionMode, opts: { resetDirty?: boolean } = {}): void {
-  const defaults = harness.agentDefault(mode)
+  const configured = harness.agentDefault(mode)
+  // Without an agent default a new chat starts on the first listed model, as
+  // on mobile, so a connected provider is enough to send the first prompt.
+  const fallback = configured.model || props.sessionId ? undefined : catalog.value[0]
+  const defaults = fallback ? { model: fallback.id, effort: configured.effort } : configured
   if (
     isScheduledTask.value ||
     localHarnessId.value !== 'native' ||

@@ -32,11 +32,6 @@ export interface LocalFiles {
   ): Promise<void>;
 }
 
-/** Strip the scheme for native code that expects a file system path. */
-export function filePath(uri: string): string {
-  return decodeURI(uri.replace(/^file:\/\//, ""));
-}
-
 /** Where `writeText` stages a file's new content. */
 export function temporaryUri(uri: string): string {
   return `${uri}.tmp`;

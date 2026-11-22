@@ -662,6 +662,11 @@ describe("REST endpoint wrappers", () => {
     );
     await client.harness.resolveQuestion("session-id", "question-id", ["yes"]);
     await client.harness.timeline("session-id");
+    await client.harness.timeline("session-id", undefined, {
+      limit: 40,
+      before: 12,
+    });
+    await client.harness.timeline("session-id", undefined, { since: 7 });
     await client.harness.steer("session-id", "Use pnpm");
     await client.harness.withdraw("session-id", "steer-id");
     await client.harness.scheduleMessage("session-id", {
@@ -688,6 +693,8 @@ describe("REST endpoint wrappers", () => {
       ["/harness/sessions/session-id/permissions/gate-id", "POST"],
       ["/harness/sessions/session-id/questions/question-id", "POST"],
       ["/harness/sessions/session-id/timeline", "GET"],
+      ["/harness/sessions/session-id/timeline?limit=40&before=12", "GET"],
+      ["/harness/sessions/session-id/timeline?since=7", "GET"],
       ["/harness/sessions/session-id/steer", "POST"],
       ["/harness/sessions/session-id/steer/steer-id", "DELETE"],
       ["/harness/sessions/session-id/scheduled-messages", "POST"],
@@ -703,13 +710,13 @@ describe("REST endpoint wrappers", () => {
       answers: ["yes"],
       reject: false,
     });
-    expect(JSON.parse(calls[6].body!)).toEqual({ prompt: "Use pnpm" });
-    expect(JSON.parse(calls[8].body!)).toEqual({
+    expect(JSON.parse(calls[8].body!)).toEqual({ prompt: "Use pnpm" });
+    expect(JSON.parse(calls[10].body!)).toEqual({
       prompt: "Check CI",
       send_at: "2026-11-17T08:00:00.000Z",
       model: "m-1",
     });
-    expect(JSON.parse(calls[9].body!)).toEqual({
+    expect(JSON.parse(calls[11].body!)).toEqual({
       send_at: "2026-11-18T08:00:00.000Z",
     });
   });

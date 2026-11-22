@@ -12,7 +12,7 @@ from django.test import Client
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessSession, Todo
+from apps.harness.models import HarnessMessage, HarnessSession, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.repositories import PermissionRequestRepository
 from apps.harness.permissions.service import PermissionService
@@ -906,8 +906,8 @@ def test_mode_switch_needs_run_permission(harness_setup, fake_harness_service):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_missing_provider_config_is_4xx(harness_setup, monkeypatch):
-    """Creating a session without provider/model config returns 404, not a hang."""
+def test_missing_model_is_explained_and_leaves_no_chat(harness_setup, monkeypatch):
+    """Without a model or agent default the API names the fix, not an internal id."""
     service = HarnessService(emit=_drop_emit)
     monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
     client = _client(
@@ -918,8 +918,35 @@ def test_missing_provider_config_is_4xx(harness_setup, monkeypatch):
         data=json.dumps({"prompt": "no provider"}),
         content_type="application/json",
     )
-    assert response.status_code == 404
-    assert response.json()["code"] == "not_found"
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert body["detail"].startswith("No model selected.")
+    assert str(harness_setup["org"].id) not in body["detail"]
+    # The refused first prompt does not leave an empty chat in the sidebar.
+    assert not HarnessSession.objects.filter(
+        workspace=harness_setup["owned"]
+    ).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unconnected_provider_model_leaves_no_chat(harness_setup, monkeypatch):
+    """A model whose provider has no account is refused before a chat persists."""
+    service = HarnessService(emit=_drop_emit)
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "model": "openrouter/some-model"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Provider 'openrouter' is not connected"
+    assert not HarnessSession.objects.filter(
+        workspace=harness_setup["owned"]
+    ).exists()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1350,3 +1377,127 @@ def test_saved_history_endpoints_work_without_live_harness(
         else:
             expected_id = session.id if endpoint == "sessions" else todo.id
             assert [row["id"] for row in body] == [str(expected_id)]
+
+
+def _chat_with_turns(harness_setup, service, turns: int):
+    """A session of *turns* user/assistant pairs at positions 0..2*turns-1."""
+    session = service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="seed",
+    )
+    HarnessMessage.objects.filter(session_id=session.id).delete()
+    for turn in range(turns):
+        HarnessMessageRepository.create(
+            session_id=session.id,
+            role="user",
+            content=f"prompt {turn}",
+        )
+        assistant = HarnessMessageRepository.create(
+            session_id=session.id, role="assistant"
+        )
+        HarnessPartRepository.create(
+            message_id=assistant.id,
+            type="text",
+            state="completed",
+            output=f"answer {turn}",
+        )
+    return session
+
+
+@pytest.mark.django_db(transaction=True)
+def test_timeline_window_returns_newest_messages_and_older_flag(
+    harness_setup, fake_harness_service
+):
+    """limit keeps the newest rows with their own parts; before pages back.
+
+    ``older_count`` is how many messages precede the returned ones."""
+    session = _chat_with_turns(harness_setup, fake_harness_service, 5)
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    url = f"/api/v1/harness/sessions/{session.id}/timeline"
+
+    everything = client.get(url).json()
+    assert len(everything["messages"]) == 10
+    assert everything["older_count"] == 0
+
+    tail = client.get(url, {"limit": 4}).json()
+    assert [m["position"] for m in tail["messages"]] == [6, 7, 8, 9]
+    assert tail["older_count"] == 6
+    assert [p["output"] for m in tail["messages"] for p in m["parts"]] == [
+        "answer 3",
+        "answer 4",
+    ]
+    assert tail["session"]["id"] == str(session.id)
+    assert tail["todos"] == []
+
+    page = client.get(url, {"limit": 4, "before": 6}).json()
+    assert [m["position"] for m in page["messages"]] == [2, 3, 4, 5]
+    assert page["older_count"] == 2
+
+    first = client.get(url, {"limit": 4, "before": 2}).json()
+    assert [m["position"] for m in first["messages"]] == [0, 1]
+    assert first["older_count"] == 0
+
+    # Everything from a known message on, however much arrived since.
+    delta = client.get(url, {"since": 7}).json()
+    assert [m["position"] for m in delta["messages"]] == [7, 8, 9]
+    assert delta["older_count"] == 7
+    assert [p["output"] for m in delta["messages"] for p in m["parts"]] == [
+        "answer 3",
+        "answer 4",
+    ]
+
+    beyond = client.get(url, {"since": 50}).json()
+    assert beyond["messages"] == []
+    assert beyond["older_count"] == 10
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "query", [{"limit": 0}, {"limit": 501}, {"before": -1}, {"since": "x"}]
+)
+def test_timeline_window_rejects_invalid_bounds(
+    harness_setup, fake_harness_service, query
+):
+    """Out-of-range bounds are a validation error, not an unbounded read."""
+    session = _chat_with_turns(harness_setup, fake_harness_service, 1)
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    response = client.get(f"/api/v1/harness/sessions/{session.id}/timeline", query)
+    assert response.status_code == 422
+
+
+@pytest.mark.django_db(transaction=True)
+def test_timeline_window_keeps_ownership_scope(harness_setup, fake_harness_service):
+    """A window never widens access: foreign sessions stay 404."""
+    session = _chat_with_turns(harness_setup, fake_harness_service, 1)
+    stranger = _client(
+        user=harness_setup["stranger"], org=harness_setup["org"], permissions=READ
+    )
+    response = stranger.get(
+        f"/api/v1/harness/sessions/{session.id}/timeline", {"limit": 1}
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_timeline_is_gzipped_for_clients_that_accept_it(
+    harness_setup, fake_harness_service
+):
+    """A long transcript travels compressed and decodes to the plain payload."""
+    import gzip
+
+    session = _chat_with_turns(harness_setup, fake_harness_service, 30)
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    url = f"/api/v1/harness/sessions/{session.id}/timeline"
+    plain = client.get(url)
+    packed = client.get(url, HTTP_ACCEPT_ENCODING="gzip")
+    assert not plain.has_header("Content-Encoding")
+    assert packed["Content-Encoding"] == "gzip"
+    assert len(packed.content) < len(plain.content)
+    assert json.loads(gzip.decompress(packed.content)) == plain.json()

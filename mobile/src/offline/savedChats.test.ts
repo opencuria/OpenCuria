@@ -386,4 +386,28 @@ describe("SavedChatWriter", () => {
     expect(describe).not.toHaveBeenCalled();
     stop();
   });
+
+  it("keeps the saved copy while only the newest messages are loaded", () => {
+    const chat = source({
+      activeSessionId: "s1",
+      activeSession: session("s1"),
+      sessions: [session("s1")],
+      messages: [message("m1")],
+      partial: true,
+    });
+    const saved = account();
+    const stop = new SavedChatWriter(
+      chat,
+      saved as unknown as OfflineAccount,
+      () => conversation("s1"),
+    ).start();
+    vi.advanceTimersByTime(SAVE_DELAY_MS);
+    expect(saved.saveChat).not.toHaveBeenCalled();
+
+    chat.update({ messages: [message("m0"), message("m1")], partial: false });
+    vi.advanceTimersByTime(SAVE_DELAY_MS);
+    expect(saved.saveChat).toHaveBeenCalledOnce();
+    expect(saved.saveChat.mock.calls[0]![0].messages).toHaveLength(2);
+    stop();
+  });
 });

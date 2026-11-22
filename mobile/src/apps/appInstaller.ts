@@ -1,7 +1,6 @@
 import type { AppFileRequest, AppManifest } from "@opencuria/client";
 import type { AppLaunchRequest } from "./appRuntime";
 import {
-  filePath,
   joinUri,
   temporaryUri,
   type AppFileSystem,
@@ -56,7 +55,11 @@ const ICON = "icon.png";
 const PARALLEL_DOWNLOADS = 4;
 const ORIENTATIONS = new Set(["portrait", "landscape"]);
 
-/** Where an app's files live below the installer root. */
+/**
+ * Where an app's files live below the installer root. The native runtime
+ * (`modules/opencuria-app-runtime`, `AppSandbox`) derives the same paths
+ * from the app id: keep both in step.
+ */
 export function appLayout(root: string, appId: string) {
   const app = joinUri(root, appId);
   return {
@@ -235,9 +238,6 @@ export class AppInstaller {
       appId: app.appId,
       versionId: app.versionId,
       name: app.name,
-      bundlePath: filePath(bundle),
-      installDir: filePath(layout.app),
-      dataDir: filePath(layout.data),
       manifest: updatesManifest(manifest, bundle),
       localAssets: Object.fromEntries(
         manifest.assets.map((asset) => [
@@ -250,9 +250,6 @@ export class AppInstaller {
         : "default",
       ...(typeof background === "string" && background
         ? { backgroundColor: background }
-        : {}),
-      ...(app.hasIcon && this.fs.exists(layout.icon)
-        ? { iconPath: filePath(layout.icon) }
         : {}),
     };
   }

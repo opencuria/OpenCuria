@@ -226,6 +226,139 @@ describe.each([false, true])(
       expect(rows[2]?.client_key).toBe("local-user-1");
     });
 
+    function editFixture() {
+      const asked: HarnessMessage = {
+        id: "question",
+        session_id: "session",
+        role: "user",
+        content: "first",
+        parts: [],
+        position: 0,
+      };
+      const answered = message("done", {
+        id: "answer",
+        position: 1,
+        completed_at: "done",
+        parts: [part({ id: "answer-text", output: "done" })],
+      });
+      const edited: HarnessMessage = {
+        id: "edited",
+        session_id: "session",
+        role: "user",
+        content: "fix VULN-004b",
+        skill_ids: ["skill-1"],
+        parts: [],
+        position: 2,
+      };
+      const stopped = message("", {
+        id: "stopped",
+        error: "aborted by user",
+        finish: "aborted",
+        completed_at: "stopped",
+        position: 3,
+        parts: [],
+      });
+      return { asked, answered, edited, stopped };
+    }
+
+    it("shows an edited prompt in its bubble at once and never brings the replaced rows back", async () => {
+      const h = harness(immutable);
+      const { asked, answered, edited, stopped } = editFixture();
+      h.messages.set("session", freeze([asked, answered, edited, stopped]));
+      // Stop's refresh is still on its way.
+      const stale = h.controller.fetch("session");
+      const sent = deferred<string>();
+      const edit = h.controller.edit(
+        "session",
+        "edited",
+        { content: " fix VULN-004 " },
+        () => sent.promise,
+      );
+
+      const shown = h.messages.get("session")!;
+      expect(shown.map((row) => row.content)).toEqual([
+        "first",
+        "done",
+        "fix VULN-004",
+      ]);
+      expect(shown[2]).toMatchObject({
+        client_key: "edited",
+        skill_ids: ["skill-1"],
+      });
+      expect(h.controller.isDiscarded("session", "stopped")).toBe(true);
+      expect(h.controller.isDiscarded("session", "answer")).toBe(false);
+
+      // A snapshot requested during admission still holds the old turn.
+      const admission = h.controller.fetch("session");
+      sent.resolve("accepted");
+      await expect(edit).resolves.toBe("accepted");
+      h.loads[0]!.resolve({ messages: [asked, answered, edited, stopped] });
+      h.loads[1]!.resolve({ messages: [asked, answered, edited, stopped] });
+      await Promise.all([stale, admission]);
+      expect(h.messages.get("session")).toBe(shown);
+
+      // Later snapshots skip the replaced rows; the echo takes the bubble.
+      const fresh = h.controller.fetch("session");
+      h.loads[2]!.resolve({
+        messages: [
+          asked,
+          answered,
+          edited,
+          {
+            ...edited,
+            id: "echo",
+            content: "fix VULN-004",
+            position: 4,
+          },
+          message("", { id: "next", position: 5, parts: [] }),
+        ],
+      });
+      await fresh;
+      const rows = h.messages.get("session")!;
+      expect(rows.map((row) => row.id)).toEqual([
+        "question",
+        "answer",
+        "echo",
+        "next",
+      ]);
+      expect(rows[2]?.client_key).toBe("edited");
+    });
+
+    it("restores the transcript when the server rejects an edit", async () => {
+      const h = harness(immutable);
+      const { asked, answered, edited, stopped } = editFixture();
+      const original = freeze([asked, answered, edited, stopped]);
+      h.messages.set("session", original);
+
+      await expect(
+        h.controller.edit("session", "edited", { content: "again" }, () =>
+          Promise.reject(new Error("active run")),
+        ),
+      ).rejects.toThrow("active run");
+
+      expect(h.messages.get("session")).toBe(original);
+      expect(h.controller.isDiscarded("session", "stopped")).toBe(false);
+    });
+
+    it("leaves a chat forgotten during a rejected edit alone", async () => {
+      const h = harness(immutable);
+      const { asked, edited } = editFixture();
+      h.messages.set("session", freeze([asked, edited]));
+      const sent = deferred<void>();
+      const edit = h.controller.edit(
+        "session",
+        "edited",
+        { content: "again" },
+        () => sent.promise,
+      );
+      h.controller.forget("session");
+      h.messages.delete("session");
+      sent.reject(new Error("offline"));
+
+      await expect(edit).rejects.toThrow("offline");
+      expect(h.messages.has("session")).toBe(false);
+    });
+
     it("captures gate/request metadata after waiting for a pre-idle fetch", async () => {
       const h = harness(immutable);
       let revision = 1;

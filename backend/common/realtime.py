@@ -61,6 +61,11 @@ def get_sio_server() -> socketio.AsyncServer:
     return _sio
 
 
+def user_room(user_id: str) -> str:
+    """Room every frontend client of *user_id* joins when it connects."""
+    return f"user:{user_id}"
+
+
 def register_frontend(sid: str, user_id: str) -> None:
     """Record the authenticated user of a connected frontend client."""
     _frontend_users[sid] = user_id
@@ -108,17 +113,26 @@ async def emit_to_frontend(
     event: str,
     data: dict,
     workspace_id: str,
+    *,
+    user_id: str | None = None,
 ) -> None:
     """
     Emit an event to all frontend clients subscribed to a workspace.
 
-    Feature services publish workspace events here; protocol adapters own
-    authentication and authorize subscriptions before registering them.
+    With *user_id* the event also reaches every client of that user, e.g. so a
+    workspace created elsewhere appears without a subscription; a client in
+    both rooms receives it once. Feature services publish workspace events
+    here; protocol adapters own authentication and authorize subscriptions
+    before registering them.
     """
     sio = get_sio_server()
+    room = f"workspace:{workspace_id}"
     try:
         await sio.emit(
-            event, data, to=f"workspace:{workspace_id}", namespace="/frontend"
+            event,
+            data,
+            to=[room, user_room(user_id)] if user_id else room,
+            namespace="/frontend",
         )
     except Exception:
         logger.warning("Failed to emit %s to workspace %s", event, workspace_id)

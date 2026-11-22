@@ -1,4 +1,8 @@
-"""Per-user provider-account binding for external Claude engine turns."""
+"""Per-user provider-account binding for external Claude engine turns.
+
+The token runs inside the caller's workspace, so only the caller's own personal
+account qualifies (see ``provider_accounts``).
+"""
 
 from __future__ import annotations
 
@@ -69,11 +73,14 @@ class EngineConnectionService:
         )
 
     def is_connected(self, organization_id: uuid.UUID, user_id: object) -> bool:
-        """Return whether the caller's selected Claude account has credentials."""
+        """Return whether the caller's selected personal Claude account works."""
         organization_id, user_id = self._ids(organization_id, user_id)
         self._assert_member(organization_id, user_id)
         account = self._active_account(organization_id, user_id)
-        return account is not None and account.credential_id is not None
+        return (
+            self.accounts.usable_in_workspace(account, user_id)
+            and account.credential_id is not None
+        )
 
     def resolve(
         self,
@@ -81,7 +88,7 @@ class EngineConnectionService:
         user_id: object,
         connection_id: uuid.UUID | str | None = None,
     ) -> AuthConfiguration:
-        """Resolve one explicitly scoped or currently selected account."""
+        """Resolve one explicitly scoped or currently selected personal account."""
         organization_id, user_id = self._ids(organization_id, user_id)
         self._assert_member(organization_id, user_id)
         if connection_id is not None:
@@ -91,7 +98,7 @@ class EngineConnectionService:
         if account is None or account.provider != self.PROVIDER:
             raise NotFoundError("ProviderAccount", str(connection_id or user_id))
         auth_type = self._normalize_auth_type(account.auth_type)
-        credentials = self.accounts.get_credentials(account)
+        credentials = self.accounts.get_workspace_credentials(account, user_id)
         token = str(credentials.get("token") or "")
         if not token:
             raise NotFoundError("ProviderAccount", str(account.id))

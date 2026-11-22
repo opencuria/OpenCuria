@@ -171,7 +171,8 @@ async def test_small_workspace_requests_reject_before_allocating_disk_or_network
         )
         disk = r._disk_path("clone")
         assert (await r._image_info(disk))["virtual-size"] == 2 * 1024**3
-        assert disk.stat().st_mode & 0o777 == 0o644
+        assert disk.stat().st_mode & 0o777 == 0o600
+        assert target.stat().st_mode & 0o777 == 0o600
     finally:
         await r.remove_workspace("clone")
         overlay.unlink()
@@ -1461,13 +1462,13 @@ async def test_fresh_runtime_initializes_cache_before_first_inventory(
     )
     assert not cache.exists()
     monkeypatch.setattr(QemuRuntime, "_ensure_ssh_keypair", MagicMock())
+    monkeypatch.setattr(QemuRuntime, "_build_image_dir", tmp_path / "base-images")
     runtime = QemuRuntime(settings)
-    runtime._build_image_dir = tmp_path / "base-images"
     runtime._libvirt_conn = MagicMock()
     runtime._libvirt_conn.return_value.listAllDomains.return_value = []
     runtime._resolve_build_base_image = MagicMock()
     scan = await runtime.inventory()
-    assert cache.is_dir() and cache.stat().st_mode & 0o777 == 0o755
+    assert cache.is_dir() and cache.stat().st_mode & 0o777 == 0o711
     assert scan.complete, scan.errors
     assert scan.resources == []
     runtime._resolve_build_base_image.assert_not_called()
@@ -1495,6 +1496,7 @@ def test_fresh_runtime_cache_permission_failure_is_explicit(tmp_path, monkeypatc
     monkeypatch.setattr(Path, "mkdir", denied)
     keypair = MagicMock()
     monkeypatch.setattr(QemuRuntime, "_ensure_ssh_keypair", keypair)
+    monkeypatch.setattr(QemuRuntime, "_build_image_dir", tmp_path / "base-images")
     with pytest.raises(RuntimeError, match="Missing permissions.*image-cache"):
         QemuRuntime(settings)
     keypair.assert_not_called()

@@ -149,9 +149,7 @@ describe("AppInstaller", () => {
     const launch = await installer.launchRequest(installed);
     expect(launch).toMatchObject({
       appId: "app-1",
-      bundlePath: "/docs/opencuria-apps/app-1/versions/v1/index.bundle",
-      installDir: "/docs/opencuria-apps/app-1",
-      dataDir: "/docs/opencuria-apps/app-1/data",
+      versionId: "v1",
       orientation: "portrait",
       localAssets: {
         [v1.assets[0]!.key]: `${layout.assets}/${v1.assets[0]!.key}.png`,
@@ -162,6 +160,11 @@ describe("AppInstaller", () => {
       metadata: {},
       extra: { expoClient: { name: "Todo", orientation: "portrait" } },
     });
+    // The native runtime derives every path from the app id.
+    expect(launch).not.toHaveProperty("bundlePath");
+    expect(launch).not.toHaveProperty("installDir");
+    expect(launch).not.toHaveProperty("dataDir");
+    expect(launch).not.toHaveProperty("iconPath");
   });
 
   it("updates by downloading only changed files and removes stale ones", async () => {

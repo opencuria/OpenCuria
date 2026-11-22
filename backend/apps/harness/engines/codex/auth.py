@@ -1,6 +1,8 @@
 """Server-only Codex credentials resolved through the existing account ACL.
 
-No credential material belongs in engine_state, messages or task snapshots.
+Codex runs inside the caller's workspace, so only the caller's own personal
+account qualifies (see ``provider_accounts``). No credential material belongs
+in engine_state, messages or task snapshots.
 Execution uses the shared database-leased ChatGPT credential service before
 login and for app-server refresh requests. ``persist_credentials`` only updates
 the captured account; it is not a refresh concurrency mechanism.
@@ -79,7 +81,7 @@ def resolve_codex_auth(
         account = service.get_account(organization_id, user_id, account_id)
     if account is None or account.provider != provider:
         raise NotFoundError("ProviderAccount", provider)
-    credentials = service.get_credentials(account)
+    credentials = service.get_workspace_credentials(account, user_id)
     required = (
         ("access", "refresh", "account_id") if provider == "chatgpt" else ("api_key",)
     )

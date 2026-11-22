@@ -41,6 +41,7 @@ from apps.plugins.services import PluginService
 from apps.runners.enums import RunnerStatus
 from apps.runners.models import ImageInstance, Runner, Workspace
 from apps.runners.services import RunnerService
+from common import public_egress
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, hash_token
 
@@ -315,7 +316,7 @@ def test_ssrf_rejects_private_dns_and_callback_urls_are_fixed(monkeypatch, setti
     settings.MCP_OAUTH_CALLBACK_URL = "http://127.0.0.1:8000/api/v1/mcp-oauth/callback/"
 
     monkeypatch.setattr(
-        oauth_http.socket,
+        public_egress.socket,
         "getaddrinfo",
         lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
     )

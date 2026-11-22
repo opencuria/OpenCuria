@@ -5,6 +5,8 @@ import {
   DEFAULT_OPENROUTER_BASE_URL,
   providerAccountForm,
   providerAccountPayload,
+  providerAccountShareable,
+  sharedAccountNote,
   unsharePayload,
   type ProviderAccount,
   type ProviderAccountForm,
@@ -365,6 +367,8 @@ export function ProviderAccountPage({
     setForm((current) => (current ? { ...current, ...next } : current));
   const chatgpt = provider.id === "chatgpt";
   const manageable = !account || account.can_manage;
+  // Older shared accounts of non-shareable providers keep the Unshare button.
+  const shareable = isAdmin && providerAccountShareable(provider.id);
 
   const sections: NativeFormSection[] = form
     ? [
@@ -373,7 +377,9 @@ export function ProviderAccountPage({
           footer:
             !isAdmin && account?.scope !== "organization"
               ? "Only you can use this account."
-              : undefined,
+              : shareable && form.shared
+                ? sharedAccountNote(provider.id)
+                : undefined,
           rows: [
             {
               kind: "text",
@@ -384,7 +390,7 @@ export function ProviderAccountPage({
               autoFocus: !account,
               onChange: (label) => edit({ label }),
             },
-            ...(isAdmin
+            ...(shareable
               ? [
                   {
                     kind: "toggle" as const,

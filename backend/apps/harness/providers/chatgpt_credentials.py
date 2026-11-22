@@ -50,10 +50,13 @@ class ChatGPTCredentialService:
         organization_id: uuid.UUID,
         user_id: int,
         account_id: uuid.UUID | str,
+        *,
+        for_workspace: bool = False,
     ) -> None:
         self.organization_id = organization_id
         self.user_id = user_id
         self.account_id = ProviderAccountService._parse_account_id(account_id)
+        self.for_workspace = for_workspace
         self.accounts = ProviderAccountService()
         self.repository = ProviderRefreshRepository()
 
@@ -64,6 +67,10 @@ class ChatGPTCredentialService:
         )
         if account.provider != "chatgpt" or account.credential_id is None:
             raise ProviderAuthError(RECONNECT_MESSAGE, provider="chatgpt")
+        if self.for_workspace:
+            # Rechecked on every read: tokens bound for a workspace must still
+            # belong to the caller's own personal account.
+            self.accounts.require_workspace_account(account, self.user_id)
         credentials = self.accounts.get_credentials(account)
         # Compare encrypted bytes, not token hashes persisted in a side channel.
         # This also detects reconnects that restore the very same plaintext.
@@ -197,8 +204,13 @@ async def get_fresh_chatgpt_credentials(
     *,
     rejected_access_token: str | None = None,
     force: bool = False,
+    for_workspace: bool = False,
 ) -> dict[str, Any]:
-    """Get/refresh one exact account; never consult active account selection."""
+    """Get/refresh one exact account; never consult active account selection.
+
+    ``for_workspace`` marks tokens that leave the server for the caller's
+    workspace; only the caller's own personal account qualifies then.
+    """
     return await ChatGPTCredentialService(
-        organization_id, user_id, account_id
+        organization_id, user_id, account_id, for_workspace=for_workspace
     ).get_fresh_credentials(rejected_access_token=rejected_access_token, force=force)

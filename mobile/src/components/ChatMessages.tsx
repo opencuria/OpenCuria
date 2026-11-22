@@ -161,6 +161,8 @@ export interface ChatMessagesProps {
   renderPublishedApp?: (app: PublishedAppReference) => React.ReactNode;
   /** Shown in place of an empty chat; defaults to an invitation to ask. */
   emptyText?: string;
+  /** Replaces `emptyText`, e.g. the first-run setup guide. */
+  emptyContent?: React.ReactNode;
   testID?: string;
 }
 
@@ -227,6 +229,7 @@ export function ChatMessages({
   pullUpLabel = "Workspace tools",
   renderPublishedApp,
   emptyText = "What can I help with?",
+  emptyContent,
   testID = "chat-messages",
 }: ChatMessagesProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -453,6 +456,7 @@ export function ChatMessages({
             <EmptyTranscript
               loading={loading}
               text={emptyText}
+              content={emptyContent}
               topInset={topInset}
               testID={testID}
               scrollHandlers={pullScroll}
@@ -587,12 +591,14 @@ function JumpToLatest({
 function EmptyTranscript({
   loading,
   text,
+  content,
   topInset,
   testID,
   scrollHandlers,
 }: {
   loading: boolean;
   text: string;
+  content?: React.ReactNode;
   topInset: number;
   testID: string;
   scrollHandlers: EndPullScrollHandlers;
@@ -616,7 +622,7 @@ function EmptyTranscript({
     <ScrollView
       testID={testID}
       style={{ backgroundColor: theme.background }}
-      contentContainerStyle={styles.empty}
+      contentContainerStyle={[styles.empty, content ? styles.emptyContent : null]}
       keyboardDismissMode={keyboardDismissMode}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
@@ -624,7 +630,7 @@ function EmptyTranscript({
       scrollEventThrottle={16}
       {...scrollHandlers}
     >
-      <Animated.View style={centered}>
+      <Animated.View style={[centered, content ? styles.emptyFill : null]}>
         {loading ? (
           <ActivityIndicator
             testID="chat-loading"
@@ -632,9 +638,11 @@ function EmptyTranscript({
             color={theme.mutedText}
           />
         ) : (
-          <Text style={[styles.emptyTitle, { color: theme.text }]}>
-            {text}
-          </Text>
+          (content ?? (
+            <Text style={[styles.emptyTitle, { color: theme.text }]}>
+              {text}
+            </Text>
+          ))
         )}
       </Animated.View>
     </ScrollView>
@@ -2106,6 +2114,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 32,
   },
+  // Cards such as the setup guide use the width a phone has.
+  emptyContent: { paddingHorizontal: 16, paddingVertical: 16 },
+  emptyFill: { width: "100%", alignItems: "center" },
   emptyTitle: {
     fontSize: 22,
     lineHeight: 28,

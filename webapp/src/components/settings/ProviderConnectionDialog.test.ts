@@ -283,6 +283,35 @@ describe('ProviderConnectionDialog account management', () => {
     })
   })
 
+  it('never offers sharing for Claude Agent accounts, whose token runs in the workspace', async () => {
+    const wrapper = mountDialog('claude-agent', [], true)
+    await wrapper.find('[data-testid="add-provider-account"]').trigger('click')
+    expect(wrapper.find('[data-testid="account-shared"]').exists()).toBe(false)
+
+    const legacy: ProviderAccount = {
+      ...personal,
+      id: 'claude-org',
+      provider: 'claude-agent',
+      scope: 'organization',
+      auth_type: 'api_token',
+    }
+    const legacyWrapper = mountDialog('claude-agent', [legacy], true)
+    await legacyWrapper.find('[data-testid="edit-account-claude-org"]').trigger('click')
+    expect(legacyWrapper.find('[data-testid="account-shared"]').exists()).toBe(false)
+    expect(legacyWrapper.find('[data-testid="unshare-account"]').exists()).toBe(true)
+  })
+
+  it('tells admins that Codex cannot use a shared account', async () => {
+    const wrapper = mountDialog('openrouter', [], true)
+    await wrapper.find('[data-testid="add-provider-account"]').trigger('click')
+    expect(wrapper.find('[data-testid="account-shared-note"]').exists()).toBe(false)
+    wrapper.findComponent({ name: 'Checkbox' }).vm.$emit('update:modelValue', true)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="account-shared-note"]').text()).toContain(
+      'not with Codex',
+    )
+  })
+
   it('treats a cancelled OAuth flow as idle rather than expired', async () => {
     vi.useFakeTimers()
     vi.mocked(harnessApi.getChatGptOAuthStatus).mockResolvedValue({ status: 'cancelled' })

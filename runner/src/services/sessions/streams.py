@@ -65,9 +65,11 @@ STREAM_BLOCKED_ENV_EXACT = {
 #: Static workspace-local TCP relay: resolves DNS *inside* the workspace
 #: and connects ``host:port``, optionally upgrading to TLS with default
 #: certificate verification and ``server_hostname`` SNI.  Runs via the
-#: same process transport (``python3 -u -c <constant> -- host port tls
-#: server_hostname``); stdio is the raw byte stream, stderr carries the
+#: same process transport (``TCP_RELAY_ARGV + [host, port, tls,
+#: server_hostname]``); stdio is the raw byte stream, stderr carries the
 #: relay error line on failure.  No host shell connect happens anywhere.
+#: The relay sees every byte it carries, so server-side credentials never
+#: travel through it (the backend reaches OAuth MCP servers itself).
 TCP_RELAY_CODE = """\
 import socket, ssl, sys
 
@@ -178,6 +180,12 @@ finally:
     except Exception:
         pass
 """
+
+#: Isolated mode (``-I``): no PYTHON* environment, no user site-packages and
+#: no working directory on ``sys.path``, so files in the workspace (for
+#: example a repository's ``socket.py`` or ``ssl.py``) cannot replace the
+#: relay's modules.
+TCP_RELAY_ARGV = ("/usr/bin/python3", "-I", "-u", "-c", TCP_RELAY_CODE, "--")
 
 _TCP_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$")
 
@@ -539,11 +547,7 @@ class StreamManager:
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
         relay_argv = [
-            "python3",
-            "-u",
-            "-c",
-            TCP_RELAY_CODE,
-            "--",
+            *TCP_RELAY_ARGV,
             clean_host,
             str(clean_port),
             "1" if use_tls else "0",

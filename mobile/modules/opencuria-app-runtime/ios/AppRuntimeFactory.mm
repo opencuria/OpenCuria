@@ -5,7 +5,12 @@
 #import <ExpoModulesCore/EXHostWrapper.h>
 #import <ExpoModulesCore/EXReactSchedulerDispatch.h>
 #import <React/RCTComponentViewFactory.h>
+#import <React/RCTDataRequestHandler.h>
 #import <React/RCTExceptionsManager.h>
+#import <React/RCTFileRequestHandler.h>
+#import <React/RCTHTTPRequestHandler.h>
+#import <React/RCTInvalidating.h>
+#import <React/RCTNetworking.h>
 #import <ReactCommon/RCTHost.h>
 #import <react/renderer/runtimescheduler/RuntimeSchedulerBinding.h>
 
@@ -71,6 +76,85 @@
 
 @end
 
+/**
+ Loads `file:` URLs for the app instance's networking module, which fetch,
+ XMLHttpRequest, request bodies with files and the image loader all use. It
+ claims every `file:` URL ahead of other handlers and loads only those the
+ app may read, through React Native's own file handler.
+ */
+@interface OCAppFileRequestHandler : NSObject <RCTURLRequestHandler, RCTInvalidating>
+- (instancetype)initWithCanRead:(nullable BOOL (^)(NSURL *url))canRead;
+@end
+
+@implementation OCAppFileRequestHandler {
+  BOOL (^_canRead)(NSURL *url);
+  RCTFileRequestHandler *_files;
+  NSOperationQueue *_denials;
+}
+
+// Not RCT_EXPORT_MODULE: only the app's networking module uses it.
++ (NSString *)moduleName
+{
+  return @"OCAppFileRequestHandler";
+}
+
+- (instancetype)initWithCanRead:(nullable BOOL (^)(NSURL *url))canRead
+{
+  if (self = [super init]) {
+    _canRead = [canRead copy];
+    _files = [RCTFileRequestHandler new];
+    _denials = [NSOperationQueue new];
+  }
+  return self;
+}
+
+- (BOOL)canHandleRequest:(NSURLRequest *)request
+{
+  return [request.URL.scheme caseInsensitiveCompare:@"file"] == NSOrderedSame;
+}
+
+- (float)handlerPriority
+{
+  return 1000;
+}
+
+- (id)sendRequest:(NSURLRequest *)request withDelegate:(id<RCTURLRequestDelegate>)delegate
+{
+  if (_canRead != nil && _canRead(request.URL)) {
+    return [_files sendRequest:request withDelegate:delegate];
+  }
+  // Reported asynchronously, like every other request's completion.
+  NSBlockOperation *operation = [NSBlockOperation new];
+  __weak NSBlockOperation *weakOperation = operation;
+  [operation addExecutionBlock:^{
+    NSBlockOperation *strongOperation = weakOperation;
+    if (strongOperation == nil || strongOperation.isCancelled) {
+      return;
+    }
+    NSError *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                         code:NSFileReadNoPermissionError
+                                     userInfo:@{NSLocalizedDescriptionKey : @"This app may not read this file."}];
+    [delegate URLRequest:strongOperation didCompleteWithError:error];
+  }];
+  [_denials addOperation:operation];
+  return operation;
+}
+
+- (void)cancelRequest:(id)requestToken
+{
+  if ([requestToken isKindOfClass:NSOperation.class]) {
+    [(NSOperation *)requestToken cancel];
+  }
+}
+
+- (void)invalidate
+{
+  [_files invalidate];
+  [_denials cancelAllOperations];
+}
+
+@end
+
 @implementation OCAppRuntimeFactory {
   // The context lives as long as this factory's single React instance.
   EXAppContext *_appContext;
@@ -110,10 +194,14 @@
                scheduler:schedulerHandle
                 dispatch:schedulerHandle ? reinterpret_cast<const void *>(&expo::dispatchOnReactScheduler) : nullptr];
   [appContext setHostWrapper:[[EXHostWrapper alloc] initWithHost:host]];
-  [appContext registerNativeModules];
+  if (self.registerModules) {
+    self.registerModules(appContext);
+  } else {
+    [appContext registerNativeModules];
+  }
 }
 
-// [JS thread] The app's own ExceptionsManager; every other module as usual.
+// [JS thread] The app's own ExceptionsManager and networking; every other module as usual.
 - (id<RCTTurboModule>)getModuleInstanceFromClass:(Class)moduleClass
 {
   if (moduleClass == [RCTExceptionsManager class]) {
@@ -122,7 +210,35 @@
       [weakSelf reportFatalError:message];
     }];
   }
+  if (moduleClass == [RCTNetworking class]) {
+    return [self makeNetworking];
+  }
   return [super getModuleInstanceFromClass:moduleClass];
+}
+
+// React Native's networking module (RCTAppSetupDefaultModuleFromClass in
+// RCTAppSetupUtils.mm) with OCAppFileRequestHandler in place of
+// RCTFileRequestHandler. Check it still matches when upgrading React Native.
+- (id<RCTTurboModule>)makeNetworking
+{
+  BOOL (^canReadFile)(NSURL *) = self.canReadFile;
+  NSArray<NSString *> *libraryHandlers = self.delegate.dependencyProvider.URLRequestHandlerClassNames ?: @[];
+  return (id<RCTTurboModule>)[[RCTNetworking alloc]
+      initWithHandlersProvider:^NSArray<id<RCTURLRequestHandler>> *(RCTModuleRegistry *moduleRegistry) {
+        NSMutableArray<id<RCTURLRequestHandler>> *handlers = [@[
+          [RCTHTTPRequestHandler new],
+          [RCTDataRequestHandler new],
+          [[OCAppFileRequestHandler alloc] initWithCanRead:canReadFile],
+          [moduleRegistry moduleForName:"BlobModule"],
+        ] mutableCopy];
+        for (NSString *className in libraryHandlers) {
+          id handler = [moduleRegistry moduleForName:[className UTF8String]];
+          if ([handler conformsToProtocol:@protocol(RCTURLRequestHandler)]) {
+            [handlers addObject:handler];
+          }
+        }
+        return handlers;
+      }];
 }
 
 // Implementing this keeps fatal errors away from RCTFatal (RCTHost.mm) while

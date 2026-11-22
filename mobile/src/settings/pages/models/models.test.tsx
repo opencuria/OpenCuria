@@ -120,7 +120,7 @@ describe("provider & models", () => {
     ).toBeTruthy();
     expect(
       screen.getByRole("link", {
-        name: /^Claude Agent, Run the separate Claude Agent/,
+        name: /^Claude Agent, Run the Claude Agent harness in your workspace/,
       }),
     ).toBeTruthy();
     expect(
@@ -243,6 +243,61 @@ describe("provider accounts", () => {
     expect(screen.getByLabelText("Anthropic subscription token")).toBeTruthy();
     fireEvent.press(screen.getByTestId("save-provider-account"));
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("never offers sharing for Claude Agent accounts", async () => {
+    const claude = providerAccountInfo("claude-agent")!;
+    renderSettingsPage(<ProviderAccountPage provider={claude} accountId={null} />, {
+      client: mockClient({
+        providerAccounts: { list: jest.fn(async () => []) },
+      }),
+    });
+    await screen.findByLabelText("Account name");
+    expect(
+      screen.queryByRole("switch", { name: "Share with this organization" }),
+    ).toBeNull();
+  });
+
+  it("keeps Unshare for an older shared Claude Agent account", async () => {
+    const claude = providerAccountInfo("claude-agent")!;
+    renderSettingsPage(<ProviderAccountPage provider={claude} accountId="acc-1" />, {
+      client: mockClient({
+        providerAccounts: {
+          list: jest.fn(async () => [
+            account({
+              provider: "claude-agent",
+              scope: "organization",
+              auth_type: "api_token",
+            }),
+          ]),
+        },
+      }),
+    });
+    expect(await screen.findByRole("button", { name: "Unshare" })).toBeTruthy();
+    expect(
+      screen.queryByRole("switch", { name: "Share with this organization" }),
+    ).toBeNull();
+  });
+
+  it("tells admins that Codex cannot use a shared account", async () => {
+    renderSettingsPage(
+      <ProviderAccountPage provider={openrouter} accountId={null} />,
+      {
+        client: mockClient({
+          providerAccounts: { list: jest.fn(async () => []) },
+        }),
+      },
+    );
+    const toggle = await screen.findByRole("switch", {
+      name: "Share with this organization",
+    });
+    expect(screen.queryByText(/not with Codex/)).toBeNull();
+    fireEvent.press(toggle);
+    expect(
+      screen.getByText(
+        "Shared accounts work with the OpenCuria engine, not with Codex.",
+      ),
+    ).toBeTruthy();
   });
 
   it("confirms unsharing an organization account and keeps its secrets", async () => {

@@ -4,10 +4,15 @@
  *
  * The row has a local id (`local-user-*`) until a snapshot holds the server's
  * copy; `reconcileOptimisticPrompts` then hands its `client_key` to that copy.
- * Lists key rows by `messageRenderKey`, so the bubble is never replaced.
+ * Lists key rows by `messageRenderKey`, so the bubble is never replaced. An
+ * edited prompt is such a row too, in the bubble of the prompt it replaces.
  */
 import type { HarnessId, HarnessMessage } from "./harness";
-import { isLocalId, isOptimisticPrompt } from "./harnessReducer";
+import {
+  isLocalId,
+  isOptimisticPrompt,
+  sortHarnessMessages,
+} from "./harnessReducer";
 
 let fallbackSequence = 0;
 
@@ -68,4 +73,45 @@ export function withoutOptimisticPrompt(
   )
     ? messages.filter((message) => message.id !== promptId)
     : messages;
+}
+
+/** The transcript once an edited prompt is sent; see `withEditedPrompt`. */
+export interface EditedTranscript {
+  messages: HarnessMessage[];
+  /** The new text, optimistic until the server's copy arrives. */
+  prompt: HarnessMessage;
+  /** The edited prompt and every row after it: the server deletes them. */
+  replaced: HarnessMessage[];
+}
+
+/**
+ * Send an edited prompt locally: the turns before it stay, the new text
+ * follows as an optimistic prompt in the same bubble (it keeps the render
+ * key, and the server's copy inherits it). `null` when `messages` holds no
+ * stored prompt `messageId`.
+ */
+export function withEditedPrompt(
+  messages: HarnessMessage[],
+  messageId: string,
+  edit: { content: string; skillIds?: string[] },
+): EditedTranscript | null {
+  const ordered = sortHarnessMessages(messages);
+  const index = ordered.findIndex((message) => message.id === messageId);
+  const original = ordered[index];
+  if (!original || original.role !== "user" || isLocalId(original.id))
+    return null;
+  const prompt: HarnessMessage = {
+    ...createOptimisticPrompt({
+      sessionId: original.session_id,
+      content: edit.content,
+      skillIds: edit.skillIds ?? original.skill_ids,
+      harnessId: original.harness_id,
+    }),
+    client_key: messageRenderKey(original),
+  };
+  return {
+    messages: [...ordered.slice(0, index), prompt],
+    prompt,
+    replaced: ordered.slice(index),
+  };
 }

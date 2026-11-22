@@ -2229,7 +2229,7 @@ async def test_set_mode_aligns_agent_name(harness_workspace) -> None:
 
 @pytest.mark.django_db(transaction=True)
 async def test_missing_provider_config_raises(harness_workspace) -> None:
-    """start_run without model/provider config raises NotFoundError before task."""
+    """start_run without a model or agent default is refused before a task runs."""
     collected: list[dict[str, Any]] = []
 
     async def _emit(event: str, data: dict[str, Any]) -> None:
@@ -2244,9 +2244,7 @@ async def test_missing_provider_config_raises(harness_workspace) -> None:
     session = await _db_create_session(harness_workspace)
     session.model = ""
     await sync_to_async(HarnessSessionRepository.set_model)(session, "")
-    from common.exceptions import NotFoundError
-
-    with pytest.raises(NotFoundError):
+    with pytest.raises(ValueError, match="^No model selected"):
         await service.start_run(
             session,
             "needs config",

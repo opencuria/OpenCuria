@@ -89,6 +89,10 @@ const mockTranscript: {
     onFork?: unknown;
     onEdit?: (message: unknown) => void;
     editingMessageId?: string | null;
+    emptyContent?: React.ReactElement<{
+      providerConnected: boolean;
+      isAdmin: boolean;
+    }>;
   };
 } = {};
 
@@ -183,6 +187,7 @@ jest.mock("../components", () => {
       placeholder?: string;
       disabled?: boolean;
       canSend?: boolean;
+      missingModel?: boolean;
       onSettings: () => void;
       onDraftChange: (value: string) => void;
       onSend: (value: {
@@ -267,7 +272,11 @@ jest.mock("../components", () => {
         ReactRuntime.createElement(
           Text,
           { testID: "composer-send" },
-          props.canSend === false ? "no-send" : "send",
+          props.canSend === false
+            ? "no-send"
+            : props.missingModel
+              ? "needs-model"
+              : "send",
         ),
         ReactRuntime.createElement(
           Pressable,
@@ -275,11 +284,14 @@ jest.mock("../components", () => {
             accessibilityRole: "button",
             testID: "test-send",
             onPress: () => {
-              void props.onSend({
-                text: "hello from mobile",
-                skillIds: [],
-                attachments: [],
-              });
+              // The real composer takes a rejected send back into the field.
+              void Promise.resolve(
+                props.onSend({
+                  text: "hello from mobile",
+                  skillIds: [],
+                  attachments: [],
+                }),
+              ).catch(() => undefined);
             },
           },
           ReactRuntime.createElement(Text, null, "Send"),
@@ -350,6 +362,7 @@ jest.mock("../components", () => {
     ChatMessages: (props: {
       loading?: boolean;
       emptyText?: string;
+      emptyContent?: React.ReactElement;
       resolveMedia?: (path: string) => Promise<unknown>;
       messages: Array<{ content: string }>;
       onEdit?: (message: unknown) => void;
@@ -875,6 +888,46 @@ it.each([
   });
   if (workspaceButton) expect(workspaceButton).toBeDisabled();
   expect(mockController.send).not.toHaveBeenCalled();
+  tree.unmount();
+});
+
+it("guides through setup in place of the empty chat while there is no workspace", async () => {
+  const client = mockClient();
+  client.workspaces.list.mockResolvedValue([]);
+  client.harness.listEngineModels.mockResolvedValue([]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockTranscript.props?.emptyContent).toBeDefined(),
+  );
+  const guide = mockTranscript.props!.emptyContent!;
+  expect(guide.props.providerConnected).toBe(false);
+  // Members (no admin role here) only get the steps they can take.
+  expect(guide.props.isAdmin).toBe(false);
+  tree.unmount();
+});
+
+it("keeps a new chat from sending until a model is available", async () => {
+  const client = mockClient();
+  client.harness.listEngineModels.mockResolvedValue([]);
+  client.harness.listAgentConfigs.mockResolvedValue([]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    ),
+  );
+  expect(screen.getByTestId("composer-send")).toHaveTextContent("needs-model");
+  expect(mockTranscript.props?.emptyContent).toBeUndefined();
   tree.unmount();
 });
 
@@ -2569,6 +2622,61 @@ describe("steering and send later", () => {
       expect(screen.queryByTestId("composer-editing")).toBeNull(),
     );
     expect(draft()).toHaveTextContent("My own draft");
+    tree.unmount();
+  });
+
+  it("keeps a sent edit while its new text replaces the prompt and gives a rejected one back", async () => {
+    const { tree } = await renderOpenChat("idle");
+    const prompt = {
+      id: "prompt-1",
+      session_id: "session-a",
+      role: "user",
+      content: "What does GoBD compliant mean?",
+      parts: [],
+    };
+    const answer = {
+      id: "answer-1",
+      session_id: "session-a",
+      role: "assistant",
+      content: "An answer",
+      parts: [],
+    };
+    const showMessages = (messages: unknown[]) =>
+      act(async () => {
+        snapshot = { ...snapshot, messages: messages as never[] };
+        listeners.forEach((listener) => listener());
+      });
+    await showMessages([prompt, answer]);
+    act(() => mockComposer.onDraftChange!("My own draft"));
+    act(() => mockTranscript.props!.onEdit!(prompt));
+    let reject!: (error: Error) => void;
+    mockController.edit.mockImplementationOnce(
+      () => new Promise((_resolve, fail) => (reject = fail)),
+    );
+
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() => expect(mockController.edit).toHaveBeenCalled());
+    // The controller shows the new text in the prompt's bubble at once.
+    await showMessages([
+      {
+        ...prompt,
+        id: "local-user-1",
+        client_key: "prompt-1",
+        content: "hello from mobile",
+      },
+    ]);
+    expect(screen.queryByTestId("composer-editing")).toBeNull();
+
+    // Rejected: the transcript comes back and the edit with it.
+    await showMessages([prompt, answer]);
+    await act(async () => reject(new Error("active run")));
+    expect(screen.getByTestId("composer-editing")).toHaveTextContent(
+      "prompt-1",
+    );
+    expect(mockTranscript.props?.editingMessageId).toBe("prompt-1");
+    expect(screen.getByTestId("composer-draft")).not.toHaveTextContent(
+      "My own draft",
+    );
     tree.unmount();
   });
 

@@ -75,6 +75,11 @@ EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 FRONTEND_EVENT_STATUS = "harness.session_status"
 FRONTEND_EVENT_STEER_QUEUE = "harness.steer_queue"
+# Shown verbatim by web, mobile and MCP clients when a native run has no model.
+MODEL_REQUIRED_MESSAGE = (
+    "No model selected. Choose a model, or connect a provider under "
+    "Settings → Provider & Models."
+)
 
 
 class HarnessService:
@@ -508,6 +513,7 @@ class HarnessService:
                     )
                 if account is None:
                     raise NotFoundError("ProviderAccount", str(user_id))
+                accounts.require_workspace_account(account, user_id)
             session_kwargs.update(
                 harness_id=engine_id,
                 created_by_id=user_id,
@@ -845,8 +851,8 @@ class HarnessService:
         (Auto) is filled from the agent config.
 
         Raises:
-            NotFoundError: When no provider connection exists for the model.
-            ValueError: When API key or model is missing.
+            ValueError: When no model is selected or configured, or its
+                provider is not connected.
         """
         session_model = (session.model or "").strip()
         if getattr(session, "harness_id", "native") == "codex":
@@ -884,7 +890,7 @@ class HarnessService:
         agent_model = "" if agent_defaults["inherit_model"] else agent_defaults["model"]
         model = session_model or agent_model
         if not model:
-            raise NotFoundError("ProviderConnection", str(organization_id))
+            raise ValueError(MODEL_REQUIRED_MESSAGE)
         account_user_id = user_id or getattr(session, "created_by_id", None)
         config_service.provider_connected_for_model(
             organization_id, model, user_id=account_user_id, account_ids=account_ids

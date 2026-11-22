@@ -542,7 +542,8 @@ export function applySubtaskFinished(
 
 // --- Ordering ---------------------------------------------------------------
 
-function messagePosition(message: HarnessMessage): number | undefined {
+/** Persisted position of a message; undefined for rows the server lacks. */
+export function messagePosition(message: HarnessMessage): number | undefined {
   const raw = message.position ?? message.message_position;
   return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
 }
@@ -686,6 +687,11 @@ function furthestPartState(
  * known output wins per row so stale snapshots preserve already-received
  * data); optimistic prompts follow `reconcileOptimisticPrompts`. Messages
  * and parts sort by `position` with creation-order fallback.
+ *
+ * A snapshot lists the whole session and positions only grow, so a known
+ * row it lacks survives only when it is newer than the snapshot's newest
+ * row. Missing rows at or before that position were deleted on the server,
+ * e.g. the suffix an edit replaced (from this or another client).
  */
 export function mergeBusyFetchedMessages(
   previous: HarnessMessage[],
@@ -711,14 +717,23 @@ export function mergeBusyFetchedMessages(
   }
 
   // Keep live turns missing from a stale snapshot.
+  const newest = incoming.reduce<number | undefined>((latest, message) => {
+    const order = messagePosition(message);
+    return order !== undefined && (latest === undefined || order > latest)
+      ? order
+      : latest;
+  }, undefined);
   const extras: HarnessMessage[] = [];
   for (const live of previous) {
     // Optimistic prompts are handed over below.
     if (incomingIds.has(live.id) || isLocalId(live.id)) continue;
-    // A server-id row missing from the snapshot is a stale-snapshot hole (or
-    // a deleted suffix after edit/fork): keep completed rows so
-    // already-received data is not lost mid-run.
-    if (live.role === "assistant" || live.role === "user") extras.push(live);
+    if (live.role !== "assistant" && live.role !== "user") continue;
+    // A live shell has no position yet; a positioned row the snapshot has
+    // already passed is gone on the server.
+    const order = messagePosition(live);
+    if (order !== undefined && newest !== undefined && order <= newest)
+      continue;
+    extras.push(live);
   }
 
   const combined = sortHarnessMessages([...incoming, ...extras]);

@@ -136,13 +136,15 @@ static BOOL OCIsLabel(NSString *value)
     RCTSetCustomSRWebSocketProvider(^SRWebSocket *(NSURLRequest *request) {
       NSURLRequest *routed = [OCAppGateway routedRequest:request];
       if (routed != nil && [request isKindOfClass:NSMutableURLRequest.class]) {
-        NSMutableURLRequest *mutable = (NSMutableURLRequest *)request;
-        mutable.URL = routed.URL;
-        [mutable setValue:[routed valueForHTTPHeaderField:OCSessionHeader] forHTTPHeaderField:OCSessionHeader];
+        NSMutableURLRequest *mutableRequest = (NSMutableURLRequest *)request;
+        mutableRequest.URL = routed.URL;
+        [mutableRequest setValue:[routed valueForHTTPHeaderField:OCSessionHeader]
+              forHTTPHeaderField:OCSessionHeader];
         // Cookies the backend set through the gateway belong to the gateway URL.
-        NSArray<NSHTTPCookie *> *cookies = [NSHTTPCookieStorage.sharedHTTPCookieStorage cookiesForURL:routed.URL];
-        [mutable setValue:[NSHTTPCookie requestHeaderFieldsWithCookies:cookies][@"Cookie"]
-            forHTTPHeaderField:@"Cookie"];
+        NSArray<NSHTTPCookie *> *cookies =
+            [NSHTTPCookieStorage.sharedHTTPCookieStorage cookiesForURL:routed.URL];
+        [mutableRequest setValue:[NSHTTPCookie requestHeaderFieldsWithCookies:cookies][@"Cookie"]
+              forHTTPHeaderField:@"Cookie"];
       }
       SRWebSocket *useDefault = nil;
       return useDefault;

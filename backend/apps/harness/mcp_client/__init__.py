@@ -1,9 +1,10 @@
-"""MCP client runtime for harness runs (workspace-local transports).
+"""MCP client runtime for harness runs.
 
-All plugin MCP traffic leaves the backend through a
+Plugin MCP traffic leaves the backend through a
 :class:`~apps.harness.access.base.WorkspaceAccessor`, except for the
 ``builtin`` transport, which serves OpenCuria's own management MCP server
-in-process (registered through :mod:`.builtin`):
+in-process (registered through :mod:`.builtin`), and for HTTP servers that
+carry an OAuth bearer token:
 
 - ``stdio`` servers run as workspace-local processes opened via
   :meth:`WorkspaceAccessor.open_process`; their stdout is a
@@ -13,6 +14,10 @@ in-process (registered through :mod:`.builtin`):
   :meth:`WorkspaceAccessor.open_tcp` via the custom httpcore network
   backend in :mod:`apps.harness.mcp_client.workspace_http`
   (no backend DNS/connect; TLS terminates in the workspace relay).
+- ``streamable_http``/``sse`` servers bound to an OAuth credential are
+  reached from the backend over pinned public HTTPS
+  (:mod:`apps.harness.mcp_client.public_http`): OAuth tokens are
+  server-side credentials and never enter the workspace.
 
 The MCP wire protocol itself always comes from the installed
 ``mcp>=1,<2`` SDK (:class:`~mcp.client.session.ClientSession`,

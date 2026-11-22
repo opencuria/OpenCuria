@@ -24,6 +24,8 @@ const authStore = {
   logout: vi.fn(),
 }
 
+const socketHandlers = new Map<string, (data: unknown) => void>()
+
 const workspaceStore = {
   getWorkspaceTransitionLabel: vi.fn<(id: string) => string | null>(() => null),
   isWorkspaceTransitioning: vi.fn<(id: string) => boolean>(() => false),
@@ -133,7 +135,10 @@ vi.mock('@/services/socket', () => ({
   disconnect: vi.fn(),
   isConnected: { value: true },
   subscribeToWorkspace: vi.fn(() => vi.fn()),
-  onEvent: () => () => {},
+  onEvent: (event: string, handler: (data: unknown) => void) => {
+    socketHandlers.set(event, handler)
+    return () => socketHandlers.delete(event)
+  },
   onReconnect: () => () => {},
 }))
 
@@ -210,6 +215,18 @@ describe('ChatSidebar', () => {
 
     expect(wrapper.text()).toContain('OpenCuria')
     expect(wrapper.text()).not.toContain('Acme')
+  })
+
+  it('loads workspaces created elsewhere when their status arrives', () => {
+    mountSidebar()
+    const known = workspaceStore.workspaces[0]!.id
+    socketHandlers.get('workspace:status_changed')!({ workspace_id: known, status: 'running' })
+    expect(workspaceStore.updateWorkspaceStatus).toHaveBeenCalledWith(known, 'running', undefined)
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledTimes(1)
+
+    socketHandlers.get('workspace:status_changed')!({ workspace_id: 'ws-new', status: 'creating' })
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledTimes(2)
+    expect(workspaceStore.updateWorkspaceStatus).toHaveBeenCalledTimes(1)
   })
 
   it('starts each shared data poll with a single initial request', () => {

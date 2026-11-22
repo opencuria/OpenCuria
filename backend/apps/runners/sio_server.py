@@ -27,6 +27,7 @@ from common.realtime import (
     register_frontend,
     subscribe_frontend,
     unsubscribe_frontend,
+    user_room,
 )
 
 from .reply_routing import (
@@ -657,6 +658,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
                 namespace="/frontend",
             )
             register_frontend(sid, str(user.id))
+            # Owner-scoped events (e.g. a workspace created on another device)
+            # reach the user without a workspace subscription.
+            await sio.enter_room(sid, user_room(str(user.id)), namespace="/frontend")
             logger.info("Frontend client connected (sid=%s, user=%s)", sid, user.email)
         except Exception as exc:
             logger.warning(

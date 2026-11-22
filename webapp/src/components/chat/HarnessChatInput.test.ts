@@ -772,6 +772,7 @@ describe('HarnessChatInput', () => {
 
   it('resets to one line after send', async () => {
     const wrapper = mountInput()
+    await flushPromises()
     const el = wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement
     Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 80 })
     await setEditorText(wrapper, 'hello world')
@@ -785,6 +786,7 @@ describe('HarnessChatInput', () => {
 
   it('renders inline badges and removes only the selected mention via its icon X', async () => {
     const wrapper = mountInput()
+    await flushPromises()
     const vm = wrapper.vm as unknown as { setPrompt(text: string): void }
     vm.setPrompt('Review @file:/workspace/src/shell.py with @agent:plan please')
     await wrapper.vm.$nextTick()
@@ -857,6 +859,38 @@ describe('HarnessChatInput', () => {
     }
   })
 
+  it('keeps Send disabled for a new chat while no model is available', async () => {
+    nativeModelsMock.mockResolvedValue([])
+    listAgentConfigsMock.mockResolvedValue([])
+    const wrapper = mountInput()
+    await flushPromises()
+    await setEditorText(wrapper, 'hello')
+    const send = wrapper.get('[data-testid="composer-send"]')
+    expect(send.attributes('disabled')).toBeDefined()
+    expect(send.attributes('title')).toBe('Choose a model first')
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('send')).toBeUndefined()
+    expect(editorText(wrapper)).toBe('hello')
+  })
+
+  it('starts a new chat on the first listed model without an agent default', async () => {
+    listAgentConfigsMock.mockResolvedValue([])
+    const wrapper = mountInput()
+    await flushPromises()
+    const models = wrapper.emitted('update:model') ?? []
+    expect(models[models.length - 1]).toEqual(['openrouter/model-big'])
+    await setEditorText(wrapper, 'hello')
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]?.[2]).toBe('openrouter/model-big')
+  })
+
+  it('keeps the session model of an existing chat instead of the first listed one', async () => {
+    listAgentConfigsMock.mockResolvedValue([])
+    const wrapper = mountInput({ sessionId: 'session-1', model: '' })
+    await flushPromises()
+    expect(wrapper.emitted('update:model') ?? []).not.toContainEqual(['openrouter/model-big'])
+  })
+
   it('loads models and agent defaults without fetching provider settings', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalled())
@@ -875,6 +909,7 @@ describe('HarnessChatInput', () => {
 
   it('sends prompt, mode, model, skill ids, and effort', async () => {
     const wrapper = mountInput({ mode: 'plan' })
+    await flushPromises()
     const textarea = wrapper.get('[data-testid="composer-textarea"]')
     await setEditorText(wrapper, 'hello world')
     await textarea.trigger('keydown', { key: 'Enter' })

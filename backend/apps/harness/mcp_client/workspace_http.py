@@ -1,8 +1,10 @@
 """httpcore/httpx bridge: workspace TCP byte streams as HTTP transport.
 
-All HTTP bytes for MCP ``streamable_http``/``sse`` servers travel through
-:meth:`WorkspaceAccessor.open_tcp(host, port, tls, server_hostname)` —
-the backend never resolves DNS or opens sockets itself. The bridge:
+HTTP bytes for MCP ``streamable_http``/``sse`` servers without OAuth travel
+through :meth:`WorkspaceAccessor.open_tcp(host, port, tls, server_hostname)`,
+so servers on the workspace's localhost or network stay reachable and the
+backend never resolves DNS or opens sockets for them. Servers that carry an
+OAuth bearer token never use this bridge (see :mod:`.public_http`). The bridge:
 
 - parses the MCP server URL once and pins the origin (scheme/host/port);
 - opens one workspace TCP connection per HTTP request (stateless relay;
@@ -299,7 +301,17 @@ def parse_mcp_http_url(url: str) -> tuple[str, str, int, str]:
     return scheme, host, int(port), target
 
 
-def _validate_header_items(headers: dict[str, str] | None) -> dict[str, str]:
+def request_origin(url: httpx.URL) -> tuple[str, str, int]:
+    """Return ``(scheme, host, port)`` of *url* for origin pinning."""
+    scheme = (url.scheme or "").lower()
+    return (
+        scheme,
+        (url.host or "").lower(),
+        int(url.port or (443 if scheme == "https" else 80)),
+    )
+
+
+def validate_header_items(headers: dict[str, str] | None) -> dict[str, str]:
     """Validate header names/values (fail-closed on CRLF injection)."""
     cleaned: dict[str, str] = {}
     for name, value in dict(headers or {}).items():
@@ -344,15 +356,9 @@ class WorkspaceHTTPTransport(httpx.AsyncHTTPTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Enforce same-origin requests (no cross-origin redirects by hand)."""
-        url = request.url
-        origin = (
-            (url.scheme or "").lower(),
-            (url.host or "").lower(),
-            int(url.port or (443 if url.scheme == "https" else 80)),
-        )
-        if origin != self._origin:
+        if request_origin(request.url) != self._origin:
             raise httpx.ConnectError(
-                f"MCP HTTP request escapes pinned origin {self._origin}: {url}",
+                f"MCP HTTP request escapes pinned origin {self._origin}: {request.url}",
             )
         return await super().handle_async_request(request)
 
@@ -377,7 +383,7 @@ def build_workspace_http_client(
     transport = WorkspaceHTTPTransport(accessor, url)
     client = httpx.AsyncClient(
         transport=transport,
-        headers=_validate_header_items(headers),
+        headers=validate_header_items(headers),
         timeout=timeout or httpx.Timeout(30.0, read=300.0),
         follow_redirects=follow_redirects,
         trust_env=False,

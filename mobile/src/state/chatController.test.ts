@@ -76,6 +76,13 @@ function timeline(
   return { session: owner, messages, permissions, questions };
 }
 
+/** A timeline of the session was requested and not given up again. */
+function timelineKept(client: OpenCuriaClient, sessionId: string): boolean {
+  return vi
+    .mocked(client.harness.timeline)
+    .mock.calls.some(([id, signal]) => id === sessionId && !signal?.aborted);
+}
+
 class FakeRealtime {
   isConnected = false;
   readonly handlers = new Map<string, Set<(payload: any) => void>>();
@@ -217,13 +224,18 @@ describe("ChatController", () => {
             "X-Organization-Id": "org-a",
           });
           const url = String(input);
-          if (shouldStall && url.endsWith(endpoint)) {
+          if (
+            shouldStall &&
+            (endpoint === "timeline"
+              ? url.includes("/timeline")
+              : url.endsWith(endpoint))
+          ) {
             shouldStall = false;
             return stalled.promise;
           }
           const payload = url.endsWith("sessions/")
             ? [root]
-            : url.endsWith("timeline")
+            : url.includes("/timeline")
               ? timeline(root, [message("reply", "assistant", "Loaded reply")])
               : [];
           return new Response(JSON.stringify(payload));
@@ -422,7 +434,7 @@ describe("ChatController", () => {
     await Promise.all([initial, notification]);
 
     expect(controller.getSnapshot().activeSessionId).toBe(root.id);
-    expect(client.harness.timeline).toHaveBeenCalledWith(root.id);
+    expect(timelineKept(client, root.id)).toBe(true);
     controller.dispose();
   });
 
@@ -451,7 +463,7 @@ describe("ChatController", () => {
     expect(controller.getSnapshot().activeSessionId).toBe(root.id);
     expect(controller.getSnapshot().loading).toBe(false);
     expect(controller.getSnapshot().error).toBeNull();
-    expect(client.harness.timeline).toHaveBeenCalledWith(root.id);
+    expect(timelineKept(client, root.id)).toBe(true);
     controller.dispose();
   });
 
@@ -467,7 +479,7 @@ describe("ChatController", () => {
 
     expect(client.harness.listSessions).toHaveBeenCalledTimes(2);
     expect(controller.getSnapshot().activeSessionId).toBe(target.id);
-    expect(client.harness.timeline).toHaveBeenCalledWith(target.id);
+    expect(timelineKept(client, target.id)).toBe(true);
     controller.dispose();
   });
 
@@ -489,7 +501,7 @@ describe("ChatController", () => {
       expect(client.harness.listSessions).toHaveBeenCalledTimes(2);
       expect(controller.getSnapshot().workspaceId).toBe("workspace-a");
       expect(controller.getSnapshot().activeSessionId).toBe(old.id);
-      expect(client.harness.timeline).not.toHaveBeenCalledWith(targetId);
+      expect(timelineKept(client, targetId)).toBe(false);
       controller.dispose();
     },
   );
@@ -512,7 +524,7 @@ describe("ChatController", () => {
     await notification;
 
     expect(controller.getSnapshot().activeSessionId).toBeNull();
-    expect(client.harness.timeline).not.toHaveBeenCalledWith(target.id);
+    expect(timelineKept(client, target.id)).toBe(false);
     controller.dispose();
   });
 
@@ -529,7 +541,7 @@ describe("ChatController", () => {
     await notification;
 
     expect(controller.getSnapshot().activeSessionId).toBeNull();
-    expect(client.harness.timeline).not.toHaveBeenCalled();
+    expect(timelineKept(client, root.id)).toBe(false);
     controller.dispose();
   });
 
@@ -550,7 +562,7 @@ describe("ChatController", () => {
 
     expect(controller.getSnapshot().workspaceId).toBe("workspace-b");
     expect(controller.getSnapshot().activeSessionId).toBe(other.id);
-    expect(client.harness.timeline).not.toHaveBeenCalledWith(root.id);
+    expect(timelineKept(client, root.id)).toBe(false);
     controller.dispose();
   });
 
@@ -770,16 +782,239 @@ describe("ChatController", () => {
     const controller = new ChatController(client);
     await openRoot(controller);
 
-    expect(client.harness.timeline).toHaveBeenCalledWith("child");
+    await vi.waitFor(() => expect(timelineKept(client, "child")).toBe(true));
     expect(
       controller.getSnapshot().activeSessionLineage.map((row) => row.id),
     ).toEqual(["root"]);
+    await vi.waitFor(() => {
+      expect(
+        controller.getSnapshot().permissions.map((row) => row.request_id),
+      ).toEqual(["gate-1"]);
+      expect(
+        controller.getSnapshot().questions.map((row) => row.request_id),
+      ).toEqual(["question-1"]);
+    });
+    controller.dispose();
+  });
+
+  it("shows the gates of subtasks from the chat's own response", async () => {
+    const root = session("root");
+    const child = session("child", {
+      parent_id: "root",
+      agent_name: "explore",
+    });
+    const permission: HarnessPermissionRequest = {
+      request_id: "gate-1",
+      session_id: "child",
+      workspace_id: "workspace-a",
+      tool: "shell",
+      pattern: "rm -rf /tmp",
+      title: "Clean temporary files",
+      status: "pending",
+    };
+    const { client } = makeClient([root, child]);
+    const release = deferred<TimelineFixture>();
+    vi.mocked(client.harness.timeline).mockImplementation(async (id) =>
+      id === "root" ? timeline(root, [], [permission]) : release.promise,
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+
+    // The subtask's own transcript is still on its way.
+    expect(controller.getSnapshot()).toMatchObject({
+      loading: false,
+      permissions: [
+        expect.objectContaining({
+          request_id: "gate-1",
+          agent_name: "explore",
+        }),
+      ],
+    });
+    release.resolve(timeline(child));
+    controller.dispose();
+  });
+
+  it("requests the chat while the session list loads and takes the todos from it", async () => {
+    const root = session("root");
+    const list = deferred<HarnessSession[]>();
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.listSessions).mockReturnValue(list.promise);
+    vi.mocked(client.harness.timeline).mockResolvedValue({
+      ...timeline(root, [message("reply", "assistant", "Loaded reply")]),
+      older_count: 0,
+      todos: [
+        {
+          id: "t1",
+          content: "Ship it",
+          status: "pending",
+          priority: "high",
+          order: 0,
+        },
+      ],
+    } as never);
+    const controller = new ChatController(client);
+
+    const opening = controller.openWorkspace("workspace-a", "root");
+    // Both requests are on their way before either has answered.
+    expect(client.harness.listSessions).toHaveBeenCalledTimes(1);
+    expect(client.harness.timeline).toHaveBeenCalledTimes(1);
+    expect(client.harness.timeline).toHaveBeenCalledWith(
+      "root",
+      expect.any(AbortSignal),
+      { limit: 30 },
+    );
+    expect(controller.getSnapshot().messages).toEqual([]);
+
+    list.resolve([root]);
+    await opening;
+    expect(client.harness.timeline).toHaveBeenCalledTimes(1);
+    expect(client.api.get).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      loading: false,
+      messages: [expect.objectContaining({ content: "Loaded reply" })],
+      todos: [expect.objectContaining({ content: "Ship it" })],
+    });
+    controller.dispose();
+  });
+
+  it("does not let a prefetched chat drop a gate that arrived after it", async () => {
+    const root = session("root");
+    const list = deferred<HarnessSession[]>();
+    const { client, realtime } = makeClient([root]);
+    vi.mocked(client.harness.listSessions).mockReturnValue(list.promise);
+    const controller = new ChatController(client);
+
+    const opening = controller.openWorkspace("workspace-a", "root");
+    const [prefetch] = vi.mocked(client.harness.timeline).mock.calls;
+    // The prefetched response predates this gate.
+    realtime.emit("harness.permission_required", {
+      request_id: "gate-late",
+      session_id: "root",
+      workspace_id: "workspace-a",
+      tool: "shell",
+      pattern: "ls",
+      title: "List files",
+    });
+    vi.mocked(client.harness.timeline).mockResolvedValueOnce(
+      timeline(root, [], [
+        {
+          request_id: "gate-late",
+          session_id: "root",
+          workspace_id: "workspace-a",
+          tool: "shell",
+          pattern: "ls",
+          title: "List files",
+          status: "pending",
+        },
+      ]),
+    );
+    list.resolve([root]);
+    await opening;
+
+    expect(prefetch?.[1]?.aborted).toBe(true);
+    expect(client.harness.timeline).toHaveBeenCalledTimes(2);
     expect(
       controller.getSnapshot().permissions.map((row) => row.request_id),
-    ).toEqual(["gate-1"]);
+    ).toEqual(["gate-late"]);
+    controller.dispose();
+  });
+
+  it("asks for todos separately from a backend that does not send them", async () => {
+    const root = session("root");
+    const { client } = makeClient([root]);
+    vi.mocked(client.api.get).mockResolvedValue([
+      {
+        id: "t1",
+        content: "Ship it",
+        status: "pending",
+        priority: "high",
+        order: 0,
+      },
+    ]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    expect(client.api.get).toHaveBeenCalledWith("/harness/sessions/root/todos");
+    expect(controller.getSnapshot().todos).toHaveLength(1);
+    controller.dispose();
+  });
+
+  it("opens with the newest messages and adds the older ones in front", async () => {
+    const root = session("root");
+    const rows = Array.from({ length: 75 }, (_, position) => ({
+      ...message(
+        `m${position}`,
+        position % 2 ? "assistant" : "user",
+        `#${position}`,
+      ),
+      position,
+    }));
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockImplementation(
+      async (_id, _signal, range) => {
+        let shown = rows.filter(
+          (row) =>
+            (range?.before === undefined || row.position < range.before) &&
+            (range?.since === undefined || row.position >= range.since),
+        );
+        if (range?.limit !== undefined) shown = shown.slice(-range.limit);
+        const first = shown[0]?.position ?? 0;
+        return {
+          ...timeline(root, structuredClone(shown)),
+          older_count: first,
+        } as never;
+      },
+    );
+    const controller = new ChatController(client);
+    const seen: number[] = [];
+    controller.subscribe(() =>
+      seen.push(controller.getSnapshot().messages.length),
+    );
+    await openRoot(controller);
+
+    expect(vi.mocked(client.harness.timeline).mock.calls[0]?.[2]).toEqual({
+      limit: 30,
+    });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot().messages).toHaveLength(75),
+    );
+    expect(controller.getSnapshot()).toMatchObject({ partial: false });
+    expect(controller.getSnapshot().messages.map((row) => row.content)).toEqual(
+      rows.map((row) => row.content),
+    );
+    // The chat was shown with 30 messages before the rest arrived.
+    expect(seen).toContain(30);
     expect(
-      controller.getSnapshot().questions.map((row) => row.request_id),
-    ).toEqual(["question-1"]);
+      vi.mocked(client.harness.timeline).mock.calls.map((call) => call[2]),
+    ).toEqual([{ limit: 30 }, { limit: 100, before: 45 }]);
+    controller.dispose();
+  });
+
+  it("is partial until the older messages are there", async () => {
+    const root = session("root");
+    const page = deferred<unknown>();
+    const rows = Array.from({ length: 40 }, (_, position) => ({
+      ...message(
+        `m${position}`,
+        position % 2 ? "assistant" : "user",
+        `#${position}`,
+      ),
+      position,
+    }));
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockImplementation(
+      async (_id, _signal, range) =>
+        range?.before === undefined
+          ? ({ ...timeline(root, rows.slice(-30)), older_count: 10 } as never)
+          : ((await page.promise) as never),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    expect(controller.getSnapshot()).toMatchObject({ partial: true });
+    page.resolve({ ...timeline(root, rows.slice(0, 10)), older_count: 0 });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({ partial: false }),
+    );
+    expect(controller.getSnapshot().messages).toHaveLength(40);
     controller.dispose();
   });
 
@@ -1058,6 +1293,98 @@ describe("ChatController", () => {
     controller.dispose();
   });
 
+  it("shows an edited prompt at once and replaces the stopped turn for good", async () => {
+    const { client, realtime, rows } = makeClient([session("root")]);
+    const original = { ...message("u1", "user", "fix VULN-004b"), position: 0 };
+    const stopped = {
+      ...message("a1", "assistant", ""),
+      error: "aborted by user",
+      finish: "aborted",
+      completed_at: "2026-01-01T00:00:03.000Z",
+      position: 1,
+    };
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(rows.get("root")!, [original, stopped]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const sent = deferred<HarnessSession>();
+    vi.mocked(client.harness.edit).mockReturnValueOnce(sent.promise);
+
+    const editing = controller.edit("u1", "fix VULN-004");
+    // The new text shows in the prompt's bubble; the stopped turn is gone.
+    expect(controller.getSnapshot()).toMatchObject({
+      busy: true,
+      messages: [{ content: "fix VULN-004", client_key: "u1" }],
+    });
+
+    // The server starts the new run while the stopped one reports late.
+    const busy = session("root", { status: "busy" });
+    rows.set("root", busy);
+    const event = { workspace_id: "workspace-a", session_id: "root" };
+    realtime.emit("harness.session_status", {
+      ...event,
+      status: "busy",
+      message_id: "a2",
+      user_message_id: "u2",
+    });
+    realtime.emit("harness.part_updated", {
+      ...event,
+      message_id: "a1",
+      part_id: "late",
+      delta: { text: "late" },
+    });
+    realtime.emit("harness.session_status", {
+      ...event,
+      status: "idle",
+      message_id: "a1",
+    });
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(busy, [
+        { ...message("u2", "user", "fix VULN-004"), position: 2 },
+        { ...message("a2", "assistant", ""), position: 3 },
+      ]),
+    );
+    sent.resolve(busy);
+    await editing;
+
+    const after = controller.getSnapshot();
+    expect(after.messages.map((row) => row.id)).toEqual(["u2", "a2"]);
+    expect(after.messages[0]?.client_key).toBe("u1");
+    expect(after).toMatchObject({
+      busy: true,
+      error: null,
+      activeSession: { status: "busy" },
+    });
+    // Opened once, refreshed once after the server accepted the edit.
+    expect(client.harness.timeline).toHaveBeenCalledTimes(2);
+    controller.dispose();
+  });
+
+  it("restores the transcript when the server rejects an edit", async () => {
+    const { client, rows } = makeClient([session("root")]);
+    const original = [
+      { ...message("u1", "user", "prompt"), position: 0 },
+      { ...message("a1", "assistant", "answer"), position: 1 },
+    ];
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(rows.get("root")!, original),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    vi.mocked(client.harness.edit).mockRejectedValueOnce(
+      new ApiRequestError(409, "Harness session already has an active run"),
+    );
+
+    await expect(controller.edit("u1", "edited")).rejects.toThrow("active run");
+    expect(controller.getSnapshot()).toMatchObject({
+      busy: false,
+      error: "Harness session already has an active run",
+      messages: [{ id: "u1" }, { id: "a1" }],
+    });
+    controller.dispose();
+  });
+
   it("does not mark manual-unread sessions as read when opened", async () => {
     const root = session("root", { manual_unread: true, unread: true });
     const { client } = makeClient([root]);
@@ -1246,9 +1573,7 @@ describe("ChatController steering and scheduled messages", () => {
       user_message_id: "user-9",
     });
 
-    await vi.waitFor(() =>
-      expect(client.harness.timeline).toHaveBeenCalledWith("root"),
-    );
+    await vi.waitFor(() => expect(timelineKept(client, "root")).toBe(true));
     controller.dispose();
   });
 });

@@ -1,6 +1,6 @@
 import { createLocalFiles, type LocalFiles } from "../platform/localFiles";
 
-export { filePath, joinUri, temporaryUri } from "../platform/localFiles";
+export { joinUri, temporaryUri } from "../platform/localFiles";
 
 /**
  * The file operations the app installer needs, addressed by `file://` URI.

@@ -1,5 +1,6 @@
 package expo.modules.opencuriaappruntime
 
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Color
 import org.json.JSONObject
@@ -8,7 +9,8 @@ import java.io.File
 /**
  * Everything needed to run one installed app version, as sent by JavaScript.
  *
- * Paths are absolute file system paths inside the OpenCuria app's storage.
+ * Where the app's files live follows from its id alone ([AppSandbox.installDir]);
+ * paths in the request are ignored, so no request can widen the app's sandbox.
  */
 class AppLaunch(
   /** The original request, handed to the runtime activity unchanged. */
@@ -18,10 +20,10 @@ class AppLaunch(
   val name: String,
   /** Hermes bytecode or JavaScript bundle produced by `expo export`. */
   val bundlePath: String,
-  /** Installed version directory; the app may read it but never write. */
-  val installDir: String,
+  /** Installed app directory; the app may read it but never write. */
+  val installDir: File,
   /** The app's persistent data directory (kept across versions). */
-  val dataDir: String,
+  val dataDir: File,
   /** Updates-style manifest whose `extra.expoClient` is the app's Expo config. */
   val manifest: JSONObject,
   /** Metro asset hash -> `file://` URI of the downloaded asset. */
@@ -46,15 +48,14 @@ class AppLaunch(
     }
 
   companion object {
-    private val ID = Regex("^[A-Za-z0-9-]{1,64}$")
-
     /** Parse and validate the JSON launch request. */
-    fun parse(json: String): AppLaunch {
+    fun parse(context: Context, json: String): AppLaunch {
       val root = JSONObject(json)
       val appId = root.getString("appId")
       val versionId = root.getString("versionId")
-      require(ID.matches(appId) && ID.matches(versionId)) { "Invalid app id" }
-      val bundle = File(root.getString("bundlePath"))
+      require(AppSandbox.isValidId(appId) && AppSandbox.isValidId(versionId)) { "Invalid app id" }
+      val installDir = AppSandbox.installDir(context, appId)
+      val bundle = AppSandbox.bundleFile(installDir, versionId)
       require(bundle.isFile) { "The app bundle is missing; reinstall the app." }
       val assets = root.optJSONObject("localAssets") ?: JSONObject()
       val localAssets = assets.keys().asSequence().associateWith { assets.getString(it) }
@@ -71,13 +72,13 @@ class AppLaunch(
         versionId = versionId,
         name = root.optString("name").ifBlank { "App" },
         bundlePath = bundle.absolutePath,
-        installDir = File(root.getString("installDir")).absolutePath,
-        dataDir = File(root.getString("dataDir")).absolutePath,
+        installDir = installDir,
+        dataDir = AppSandbox.dataDir(installDir),
         manifest = root.getJSONObject("manifest"),
         localAssets = localAssets,
         orientation = root.optString("orientation", "default"),
         backgroundColor = color,
-        iconPath = root.optString("iconPath").takeIf { it.isNotBlank() && File(it).isFile },
+        iconPath = AppSandbox.iconFile(installDir).takeIf(File::isFile)?.absolutePath,
         gateway = AppGateway.parse(root.optJSONObject("gateway"))
       )
     }

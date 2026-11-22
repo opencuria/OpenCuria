@@ -6,9 +6,7 @@ import android.content.SharedPreferences
 import expo.modules.constants.ConstantsService
 import expo.modules.kotlin.services.AppDirectoriesService
 import expo.modules.kotlin.services.FilePermissionService
-import expo.modules.securestore.SecureStoreModule
 import java.io.File
-import java.io.IOException
 import java.util.EnumSet
 
 /**
@@ -16,8 +14,10 @@ import java.util.EnumSet
  * as Expo Go scopes each experience: files, cache and SecureStore entries.
  */
 class AppSandbox(base: Context, val launch: AppLaunch) {
-  val dataDir = File(launch.dataDir)
+  val dataDir = launch.dataDir
   val cacheDir = cacheDir(base, launch.appId)
+  val files = AppFileAccess(base, dataDir, cacheDir, launch.installDir)
+
   val context = SandboxContext(base, dataDir, cacheDir, preferencesPrefix(launch.appId))
 
   init {
@@ -29,6 +29,27 @@ class AppSandbox(base: Context, val launch: AppLaunch) {
     private const val ROOT = "opencuria-apps"
     private const val LAUNCHES = "opencuria-app-launches"
     private val SHARED_PREFERENCES = listOf("SecureStore")
+    private val ID = Regex("^[A-Za-z0-9-]{1,64}$")
+
+    fun isValidId(value: String) = ID.matches(value)
+
+    /**
+     * Where `mobile/src/apps/appInstaller.ts` installs an app (`appLayout`):
+     * `opencuria-apps/<appId>` in OpenCuria's documents (`Paths.document`).
+     */
+    fun installDir(context: Context, appId: String): File {
+      require(isValidId(appId)) { "Invalid app id" }
+      return File(File(context.filesDir, ROOT), appId)
+    }
+
+    fun dataDir(installDir: File) = File(installDir, "data")
+
+    fun bundleFile(installDir: File, versionId: String): File {
+      require(isValidId(versionId)) { "Invalid version id" }
+      return File(File(File(installDir, "versions"), versionId), "index.bundle")
+    }
+
+    fun iconFile(installDir: File) = File(installDir, "icon.png")
 
     fun cacheDir(context: Context, appId: String) = File(File(context.cacheDir, ROOT), appId)
 
@@ -41,13 +62,13 @@ class AppSandbox(base: Context, val launch: AppLaunch) {
     fun launchFile(context: Context, appId: String) =
       File(File(context.noBackupFilesDir, LAUNCHES), "$appId.json")
 
-    private val APP_ID = Regex("^[A-Za-z0-9-]{1,64}$")
-
     /** Remove cache, SecureStore entries and the launch of an uninstalled app. */
     fun clear(context: Context, appId: String) {
-      require(APP_ID.matches(appId)) { "Invalid app id" }
+      require(isValidId(appId)) { "Invalid app id" }
       cacheDir(context, appId).deleteRecursively()
       launchFile(context, appId).delete()
+      AppSecureStore.clear(context, appId)
+      // Written by `expo-secure-store` in earlier versions of the runtime.
       for (name in SHARED_PREFERENCES) {
         context.deleteSharedPreferences(preferencesPrefix(appId) + name)
       }
@@ -80,47 +101,10 @@ class SandboxDirectoriesService(private val sandbox: AppSandbox) :
     get() = sandbox.cacheDir.apply { mkdirs() }
 }
 
-/**
- * The app may read and write its sandbox and read its own installed files.
- * The rest of OpenCuria's private storage stays invisible; shared storage
- * outside it keeps the platform's regular rules.
- */
+/** Expo modules ask the app's [AppFileAccess] before they touch a file. */
 class SandboxFilePermissionService(private val sandbox: AppSandbox) : FilePermissionService() {
-  override fun getPathPermissions(context: Context, path: String): EnumSet<Permission> {
-    val canonical = try {
-      File(path).canonicalPath
-    } catch (_: IOException) {
-      return EnumSet.noneOf(Permission::class.java)
-    }
-    fun within(dir: File) = try {
-      val root = dir.canonicalPath
-      canonical == root || canonical.startsWith("$root/")
-    } catch (_: IOException) {
-      false
-    }
-    if (within(sandbox.dataDir) || within(sandbox.cacheDir)) {
-      return EnumSet.of(Permission.READ, Permission.WRITE)
-    }
-    if (within(File(sandbox.launch.installDir))) {
-      return EnumSet.of(Permission.READ)
-    }
-    val privateRoots = listOfNotNull(
-      context.applicationInfo?.dataDir?.let(::File),
-      context.filesDir,
-      context.cacheDir,
-      context.noBackupFilesDir
-    )
-    if (privateRoots.any(::within)) {
-      return EnumSet.noneOf(Permission::class.java)
-    }
-    return getExternalPathPermissions(path)
-  }
-}
-
-/** SecureStore entries of the app live in their own preferences file. */
-class SandboxSecureStoreModule(private val sandbox: AppSandbox) : SecureStoreModule() {
-  override val reactContext: Context
-    get() = sandbox.context
+  override fun getPathPermissions(context: Context, path: String): EnumSet<Permission> =
+    sandbox.files.permissions(path)
 }
 
 /** `Constants.manifest` reports the app's own Expo config. */

@@ -147,8 +147,6 @@ export const useHarnessStore = defineStore('harness', () => {
 
   const sessionFetches = new Map<string, Promise<void>>()
   const todoFetches = new Map<string, Promise<void>>()
-  /** Deleted edit suffixes must not be resurrected by stale snapshots or events. */
-  const discardedMessageIds = new Map<string, Set<string>>()
   const detailErrors = ref<Record<string, string>>({})
   let activeSelectionGeneration = 0
   const todoGenerations = new Map<string, number>()
@@ -241,12 +239,11 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   const timeline = new ChatTimelineController({
-    load: listHarnessParts,
+    load: (sessionId) => listHarnessParts(sessionId),
     loadDetail: getHarnessPart,
     read: (sessionId) => messagesBySession.value[sessionId],
     write: publishTranscript,
     sessions: () => sessions.value,
-    discardMessage: isDiscardedMessage,
     retainedSessionIds: retainedTranscriptSessionIds,
     forget: forgetTranscript,
     unwrap: toRaw,
@@ -278,7 +275,6 @@ export const useHarnessStore = defineStore('harness', () => {
 
   function forgetTranscript(sessionId: string): void {
     timeline.forget(sessionId)
-    discardedMessageIds.delete(sessionId)
     invalidatePartFetches(sessionId)
     todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
     todoFetches.delete(sessionId)
@@ -311,7 +307,6 @@ export const useHarnessStore = defineStore('harness', () => {
       todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
     }
     timeline.clear()
-    discardedMessageIds.clear()
     todoFetches.clear()
     detailErrors.value = {}
     messagesBySession.value = {}
@@ -1036,9 +1031,8 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   /**
-   * Replace the edited suffix immediately, then reconcile the fresh server ids.
-   * Normal busy merges preserve missing rows, so explicitly retire the deleted
-   * suffix and invalidate Stop's in-flight fetches before admitting the new run.
+   * Rerun from an edited prompt. The shared timeline shows the new text at once
+   * and keeps the replaced turns out; a rejected edit restores them.
    */
   async function editMessage(
     sessionId: string,
@@ -1054,47 +1048,24 @@ export const useHarnessStore = defineStore('harness', () => {
     if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     await trackUserTurn(sessionId, async () => {
-      const previous = messagesBySession.value[sessionId]
-      const cutoff = previous?.findIndex((message) => message.id === messageId) ?? -1
-      const previousDiscarded = discardedMessageIds.get(sessionId)
-      if (previous && cutoff !== -1) {
-        discardedMessageIds.set(
-          sessionId,
-          new Set([
-            ...(previousDiscarded ?? []),
-            ...previous.slice(cutoff).map((message) => message.id),
-          ]),
-        )
-        messagesBySession.value[sessionId] = [
-          ...previous.slice(0, cutoff),
-          {
-            ...previous[cutoff]!,
-            id: `local-edit-${messageId}`,
-            content: prompt.trim(),
-            skill_ids: options.skillIds ?? previous[cutoff]!.skill_ids,
-          },
-        ]
-      }
-      invalidatePartFetches(sessionId)
-      invalidatePartDetails(sessionId)
       try {
-        const session = await editHarnessMessage(sessionId, messageId, {
-          prompt,
-          mode: options.mode,
-          model: options.model,
-          skill_ids: options.skillIds,
-          reasoning_effort: options.reasoningEffort,
-        })
+        const session = await timeline.edit(
+          sessionId,
+          messageId,
+          { content: prompt, skillIds: options.skillIds },
+          () =>
+            editHarnessMessage(sessionId, messageId, {
+              prompt,
+              mode: options.mode,
+              model: options.model,
+              skill_ids: options.skillIds,
+              reasoning_effort: options.reasoningEffort,
+            }),
+        )
         upsertSession(session)
-        // A refresh started during admission may still contain the old suffix.
-        invalidatePartFetches(sessionId)
         await fetchParts(sessionId)
         recordComposerModelUsage(session, options.model ?? '', options.reasoningEffort ?? '')
       } catch (e: unknown) {
-        invalidatePartFetches(sessionId)
-        if (previous && cutoff !== -1) messagesBySession.value[sessionId] = previous
-        if (previousDiscarded) discardedMessageIds.set(sessionId, previousDiscarded)
-        else discardedMessageIds.delete(sessionId)
         if (e instanceof ApiRequestError && e.status === 409) {
           notifications.error('Agent is running — stop it before editing this message.', e.message)
           return
@@ -1113,8 +1084,9 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
+  /** A turn an edit replaced; its late events must not bring it back. */
   function isDiscardedMessage(sessionId: string, messageId?: string): boolean {
-    return Boolean(messageId && discardedMessageIds.get(sessionId)?.has(messageId))
+    return timeline.isDiscarded(sessionId, messageId)
   }
 
   // --- Real-time reducers (called from socket handlers) ---

@@ -189,11 +189,9 @@ class StreamValidationTests(unittest.IsolatedAsyncioTestCase):
         await service.streams.stream_start_tcp(ws_id, "t1", "localhost", 8080)
         spawned = runtime.spawned[0]
         cmd = spawned["command"]
-        self.assertEqual(cmd[0], "python3")
-        self.assertEqual(cmd[1], "-u")
-        self.assertEqual(cmd[2], "-c")
-        self.assertEqual(cmd[3], TCP_RELAY_CODE)
-        self.assertEqual(cmd[4:], ["--", "localhost", "8080", "0", "localhost"])
+        self.assertEqual(cmd[:4], ["/usr/bin/python3", "-I", "-u", "-c"])
+        self.assertEqual(cmd[4], TCP_RELAY_CODE)
+        self.assertEqual(cmd[5:], ["--", "localhost", "8080", "0", "localhost"])
         # Relay resolves DNS inside the workspace: constant contains
         # getaddrinfo and TLS default verification.
         self.assertIn("getaddrinfo", TCP_RELAY_CODE)
@@ -205,7 +203,37 @@ class StreamValidationTests(unittest.IsolatedAsyncioTestCase):
             ws_id, "t2", "example.com", 443, tls=True, server_hostname="sni.test"
         )
         cmd = runtime.spawned[0]["command"]
-        self.assertEqual(cmd[4:], ["--", "example.com", "443", "1", "sni.test"])
+        self.assertEqual(cmd[5:], ["--", "example.com", "443", "1", "sni.test"])
+
+    def test_tcp_relay_ignores_modules_in_its_working_directory(self) -> None:
+        """A repository's socket.py or ssl.py cannot replace the relay's modules."""
+        import shutil
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        from src.services.sessions.streams import TCP_RELAY_ARGV
+
+        python = shutil.which("python3")
+        assert python is not None
+        with tempfile.TemporaryDirectory() as workspace:
+            marker = Path(workspace) / "hijacked"
+            for module in ("socket", "ssl", "select"):
+                (Path(workspace) / f"{module}.py").write_text(
+                    f"open({str(marker)!r}, 'a').write({module!r})\n"
+                )
+            argv = [python, *TCP_RELAY_ARGV[1:], "127.0.0.1", "1", "0", ""]
+            isolated = subprocess.run(
+                argv, cwd=workspace, capture_output=True, timeout=20, check=False
+            )
+            self.assertFalse(marker.exists(), isolated.stderr)
+            self.assertIn(b"relay-error: connect failed", isolated.stderr)
+            # Control: without -I the same layout would be imported.
+            argv.remove("-I")
+            subprocess.run(
+                argv, cwd=workspace, capture_output=True, timeout=20, check=False
+            )
+            self.assertTrue(marker.exists())
 
     async def test_tcp_python3_missing_clear_error(self) -> None:
         service, runtime, ws_id = _service()

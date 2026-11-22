@@ -28,9 +28,14 @@ class EngineCatalogService:
     def list_engines(
         self, organization_id: uuid.UUID, user_id: int
     ) -> list[dict[str, Any]]:
-        """Keep connection state scoped to the active organization and user."""
-        selected = ProviderAccountService().selected_accounts(organization_id, user_id)
-        connected = {p for p, account in selected.items() if account.credential_id}
+        """Workspace engines count as connected only with a personal account."""
+        accounts = ProviderAccountService()
+        selected = accounts.selected_accounts(organization_id, user_id)
+        connected = {
+            p
+            for p, account in selected.items()
+            if account.credential_id and accounts.usable_in_workspace(account, user_id)
+        }
         return list_engines(
             claude_connected="claude-agent" in connected,
             codex_connected=bool(connected.intersection(CODEX_PROVIDERS)),
@@ -65,10 +70,13 @@ class EngineCatalogService:
             scoped_ids = {p: a for p, a in account_ids.items() if p in CODEX_PROVIDERS}
         # Authorize before cache access. Reuse normalized OpenRouter data, but
         # never the native static ChatGPT capabilities or unrelated providers.
-        for provider, account_id in scoped_ids.items():
+        # Codex runs in the workspace: shared accounts offer no models here.
+        for provider, account_id in list(scoped_ids.items()):
             account = accounts.get_account(organization_id, user_id, account_id)
             if account.provider != provider:
                 raise ValueError("Provider account does not match Codex provider")
+            if not accounts.usable_in_workspace(account, user_id):
+                del scoped_ids[provider]
         rows = chatgpt_models() if "chatgpt" in scoped_ids else []
         if "openrouter" in scoped_ids:
             router = list_merged_provider_models(

@@ -250,3 +250,45 @@ def test_material_credential_ids_exclude_server_side_types(workspace):
 def test_resolved_material_reflects_what_the_runner_writes(resolved, expected):
     """Server-side OAuth grants alone leave nothing to write into a workspace."""
     assert resolved.has_material is expected
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_create_workspace_announces_the_new_workspace_to_its_owner(
+    runner, user, frontend
+):
+    """Other clients of the owner list a new workspace without a subscription."""
+    service = RunnerService(sio_server=AsyncMock())
+    artifact = ImageInstance.objects.create(
+        is_legacy=True,
+        runner=runner,
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        created_by=user,
+        runner_ref="captured-image",
+        name="Captured image",
+        status=ImageInstance.Status.READY,
+    )
+
+    workspace, task = await service.workspace_lifecycle.create_workspace(
+        name="Announced workspace",
+        repos=[],
+        image_artifact_id=artifact.id,
+        user=user,
+        organization_id=runner.organization_id,
+    )
+
+    calls = [
+        call
+        for call in frontend.await_args_list
+        if call.args[0] == "workspace:status_changed"
+    ]
+    assert len(calls) == 1
+    event, payload, workspace_id = calls[0].args
+    assert workspace_id == str(workspace.id)
+    assert payload == {
+        "workspace_id": str(workspace.id),
+        "status": "creating",
+        "credentials_present": False,
+        "task_id": str(task.id),
+    }
+    assert calls[0].kwargs == {"user_id": str(user.id)}

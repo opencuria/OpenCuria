@@ -33,7 +33,7 @@ from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.file_locks import get_lock
 from apps.harness.tools.files import ReadTool
 from apps.harness.tools.shell import GREP_MAX_LINE_LENGTH
-from apps.harness.tools.webfetch import WebfetchTool, is_blocked_url
+from apps.harness.tools.webfetch import WebfetchTool
 
 
 class ScriptProvider(ProviderAdapter):
@@ -443,33 +443,13 @@ async def test_composer_environment_has_platform_and_plan_reminder() -> None:
     "url",
     [
         "https://localhost/x",
-        "https://foo.localhost/x",
         "https://127.0.0.1/x",
         "https://10.1.2.3/x",
         "https://169.254.169.254/latest",
-        "https://metadata.google.internal/x",
     ],
 )
-def test_ssrf_guard_blocks_private_hosts(url: str) -> None:
-    """SSRF guard blocks loopback/private/metadata hosts."""
-    assert is_blocked_url(url) is True
-
-
-async def test_ssrf_guard_blocks_tool_with_error() -> None:
-    """WebfetchTool rejects localhost without network (failure path)."""
-    with pytest.raises(ToolError, match="[Bb]locked|[Pp]rivate"):
-        await WebfetchTool().execute(
-            {"url": "https://localhost/secret"}, _ctx(FakeAccessor(files={}))
-        )
-
-
-async def test_ssrf_guard_allows_public_hostname() -> None:
-    """Public hostnames pass validation (permission/auth happy path)."""
-    import socket as _socket
-
-    real = _socket.gethostbyname
-    _socket.gethostbyname = lambda _host: "93.184.216.34"  # type: ignore[assignment]
-    try:
-        assert is_blocked_url("https://example.com/x") is False
-    finally:
-        _socket.gethostbyname = real
+@pytest.mark.usefixtures("fake_dns")
+async def test_ssrf_guard_blocks_private_hosts(url: str) -> None:
+    """WebfetchTool rejects loopback/private/metadata targets (failure path)."""
+    with pytest.raises(ToolError, match="Blocked private/internal URL"):
+        await WebfetchTool().execute({"url": url}, _ctx(FakeAccessor(files={})))

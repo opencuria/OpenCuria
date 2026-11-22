@@ -2,6 +2,11 @@
 
 The account repository owns transactions, admission fencing and commit hooks;
 this service owns visibility, credential policy, selection and revocation.
+
+Workspace invariant: the Claude Agent and Codex engines run inside the member's
+workspace, where every process can read their credentials. Only the caller's own
+personal accounts may enter a workspace; organization-shared secrets stay on the
+server and serve the OpenCuria engine only.
 """
 
 from __future__ import annotations
@@ -42,6 +47,19 @@ CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
     "openai-compatible": ("base_url", "models"),
     CLAUDE_AGENT: ("auth_type",),
 }
+#: Providers whose accounts only ever run inside a workspace; never shareable.
+WORKSPACE_ONLY_PROVIDERS = frozenset({CLAUDE_AGENT})
+WORKSPACE_ACCOUNT_REQUIRED = (
+    "Claude Agent and Codex run inside your workspace, so they need a personal "
+    "account. Shared organization accounts only work with the OpenCuria engine."
+)
+
+
+class WorkspaceAccountRequiredError(AuthenticationError):
+    """A workspace engine was asked to use a shared or foreign account."""
+
+    def __init__(self) -> None:
+        super().__init__(WORKSPACE_ACCOUNT_REQUIRED)
 
 
 def _normalize_openai_compatible_models(models: object) -> list[str]:
@@ -256,6 +274,11 @@ class ProviderAccountService:
                 raise NotFoundError("ProviderAccount", str(account_id))
             if requested_shared and not is_admin:
                 raise AuthenticationError("Only org admins can share provider accounts")
+            if requested_shared and provider in WORKSPACE_ONLY_PROVIDERS:
+                raise ValueError(
+                    "Claude Agent accounts are personal: the token runs inside "
+                    "the member's workspace"
+                )
             user_owner_id = None if requested_shared else user_id
             old_user_id = existing.user_id if existing is not None else None
             old_config = dict(existing.config or {}) if existing else {}
@@ -584,6 +607,30 @@ class ProviderAccountService:
             if account is not None:
                 selected[provider] = account
         return selected
+
+    @staticmethod
+    def usable_in_workspace(account: ProviderConnection | None, user_id: int) -> bool:
+        """Return whether *account*'s secret may enter *user_id*'s workspace."""
+        return (
+            account is not None
+            and account.user_id is not None
+            and account.user_id == user_id
+        )
+
+    @classmethod
+    def require_workspace_account(
+        cls, account: ProviderConnection | None, user_id: int
+    ) -> None:
+        """Reject accounts other than the caller's own personal ones."""
+        if not cls.usable_in_workspace(account, user_id):
+            raise WorkspaceAccountRequiredError()
+
+    def get_workspace_credentials(
+        self, account: ProviderConnection, user_id: int
+    ) -> dict[str, Any]:
+        """Read a secret that will be placed inside *user_id*'s workspace."""
+        self.require_workspace_account(account, user_id)
+        return self.get_credentials(account)
 
     def get_credentials(self, account: ProviderConnection) -> dict[str, Any]:
         """Read a secret only after validating the live account binding."""

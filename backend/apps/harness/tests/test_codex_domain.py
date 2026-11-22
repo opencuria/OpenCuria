@@ -309,7 +309,7 @@ def test_schedule_uses_codex_validation_and_never_persists_account(codex_setup):
     )
     assert fields == ("codex", DEFAULT_CODEX_MODEL, "ultra", [])
     data.accounts.select_account(data.org, data.owner.id, "chatgpt", None)
-    with pytest.raises(ValueError, match="Connect your selected"):
+    with pytest.raises(ValueError, match="Select a personal"):
         service._validate_engine_config(
             organization_id=data.org,
             owner_id=data.owner.id,

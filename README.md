@@ -40,9 +40,16 @@ The installer asks what the host should run:
 
 Runners need an x86_64 host with KVM running Debian 12+ or Ubuntu 22.04+. For HTTPS,
 point a domain at the server and open ports 80 and 443; without a domain the web
-app is served over plain HTTP on the server IP. Run the command again to update.
-Unattended: `… | sudo bash -s -- runner --url URL --token TOKEN` (`--help` lists
-all options).
+app is served over plain HTTP on the server IP.
+
+On a host that already runs OpenCuria, the same command offers to **update** what is
+installed (configuration and data are kept) or to **uninstall** OpenCuria completely,
+including all workspaces, the database and its files; Docker, QEMU and libvirt stay
+installed. Unattended: `… | sudo bash -s -- runner --url URL --token TOKEN`,
+`… -s -- update` or `… -s -- uninstall --yes` (`--help` lists all options).
+`… -s -- --dev` installs or updates to the latest build of the `dev` branch; updates
+stay on it until `--version latest`. Going back to an older version is unsupported
+once dev has migrated the database.
 
 The control plane lives in `/opt/opencuria` (`compose.yml`, `.env`; back up the
 `.env`, it holds the database password and encryption key), the runner in
@@ -61,7 +68,12 @@ files stream through `/api/v1/workspace-files/`: allow request bodies of 500 MB 
 No image is built during installation. Once the runner is online, an admin builds
 an image definition on it under **Settings → Image Definitions**: the bundled
 `Ubuntu 24.04`, `Windows 11` or a custom one. Workspaces can be created once the
-build is ready. Windows workspaces follow the license model chosen under
+build is ready. Agents answer once a model provider is connected under
+**Settings → Provider & Models** (an organization-shared account serves every
+member in the OpenCuria engine; Claude Agent and Codex run inside the workspace and
+use personal accounts only, so shared secrets never leave the server); the home
+screen of the web and mobile app walks through these steps.
+Windows workspaces follow the license model chosen under
 **Settings → Windows** (product keys, per-user licenses with KMS, or explicitly
 without license).
 

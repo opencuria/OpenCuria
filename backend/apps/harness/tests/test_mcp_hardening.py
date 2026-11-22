@@ -52,9 +52,9 @@ from apps.harness.mcp_client.stdio import (
 )
 from apps.harness.mcp_client.workspace_http import (
     WorkspaceNetworkStream,
-    _validate_header_items,
     build_workspace_http_client,
     parse_mcp_http_url,
+    validate_header_items,
 )
 from apps.harness.tools.base import ToolError
 from apps.harness.tools.invocation import (
@@ -632,10 +632,10 @@ def test_parse_mcp_http_url_rejects_userinfo_fragment_bad_host():
 
 def test_header_validation_rejects_crlf():
     with pytest.raises(ValueError):
-        _validate_header_items({"X-Ok": "bad\r\ninjected: 1"})
+        validate_header_items({"X-Ok": "bad\r\ninjected: 1"})
     with pytest.raises(ValueError):
-        _validate_header_items({"Bad\nName": "x"})
-    assert _validate_header_items({"X-Ok": "fine"}) == {"X-Ok": "fine"}
+        validate_header_items({"Bad\nName": "x"})
+    assert validate_header_items({"X-Ok": "fine"}) == {"X-Ok": "fine"}
 
 
 @pytest.mark.asyncio
@@ -966,18 +966,16 @@ async def test_stdio_invalid_utf8_closes_and_logs_no_payload(caplog):
 
 
 @pytest.mark.asyncio
-async def test_sse_oauth_factory_rejects_sdk_authorization_override(monkeypatch):
+async def test_sse_oauth_factory_rejects_sdk_authorization_override(
+    monkeypatch, fake_dns
+):
     connection = _connection(transport="sse", url="https://mcp.example/mcp")
     connection.oauth_credential_id = uuid.uuid4()
-
-    def build_client(accessor, url, **kwargs):
-        return (object(), None)
 
     def sse_client(*args, **kwargs):
         factory = kwargs["httpx_client_factory"]
         return factory(headers={"Authorization": "Basic attacker"})
 
-    monkeypatch.setattr(conn_module, "build_workspace_http_client", build_client)
     from mcp.client import sse
 
     monkeypatch.setattr(sse, "sse_client", sse_client)

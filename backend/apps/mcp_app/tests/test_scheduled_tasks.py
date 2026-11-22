@@ -191,7 +191,7 @@ async def test_codex_task_rejects_unsupported_effort_and_unavailable_account(
         "scheduled_task_create",
         **{**settings, "reasoning_effort": "high"},
     )
-    assert "Connect your selected ChatGPT or OpenRouter account" in denied
+    assert "Select a personal ChatGPT or OpenRouter account" in denied
     assert await sync_to_async(ScheduledTask.objects.count)() == 0
 
 

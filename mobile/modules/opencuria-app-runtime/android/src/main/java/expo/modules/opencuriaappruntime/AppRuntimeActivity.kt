@@ -93,7 +93,7 @@ class AppRuntimeActivity :
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(null)
     launch = try {
-      AppLaunch.parse(File(intent.getStringExtra(EXTRA_LAUNCH_FILE) ?: "").readText())
+      AppLaunch.parse(this, File(intent.getStringExtra(EXTRA_LAUNCH_FILE) ?: "").readText())
     } catch (e: Exception) {
       Log.e(TAG, "Invalid app launch", e)
       Toast.makeText(this, e.message ?: "The app cannot be opened.", Toast.LENGTH_LONG).show()
@@ -107,6 +107,7 @@ class AppRuntimeActivity :
     // theme keeps the system bars transparent.
     WindowCompat.setDecorFitsSystemWindows(window, false)
     sandbox = AppSandbox(applicationContext, launch)
+    AppFileAccess.open(sandbox.files)
     triggers = AppMenuTriggers(this)
     container = FrameLayout(this).apply { setBackgroundColor(backgroundColor()) }
     content = FrameLayout(this)
@@ -338,6 +339,7 @@ class AppRuntimeActivity :
       stop()
       AppGateway.close(launch.gateway)
     }
+    if (::sandbox.isInitialized) AppFileAccess.close(sandbox.files)
     if (current?.get() === this) current = null
     super.onDestroy()
   }

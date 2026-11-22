@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 import tempfile
 import unittest
@@ -56,7 +57,7 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     iso, self.runtime._cloud_init_iso_path(self.workspace_id)
                 )
-                self.assertEqual(iso.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(iso.stat().st_mode & 0o777, 0o600)
                 self.assertIn(f"{ip}/30", seeds[-1][1])
                 self.assertIn(f"via: {gateway}", seeds[-1][1])
                 self.assertIn(
@@ -189,7 +190,7 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("via: 10.100.0.1", text)
                 else:
                     self.assertIn("ssh-ed25519 test-runner-key", text)
-            self.assertEqual(iso.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(iso.stat().st_mode & 0o777, 0o600)
             work_dir = self.runtime._disk_dir / f"{self.workspace_id}-cloud-init"
             self.assertFalse(work_dir.exists())
         self.assertNotEqual(identities[0], identities[1])
@@ -199,30 +200,36 @@ class QemuRuntimeHostDirectoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime = object.__new__(QemuRuntime)
 
-    def test_ensure_host_directory_creates_world_traversable_path(self) -> None:
+    def test_ensure_host_directory_creates_traverse_only_path(self) -> None:
+        """QEMU may traverse to known images; other users cannot list them."""
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "nested" / "dir"
-
-            self.runtime._ensure_host_directory(target)
+            previous = os.umask(0o077)
+            try:
+                self.runtime._ensure_host_directory(target)
+            finally:
+                os.umask(previous)
 
             self.assertTrue(target.is_dir())
-            self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o711)
+            self.assertEqual(target.parent.stat().st_mode & 0o777, 0o711)
 
     def test_ensure_host_directory_wraps_permission_error_with_fix_hint(self) -> None:
-        target = Path("/var/lib/opencuria/base-images")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "base-images"
 
-        with patch.object(
-            Path,
-            "mkdir",
-            side_effect=PermissionError("permission denied"),
-        ), self.assertRaises(RuntimeError) as ctx:
-            self.runtime._ensure_host_directory(
-                target,
-                writable_hint="sudo install -d -o $USER -g $USER -m 755 '/var/lib/opencuria/base-images'",
-            )
+            with patch.object(
+                Path,
+                "mkdir",
+                side_effect=PermissionError("permission denied"),
+            ), self.assertRaises(RuntimeError) as ctx:
+                self.runtime._ensure_host_directory(
+                    target,
+                    writable_hint=f"sudo install -d -o $USER -g $USER -m 711 '{target}'",
+                )
 
         self.assertIn(str(target), str(ctx.exception))
-        self.assertIn("sudo install -d -o $USER -g $USER -m 755", str(ctx.exception))
+        self.assertIn("sudo install -d -o $USER -g $USER -m 711", str(ctx.exception))
 
 
 class QemuRuntimeBuildBaseImageTests(unittest.TestCase):

@@ -153,6 +153,72 @@ describe("busy snapshot reconciliation", () => {
     ]);
     expect(merged[1]?.parts).toEqual(live.parts);
   });
+
+  it("drops the suffix an edit deleted once the snapshot holds the new turn", () => {
+    const kept = message([], {
+      id: "user-0",
+      role: "user",
+      content: "Keep",
+      position: 0,
+    });
+    const edited = message([], {
+      id: "user-1",
+      role: "user",
+      content: "Fix VULN-004b",
+      position: 1,
+    });
+    const aborted = message([part("old-text", { state: "completed" })], {
+      id: "assistant-1",
+      content: "",
+      finish: "aborted",
+      completed_at: "2026-11-22T10:29:00Z",
+      position: 2,
+    });
+    // The busy event already opened the new turn before its prompt is known.
+    const shell = message([part("new-text", { output: "Thinking" })], {
+      id: "assistant-2",
+      content: "Thinking",
+    });
+    const snapshot = [
+      structuredClone(kept),
+      message([], {
+        id: "user-2",
+        role: "user",
+        content: "Fix VULN-004",
+        position: 3,
+      }),
+      message([], { id: "assistant-2", position: 4 }),
+    ];
+
+    const merged = mergeBusyFetchedMessages(
+      [kept, edited, aborted, shell],
+      snapshot,
+    );
+
+    expect(merged.map((entry) => entry.id)).toEqual([
+      "user-0",
+      "user-2",
+      "assistant-2",
+    ]);
+    expect(merged[2]?.content).toBe("Thinking");
+  });
+
+  it("keeps known rows when the snapshot carries no positions", () => {
+    const older = message([], {
+      id: "assistant-0",
+      content: "Older",
+      position: 0,
+    });
+    const merged = mergeBusyFetchedMessages(
+      [older],
+      [message([], { id: "assistant-1" })],
+    );
+
+    expect(merged.map((entry) => entry.id)).toEqual([
+      "assistant-0",
+      "assistant-1",
+    ]);
+  });
 });
 
 describe("timeline ordering and settlement", () => {

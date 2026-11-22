@@ -1272,12 +1272,17 @@ async def test_chatgpt_runtime_preflight_refresh_exact_account_and_protocol_priv
             },
         }
         assert calls == [
-            (session.organization_id, session.created_by_id, account.id, {}),
             (
                 session.organization_id,
                 session.created_by_id,
                 account.id,
-                {"rejected_access_token": "preflight-secret"},
+                {"for_workspace": True},
+            ),
+            (
+                session.organization_id,
+                session.created_by_id,
+                account.id,
+                {"rejected_access_token": "preflight-secret", "for_workspace": True},
             ),
         ]
         assert uses == [("captured-turn", str(account.id))] * 2

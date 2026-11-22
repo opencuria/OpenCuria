@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
+from types import SimpleNamespace
 
 from django.db import IntegrityError, transaction
 from django.db.models import (
@@ -938,6 +939,64 @@ class HarnessMessageRepository:
         )
 
     @staticmethod
+    def timeline_window(
+        session_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        before: int | None = None,
+        since: int | None = None,
+    ) -> tuple[list[SimpleNamespace], int]:
+        """Timeline rows in order, plus how many older messages exist.
+
+        Rows are plain namespaces: a long chat has thousands of them and model
+        instances cost several times more to build. *since* (inclusive) and
+        *before* (exclusive) bound the message position; *limit* keeps the
+        newest rows of that range.
+        """
+        query = HarnessMessage.objects.filter(session_id=session_id)
+        if since is not None:
+            query = query.filter(position__gte=since)
+        if before is not None:
+            query = query.filter(position__lt=before)
+        query = query.annotate(
+            timeline_content=Case(
+                When(role=HarnessMessageRole.USER, then=F("content")),
+                default=Value(""),
+                output_field=TextField(),
+            )
+        ).values(
+            "id",
+            "session_id",
+            "role",
+            "model",
+            "reasoning_effort",
+            "cost",
+            "tokens",
+            "finish",
+            "error",
+            "skill_ids",
+            "harness_id",
+            "notice_dismissed_at",
+            "position",
+            "created_at",
+            "completed_at",
+            "timeline_content",
+        )
+        if limit is None:
+            rows = list(query.order_by("position", "created_at", "id"))
+        else:
+            rows = list(query.order_by("-position", "-created_at", "-id")[:limit])
+            rows.reverse()
+        older = HarnessMessage.objects.filter(session_id=session_id)
+        if rows:
+            older = older.filter(position__lt=rows[0]["position"])
+        elif before is not None:
+            older = older.filter(position__lt=before)
+        elif since is not None:
+            older = older.filter(position__lt=since)
+        return [SimpleNamespace(**row) for row in rows], older.count()
+
+    @staticmethod
     def get_by_id(message_id: uuid.UUID) -> HarnessMessage | None:
         """Fetch a single message by ID."""
         return HarnessMessage.objects.filter(id=message_id).first()
@@ -1435,6 +1494,54 @@ class HarnessPartRepository:
         # Large tool/patch/agent/reasoning bodies are deferred; text output is
         # projected conditionally in the same query for ordinary rendering.
         return rows
+
+    @staticmethod
+    def timeline_rows(
+        session_id: uuid.UUID, positions: tuple[int, int] | None = None
+    ) -> list[SimpleNamespace]:
+        """Lightweight timeline parts of a session or of a message range.
+
+        *positions* is an inclusive ``(first, last)`` message-position range.
+        Same projection as :meth:`list_timeline_for_session`, as plain
+        namespaces instead of deferred model instances.
+        """
+        query = HarnessPart.objects.filter(message__session_id=session_id)
+        if positions is not None:
+            query = query.filter(
+                message__position__gte=positions[0],
+                message__position__lte=positions[1],
+            )
+        rows = (
+            query.annotate(
+                message_position=F("message__position"),
+                timeline_output=Case(
+                    When(type__in=TIMELINE_TEXT_PART_TYPES, then=F("output")),
+                    default=Value(""),
+                    output_field=TextField(),
+                ),
+            )
+            .values(
+                "id",
+                "message_id",
+                "type",
+                "state",
+                "call_id",
+                "title",
+                "position",
+                "display",
+                "message_position",
+                "timeline_output",
+            )
+            .order_by(
+                "message__position",
+                "message__created_at",
+                "message__id",
+                "position",
+                "created_at",
+                "id",
+            )
+        )
+        return [SimpleNamespace(**row) for row in rows]
 
     @staticmethod
     def get_for_session(

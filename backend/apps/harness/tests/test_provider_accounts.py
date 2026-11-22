@@ -193,15 +193,10 @@ def test_delete_soft_tombstones_account_and_clears_selection(account_members):
     account = service.save_account(
         organization_id=org.id,
         user=admin,
-        provider="claude-agent",
-        payload={
-            "shared": True,
-            "label": "Claude API",
-            "auth_type": "api_token",
-            "token": "claude-secret",
-        },
+        provider="openrouter",
+        payload={"shared": True, "label": "Router", "api_key": "router-secret"},
     )
-    service.select_account(org.id, member.id, "claude-agent", account.id)
+    service.select_account(org.id, member.id, "openrouter", account.id)
     credential_id = account.credential_id
 
     service.delete_account(org.id, admin.id, account.id)
@@ -213,7 +208,7 @@ def test_delete_soft_tombstones_account_and_clears_selection(account_members):
     ).exists()
     assert (
         ProviderSelection.objects.get(
-            organization_id=org.id, user=member, provider="claude-agent"
+            organization_id=org.id, user=member, provider="openrouter"
         ).account_id
         is None
     )

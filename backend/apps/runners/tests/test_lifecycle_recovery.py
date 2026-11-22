@@ -218,7 +218,9 @@ def test_resume_envelope_applies_exact_credential_acknowledgement(
     )
     forwarded = []
     monkeypatch.setattr(
-        service.frontend_bus, 'forward_to_frontend', lambda *args: forwarded.append(args)
+        service.frontend_bus,
+        'forward_to_frontend',
+        lambda *args, **_kwargs: forwarded.append(args),
     )
     for mismatch in [
         {"task_id": str(uuid.uuid4())},

@@ -15,6 +15,7 @@ import pytest
 
 from apps.credentials import oauth_http
 from apps.credentials.oauth_errors import OAuthError
+from common import public_egress
 
 
 @pytest.fixture
@@ -116,7 +117,7 @@ def test_dns_rejects_mixed_public_and_private_answers(
     monkeypatch: pytest.MonkeyPatch, private: str
 ) -> None:
     monkeypatch.setattr(
-        oauth_http.socket,
+        public_egress.socket,
         "getaddrinfo",
         lambda *args, **kwargs: [
             (2, 1, 6, "", (address, 443)) for address in ("93.184.216.34", private)

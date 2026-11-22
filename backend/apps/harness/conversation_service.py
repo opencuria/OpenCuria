@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from functools import partial
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
@@ -76,6 +77,33 @@ class ConversationService:
         self.get_session(session_id)
         return self.parts.list_timeline_for_session(session_id)
 
+    def read_timeline(
+        self,
+        session_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        before: int | None = None,
+        since: int | None = None,
+    ) -> tuple[list[SimpleNamespace], list[SimpleNamespace], int]:
+        """Return message rows, their lightweight parts and the older-row count.
+
+        The caller has resolved the session. *limit* keeps the newest messages
+        of the range from *since* (inclusive) up to *before* (exclusive).
+        """
+        messages, older_count = self.messages.timeline_window(
+            session_id, limit=limit, before=before, since=since
+        )
+        if not messages:
+            return [], [], older_count
+        windowed = limit is not None or before is not None or since is not None
+        # Positions are unique per session and the window is contiguous, so a
+        # position range selects exactly its parts without a huge IN list.
+        parts = self.parts.timeline_rows(
+            session_id,
+            (messages[0].position, messages[-1].position) if windowed else None,
+        )
+        return messages, parts, older_count
+
     def get_part(self, session_id: uuid.UUID, part_id: uuid.UUID) -> HarnessPart:
         """Return a full part only when it belongs to the supplied session."""
         self.get_session(session_id)
@@ -89,10 +117,29 @@ class ConversationService:
         self.get_session(session_id)
         return self.messages.list_timeline_for_session(session_id)
 
+    async def discard_empty_chat(
+        self,
+        session_id: uuid.UUID,
+        delete_session: Callable[[uuid.UUID], Awaitable[None]],
+    ) -> None:
+        """Delete a just-created chat whose first run never started.
+
+        Best effort: a chat that already holds messages is kept, and a failed
+        cleanup only logs, so the caller can report the original error.
+        """
+        try:
+            messages = await sync_to_async(self.list_timeline_messages)(session_id)
+            if not messages:
+                await delete_session(session_id)
+        except Exception:
+            log.warning("empty_chat_cleanup_failed", session_id=str(session_id))
+
     def list_todos(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
         """Return persisted todos of a session as plain dicts."""
-        session = self.get_session(session_id)
-        rows = self.todos.list_for_session(session.id)
+        return self.todo_rows(self.get_session(session_id).id)
+
+    def todo_rows(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Todos of an already resolved session as plain dicts."""
         return [
             {
                 "id": str(row.id),
@@ -101,7 +148,7 @@ class ConversationService:
                 "priority": row.priority,
                 "order": row.order,
             }
-            for row in rows
+            for row in self.todos.list_for_session(session_id)
         ]
 
     async def fork_session(
