@@ -30,14 +30,26 @@ mkdir -p "${STUBS}" "${BIN}"
 
 # -- source archive ---------------------------------------------------------------
 
+# The installer re-runs the install.sh of the archive, here the one under test.
 mkdir -p "${WORK}/src/OpenCuria-main/runner/systemd"
-cp "${REPO_DIR}/compose.yml" "${REPO_DIR}/Caddyfile" "${WORK}/src/OpenCuria-main/"
+cp "${INSTALLER}" "${REPO_DIR}/compose.yml" "${REPO_DIR}/Caddyfile" "${WORK}/src/OpenCuria-main/"
 cp "${REPO_DIR}/runner/.env.example" "${REPO_DIR}/runner/requirements.txt" \
   "${WORK}/src/OpenCuria-main/runner/"
 cp "${REPO_DIR}/runner/systemd/opencuria-runner.service" \
   "${WORK}/src/OpenCuria-main/runner/systemd/"
 tar -czf "${WORK}/source.tar.gz" -C "${WORK}/src" OpenCuria-main
 export SOURCE_TGZ="${WORK}/source.tar.gz"
+
+# Another version whose installer only reports how it was called (FAKE/alt_source).
+mkdir -p "${WORK}/alt/OpenCuria-main"
+cp -r "${WORK}/src/OpenCuria-main/runner" "${REPO_DIR}/compose.yml" "${WORK}/alt/OpenCuria-main/"
+cat >"${WORK}/alt/OpenCuria-main/install.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'archive installer: %s\n' "$*"
+printf 'archive source: %s\n' "${OPENCURIA_INSTALLER_SOURCE}"
+EOF
+tar -czf "${WORK}/alt.tar.gz" -C "${WORK}/alt" OpenCuria-main
+export ALT_SOURCE_TGZ="${WORK}/alt.tar.gz"
 
 # -- stubs ------------------------------------------------------------------------
 
@@ -324,7 +336,7 @@ case "${url}" in
     [[ ! -f "${FAKE}/backend_down" ]] || { echo "curl: (7) Failed to connect" >&2; exit 7; } ;;
   */api/v1/auth/login/) cat >/dev/null ;;
   https://get.docker.com) echo "ln -sf '${STUBS}/docker' '${BIN}/docker'" ;;
-  *) cat "${SOURCE_TGZ}" ;;
+  *) if [[ -f "${FAKE}/alt_source" ]]; then cat "${ALT_SOURCE_TGZ}"; else cat "${SOURCE_TGZ}"; fi ;;
 esac
 EOF
 rm -f "${BIN}/docker" # installed per test
@@ -505,6 +517,7 @@ test_menu_uninstall_removes_everything() {
   expect_no_out "delete it under Settings > Runners" # the control plane is gone too
   expect_uninstalled
   expect_called "undefine opencuria-workspace-1111 --managed-save"
+  expect_not_called ".tar.gz"
 }
 
 test_menu_uninstall_needs_exact_confirmation() {
@@ -718,6 +731,58 @@ test_update_pull_failure_is_reported() {
   run update
   expect_status 1
   expect_out "Could not pull the OpenCuria images (latest)"
+}
+
+test_dev_install_and_updates_stay_on_dev() {
+  run full --dev --domain opencuria.example.com --admin-email admin@example.com \
+    --admin-password correct-horse -y
+  expect_status 0
+  expect_called "archive/dev.tar.gz"
+  [[ "$(env_of /opt/opencuria/.env OPENCURIA_TAG)" == dev ]] || fail "control plane not on dev"
+  [[ "$(env_of /opt/opencuria/runner/.env OPENCURIA_TAG)" == dev ]] || fail "runner not on dev"
+  : >"${FAKE}/calls"
+  run update
+  expect_status 0
+  expect_out "OpenCuria is up to date (dev)."
+  expect_called "archive/dev.tar.gz"
+  expect_not_called "archive/main.tar.gz"
+  [[ "$(env_of /opt/opencuria/.env OPENCURIA_TAG)" == dev ]] || fail "update left dev"
+  run_tty '1\n\n'
+  expect_status 0
+  expect_out "1) Update to the latest dev build"
+  expect_no_out "Leaving dev"
+}
+
+test_runner_only_stays_on_dev() {
+  run runner --dev --url https://cp.example.com --token abcdefghijklmnop1234 -y
+  expect_status 0
+  : >"${FAKE}/calls"
+  run update
+  expect_status 0
+  expect_called "archive/dev.tar.gz"
+}
+
+test_leaving_dev_warns() {
+  run full --dev --domain opencuria.example.com --admin-email admin@example.com \
+    --admin-password correct-horse -y
+  run update --version latest
+  expect_status 0
+  expect_out "Leaving dev for latest"
+  expect_called "archive/main.tar.gz"
+  [[ "$(env_of /opt/opencuria/.env OPENCURIA_TAG)" == latest ]] || fail "still on dev"
+}
+
+test_installer_of_target_version_does_the_work() {
+  touch "${FAKE}/alt_source"
+  run server --dev --domain oc.example.com --admin-email admin@example.com -y
+  expect_status 0
+  expect_out "archive installer: server --dir /opt/opencuria --version dev --domain oc.example.com --admin-email admin@example.com --yes"
+  expect_no_out "OpenCuria is ready."
+  expect_no_path /opt/opencuria/.env
+  local src
+  src="$(sed -n 's/^archive source: //p' <<<"${OUT}")"
+  [[ -n "${src}" ]] || fail "archive installer got no source directory"
+  expect_no_path "${src}"
 }
 
 test_unexpected_failure_is_reported() {

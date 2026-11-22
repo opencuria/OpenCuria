@@ -47,6 +47,9 @@ installed (configuration and data are kept) or to **uninstall** OpenCuria comple
 including all workspaces, the database and its files; Docker, QEMU and libvirt stay
 installed. Unattended: `… | sudo bash -s -- runner --url URL --token TOKEN`,
 `… -s -- update` or `… -s -- uninstall --yes` (`--help` lists all options).
+`… -s -- --dev` installs or updates to the latest build of the `dev` branch; updates
+stay on it until `--version latest`. Going back to an older version is unsupported
+once dev has migrated the database.
 
 The control plane lives in `/opt/opencuria` (`compose.yml`, `.env`; back up the
 `.env`, it holds the database password and encryption key), the runner in

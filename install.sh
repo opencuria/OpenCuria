@@ -48,6 +48,7 @@ RUNNER_TOKEN=""
 INSTALL_DIR="/opt/opencuria"
 DIR_SET=0
 VERSION="latest"
+VERSION_SET=0
 ASSUME_YES=0
 
 # Run state
@@ -59,6 +60,7 @@ PUBLIC_URL=""
 CURRENT_STEP="Preparing"
 ROOT_SHARE_DIR=""
 DATABASE_RESET=0
+INSTALLED_VERSION="" # OPENCURIA_TAG of the existing installation
 
 # Detected state (detect_files, detect_docker, detect_libvirt)
 SERVER_ENV=0
@@ -96,7 +98,8 @@ Actions (asked interactively when omitted):
   uninstall  Remove OpenCuria completely: workspaces, images, database, files
 
 On a host that already runs OpenCuria the installer offers update and uninstall;
-without a terminal it updates.
+without a terminal it updates. Updates stay on the installed version (latest, dev
+or a commit) unless --version or --dev selects another.
 
 Options:
   --domain NAME          Public domain; HTTPS via Let's Encrypt (DNS must point
@@ -107,7 +110,9 @@ Options:
   --url URL              Runner: control plane URL, e.g. https://opencuria.example.com
   --token TOKEN          Runner: token from Settings > Runners > Register Runner
   --dir PATH             Installation directory (default: /opt/opencuria)
-  --version VERSION      Image tag / commit to install (default: latest)
+  --version VERSION      Image tag / commit to install (default: the installed
+                         version, else latest)
+  --dev                  Follow the development branch (same as --version dev)
   -y, --yes              Never prompt; fail when a required value is missing.
                          Required to uninstall without a terminal.
   -h, --help             Show this help
@@ -464,7 +469,8 @@ parse_args() {
       --url) BACKEND_URL="${2?--url needs a value}"; shift ;;
       --token) RUNNER_TOKEN="${2?--token needs a value}"; shift ;;
       --dir) INSTALL_DIR="${2?--dir needs a value}" DIR_SET=1; shift ;;
-      --version) VERSION="${2?--version needs a value}"; shift ;;
+      --version) VERSION="${2?--version needs a value}" VERSION_SET=1; shift ;;
+      --dev) VERSION=dev VERSION_SET=1 ;;
       -y | --yes) ASSUME_YES=1 ;;
       -h | --help) usage; exit 0 ;;
       *) die "Unknown argument: $1 (see --help)" ;;
@@ -480,6 +486,17 @@ parse_args() {
 
 # -- action ----------------------------------------------------------------------
 
+# An installation keeps its version (e.g. dev) unless --version or --dev is passed.
+resolve_version() {
+  INSTALLED_VERSION="$(env_value "${INSTALL_DIR}/.env" OPENCURIA_TAG)"
+  [[ -n "${INSTALLED_VERSION}" ]] ||
+    INSTALLED_VERSION="$(env_value "${INSTALL_DIR}/runner/.env" OPENCURIA_TAG)"
+  [[ "${INSTALLED_VERSION}" =~ ^[A-Za-z0-9._-]+$ ]] || INSTALLED_VERSION=""
+  if [[ "${VERSION_SET}" -eq 0 && -n "${INSTALLED_VERSION}" ]]; then
+    VERSION="${INSTALLED_VERSION}"
+  fi
+}
+
 choose_action() {
   local choice
   if [[ -n "${ACTION}" ]]; then
@@ -492,8 +509,11 @@ choose_action() {
       return 0
     fi
     show_installation
-    local target="the latest version"
-    [[ "${VERSION}" == latest ]] || target="version ${VERSION}"
+    local target="version ${VERSION}"
+    case "${VERSION}" in
+      latest) target="the latest version" ;;
+      dev) target="the latest dev build" ;;
+    esac
     cat >/dev/tty <<EOF
 
 What do you want to do?
@@ -680,6 +700,9 @@ summarize_plan() {
   if [[ "${DATABASE_RESET}" -eq 1 ]]; then
     warn "The database volume ${DB_VOLUME} is missing: a new, empty database is created."
   fi
+  if [[ "${INSTALLED_VERSION}" == dev && "${VERSION}" != dev ]]; then
+    warn "Leaving dev for ${VERSION}: the database keeps the migrations dev applied. Downgrades are not supported; if ${VERSION} lacks them, the control plane may not start."
+  fi
   if [[ "${MODE}" != server && "${RUNNER_FILES}" -eq 1 ]]; then
     warn "Updating restarts the runner; running agent commands are interrupted."
   fi
@@ -699,6 +722,37 @@ fetch_source() {
   [[ -f "${WORK_DIR}/compose.yml" && -d "${WORK_DIR}/runner" ]] ||
     die "The download from ${url} is not an OpenCuria source archive."
   SRC_DIR="${WORK_DIR}"
+}
+
+# The installer of the version being installed does the work, so installer,
+# compose.yml and runner always come from one commit. It reuses this download
+# (OPENCURIA_INSTALLER_SOURCE) and this shell removes it afterwards.
+run_versioned_installer() {
+  local args=() status=0
+  step "Fetching OpenCuria ${VERSION}"
+  fetch_source
+  [[ -f "${SRC_DIR}/install.sh" ]] || return 0
+  # Older installers know --version but not --dev.
+  args=("${ACTION}" --dir "${INSTALL_DIR}" --version "${VERSION}")
+  if [[ "${DOMAIN_SET}" -eq 1 ]]; then args+=(--domain "${DOMAIN}"); fi
+  if [[ -n "${ADMIN_EMAIL}" ]]; then args+=(--admin-email "${ADMIN_EMAIL}"); fi
+  if [[ -n "${ADMIN_PASSWORD}" ]]; then args+=(--admin-password "${ADMIN_PASSWORD}"); fi
+  if [[ -n "${BACKEND_URL}" ]]; then args+=(--url "${BACKEND_URL}"); fi
+  if [[ -n "${RUNNER_TOKEN}" ]]; then args+=(--token "${RUNNER_TOKEN}"); fi
+  if [[ "${ASSUME_YES}" -eq 1 ]]; then args+=(--yes); fi
+  # Ctrl-C reaches both shells; the versioned installer reports it.
+  trap : INT TERM
+  OPENCURIA_INSTALLER_SOURCE="${SRC_DIR}" bash "${SRC_DIR}/install.sh" "${args[@]}" ||
+    status=$?
+  exit "${status}"
+}
+
+use_installer_source() {
+  local dir="${OPENCURIA_INSTALLER_SOURCE:-}"
+  [[ -n "${dir}" ]] || return 0
+  [[ -f "${dir}/compose.yml" && -d "${dir}/runner" ]] ||
+    die "OPENCURIA_INSTALLER_SOURCE=${dir} is not an OpenCuria source tree."
+  SRC_DIR="${dir}"
 }
 
 # -- control plane ---------------------------------------------------------------
@@ -866,6 +920,7 @@ install_runner() {
   chmod 600 "${dir}/.env"
   set_env_value "${dir}/.env" RUNNER_BACKEND_URL "${BACKEND_URL}"
   set_env_value "${dir}/.env" RUNNER_API_TOKEN "${RUNNER_TOKEN}"
+  set_env_value "${dir}/.env" OPENCURIA_TAG "${VERSION}" # the installer's, not the runner's
 
   # Replacing the file also clears a mask (a symlink to /dev/null).
   rm -f "${RUNNER_UNIT}"
@@ -1184,8 +1239,10 @@ install_or_update() {
   if [[ "${MODE}" == runner ]]; then check_backend_reachable; fi
   summarize_plan
 
-  step "Fetching OpenCuria ${VERSION}"
-  fetch_source
+  if [[ -z "${SRC_DIR}" ]]; then
+    step "Fetching OpenCuria ${VERSION}"
+    fetch_source
+  fi
 
   if [[ "${MODE}" != runner ]]; then
     ensure_docker
@@ -1242,7 +1299,10 @@ main() {
   fi
   ROOT_SHARE_DIR="$(getent passwd root | cut -d: -f6)" || true
   ROOT_SHARE_DIR="${ROOT_SHARE_DIR:-/root}/.local/share/opencuria"
-  printf '%sOpenCuria installer%s\n' "${C_BOLD}" "${C_RESET}" >&2
+  use_installer_source
+  if [[ -z "${SRC_DIR}" ]]; then
+    printf '%sOpenCuria installer%s\n' "${C_BOLD}" "${C_RESET}" >&2
+  fi
 
   CURRENT_STEP="Detecting the installation"
   resolve_install_dir
@@ -1257,11 +1317,13 @@ main() {
   detect_files
   detect_docker
   detect_libvirt
+  resolve_version
   choose_action
 
   if [[ "${ACTION}" == uninstall ]]; then
     uninstall
   else
+    [[ -n "${SRC_DIR}" ]] || run_versioned_installer
     install_or_update
   fi
 }
