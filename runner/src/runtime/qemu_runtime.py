@@ -69,6 +69,7 @@ from .guest_os import (
     guest_for_distro,
     validate_guest_os,
 )
+from .host_permissions import FILE_MODE, ensure_directory, restrict_tree
 from .inventory import RuntimeInventory, StorageResource
 from .linux_seed import (
     GUEST_SSH_MAX_SESSIONS as _GUEST_SSH_MAX_SESSIONS,
@@ -330,6 +331,9 @@ def _enable_free_page_reporting(root: ET.Element) -> bool:
 class QemuRuntime(RuntimeBackend):
     """QEMU/KVM runtime using libvirt for VM lifecycle and asyncssh for exec."""
 
+    #: Published image builds; created on first publication, not at boot.
+    _build_image_dir: Path = _BUILD_IMAGE_DIR
+
     def __init__(self, settings: RunnerSettings) -> None:
         import threading
 
@@ -348,9 +352,10 @@ class QemuRuntime(RuntimeBackend):
             self._ensure_host_directory(
                 directory,
                 writable_hint=(
-                    f"sudo install -d -o $USER -g $USER -m 755 '{directory}'"
+                    f"sudo install -d -o $USER -g $USER -m 711 '{directory}'"
                 ),
             )
+        self._restrict_host_storage()
 
         # Load or generate SSH keypair for VM access
         self._ssh_key_path = Path(
@@ -396,15 +401,28 @@ class QemuRuntime(RuntimeBackend):
     def _ensure_host_directory(
         self, path: Path, *, writable_hint: str | None = None
     ) -> None:
-        """Ensure a host directory exists and is traversable by libvirt-qemu."""
+        """Ensure a storage directory exists; QEMU may traverse, others not list."""
         try:
-            path.mkdir(parents=True, exist_ok=True)
-            path.chmod(0o755)
+            ensure_directory(path)
         except PermissionError as exc:
-            hint = writable_hint or f"sudo install -d -m 755 '{path}'"
+            hint = writable_hint or f"sudo install -d -m 711 '{path}'"
             raise RuntimeError(
                 f"Missing permissions for QEMU host directory '{path}'. Run: {hint}"
             ) from exc
+
+    def _restrict_host_storage(self) -> None:
+        """Close group and other access to storage written by older runners.
+
+        New files are created owner-only; this pass covers disks, images and
+        caches from before, including the build directory when it exists.
+        """
+        changed = 0
+        for root in dict.fromkeys([self._disk_dir, *self._managed_image_roots()]):
+            if root.is_dir():
+                self._ensure_host_directory(root)
+                changed += restrict_tree(root)
+        if changed:
+            logger.info("host_storage_permissions_restricted", entries=changed)
 
     def _get_ssh_public_key(self) -> str:
         """Read the SSH public key."""
@@ -603,7 +621,7 @@ class QemuRuntime(RuntimeBackend):
         def commit_overlay() -> None:
             # Exclusive publication also protects against another runner process
             # or an operator creating the final path after our initial check.
-            temp.chmod(0o644)
+            temp.chmod(FILE_MODE)
             with temp.open("rb") as stream:
                 os.fsync(stream.fileno())
             os.link(temp, disk)
@@ -644,7 +662,7 @@ class QemuRuntime(RuntimeBackend):
         images_dir = Path(self._settings.qemu_image_cache_dir)
         self._ensure_host_directory(
             images_dir,
-            writable_hint=f"sudo install -d -o $USER -g $USER -m 755 '{images_dir}'",
+            writable_hint=f"sudo install -d -o $USER -g $USER -m 711 '{images_dir}'",
         )
         target = images_dir / f"ubuntu-{normalized_version}-server-cloudimg-amd64.img"
         def validate(path: Path) -> None:
@@ -679,7 +697,7 @@ class QemuRuntime(RuntimeBackend):
                             break
                         f.write(chunk)
             validate(tmp_target)
-            tmp_target.chmod(0o644)
+            tmp_target.chmod(FILE_MODE)
             with tmp_target.open("rb") as downloaded:
                 os.fsync(downloaded.fileno())
             try:
@@ -777,7 +795,7 @@ class QemuRuntime(RuntimeBackend):
         )
 
         def write_seed() -> list[str]:
-            work_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             paths = []
             for name, content in files.items():
                 (work_dir / name).write_text(content)
@@ -816,8 +834,8 @@ class QemuRuntime(RuntimeBackend):
                 "install one to create cloud-init ISOs"
             )
 
-        # libvirt-qemu runs as a different uid — ensure it can read the ISO.
-        await asyncio.to_thread(iso_path.chmod, 0o644)
+        # libvirt hands the ISO to the QEMU user while the domain runs.
+        await asyncio.to_thread(iso_path.chmod, FILE_MODE)
 
         # Clean up temp dir
         await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
@@ -2801,7 +2819,7 @@ class QemuRuntime(RuntimeBackend):
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to create the Windows system disk: {stderr.decode()}")
-        await asyncio.to_thread(disk.chmod, 0o644)
+        await asyncio.to_thread(disk.chmod, FILE_MODE)
         gateway, vm_ip = await self._create_workspace_network(instance_id, dhcp=True)
         seed = await self._create_cloud_init_iso(
             instance_id, vm_ip=vm_ip, gateway=gateway, guest=guest
@@ -3107,7 +3125,7 @@ class QemuRuntime(RuntimeBackend):
             self._ensure_host_directory,
             target_path.parent,
             writable_hint=(
-                f"sudo install -d -o $USER -g $USER -m 755 '{target_path.parent}'"
+                f"sudo install -d -o $USER -g $USER -m 711 '{target_path.parent}'"
             ),
         )
 
@@ -3919,8 +3937,8 @@ class QemuRuntime(RuntimeBackend):
 
         def commit(info: dict) -> dict:
             nonlocal marker_published
-            # qemu-img writes as the runner, while libvirt may use another UID.
-            temp.chmod(0o644)
+            # Owner-only; libvirt hands images to the QEMU user while in use.
+            temp.chmod(FILE_MODE)
             with temp.open("rb") as stream:
                 os.fsync(stream.fileno())
             os.link(temp, target)  # exclusive, never replaces a published inode

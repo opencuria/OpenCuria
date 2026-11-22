@@ -200,11 +200,14 @@ def async_pinned_transport(
     addresses: Iterable[str],
     *,
     ssl_context: ssl.SSLContext | None = None,
+    max_connections: int = 1,
 ) -> httpx.AsyncHTTPTransport:
-    """Return a single-connection httpx transport pinned to checked addresses.
+    """Return an httpx transport pinned to checked addresses.
 
     TLS still verifies the certificate and SNI against *host*. Proxies from
     the environment are ignored because a proxy would resolve the name itself.
+    Connections are never reused; *max_connections* bounds concurrent requests
+    (streaming protocols keep one response open while sending others).
     """
     transport = httpx.AsyncHTTPTransport(trust_env=False)
     # httpx has no public hook for a custom network backend; replace its core
@@ -212,7 +215,7 @@ def async_pinned_transport(
     transport._pool = httpcore.AsyncConnectionPool(  # type: ignore[attr-defined]
         network_backend=AsyncPinnedBackend(host, addresses),
         ssl_context=ssl_context or httpx.create_ssl_context(),
-        max_connections=1,
+        max_connections=max_connections,
         max_keepalive_connections=0,
     )
     return transport

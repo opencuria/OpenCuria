@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -38,6 +38,11 @@ from ..desktop_leases import DesktopLease, cleanup_rpc
 from ..tools.base import Tool, ToolContext, ToolError, ToolResult
 from .builtin import open_builtin_server
 from .naming import TOOL_NAME_RE, mcp_tool_name
+from .public_http import (
+    PublicEndpointError,
+    build_public_http_client,
+    resolve_public_origin,
+)
 from .stdio import workspace_stdio_client
 from .workspace_http import build_workspace_http_client, parse_mcp_http_url
 
@@ -713,42 +718,74 @@ class McpServerConnection:
                 f"MCP server {self.desc} has unsupported transport '{self.transport}'"
             )
 
-    async def _open_http_transport(
-        self, stack: AsyncExitStack, accessor: Any, transport: str
-    ) -> None:
-        """Open an MCP HTTP client over the workspace TCP bridge.
+    async def _http_client_factory(
+        self, accessor: Any
+    ) -> Callable[[dict[str, str], httpx.Timeout], httpx.AsyncClient]:
+        """Return the client builder for where this server's requests leave.
 
-        Each transport owns its client lifecycle: ``streamable_http``
-        uses one entered client passed explicitly; ``sse`` builds its
-        own per-call clients through a factory that opens a fresh
-        workspace-backed client per SDK call (never a shared, already
-        entered client), so closing stays idempotent per transport.
+        A server bound to an OAuth credential is reached from the backend over
+        pinned public HTTPS, and its bearer token never enters the workspace.
+        Every other HTTP server is reached from inside the workspace, which
+        may host it on its own localhost or network.
         """
-        _, _, _, _ = parse_mcp_http_url(self.url)
-        timeout = httpx.Timeout(30.0, read=float(self.request_timeout_seconds or 60.0))
-        headers = dict(self.headers or {})
-        auth = None
-        if self.oauth_credential_id is not None:
+        if self.oauth_credential_id is None:
+
+            def workspace_client(
+                headers: dict[str, str], timeout: httpx.Timeout
+            ) -> httpx.AsyncClient:
+                client, _ = build_workspace_http_client(
+                    accessor,
+                    self.url,
+                    headers=headers,
+                    timeout=timeout,
+                    follow_redirects=False,
+                )
+                return client
+
+            return workspace_client
+        try:
+            origin = await resolve_public_origin(self.url)
+        except PublicEndpointError as exc:
+            raise McpServerHealthError(
+                f"MCP server {self.desc} is not a public HTTPS endpoint: {exc}"
+            ) from None
+
+        from apps.credentials.mcp_oauth import McpOAuthHTTPAuth
+
+        def oauth_client(
+            headers: dict[str, str], timeout: httpx.Timeout
+        ) -> httpx.AsyncClient:
             if any(key.lower() == "authorization" for key in headers):
                 raise McpServerHealthError(
                     "OAuth Authorization header cannot be overridden"
                 )
-            from apps.credentials.mcp_oauth import McpOAuthHTTPAuth
-
-            auth = McpOAuthHTTPAuth(
+            client = build_public_http_client(origin, headers=headers, timeout=timeout)
+            client.auth = McpOAuthHTTPAuth(
                 self.oauth_credential_id, self.oauth_service_id, self.url
             )
+            return client
+
+        return oauth_client
+
+    async def _open_http_transport(
+        self, stack: AsyncExitStack, accessor: Any, transport: str
+    ) -> None:
+        """Open an MCP HTTP client (see :meth:`_http_client_factory`).
+
+        Each transport owns its client lifecycle: ``streamable_http``
+        uses one entered client passed explicitly; ``sse`` builds its
+        own per-call clients through a factory that opens a fresh
+        client per SDK call (never a shared, already entered client),
+        so closing stays idempotent per transport. OAuth clients always
+        carry their own auth; the SDK cannot replace it.
+        """
+        _, _, _, _ = parse_mcp_http_url(self.url)
+        timeout = httpx.Timeout(30.0, read=float(self.request_timeout_seconds or 60.0))
+        new_client = await self._http_client_factory(accessor)
         if transport == "streamable_http":
             from mcp.client.streamable_http import streamable_http_client
 
-            client, _ = build_workspace_http_client(
-                accessor,
-                self.url,
-                headers=headers,
-                timeout=timeout,
-                follow_redirects=False,
-            )
-            client.auth = auth
+            client = new_client(dict(self.headers or {}), timeout)
             await stack.enter_async_context(client)
             ctx = streamable_http_client(self.url, http_client=client)
             read, write, _session_id_cb = await stack.enter_async_context(ctx)
@@ -760,38 +797,19 @@ class McpServerConnection:
                 timeout: httpx.Timeout | None = None,
                 auth: Any | None = None,
             ) -> httpx.AsyncClient:
-                # Fresh workspace-backed client per SDK call: the SDK
-                # enters/closes it itself (async-with in sse_client), so
-                # no shared entered client is reused here.
+                # Fresh client per SDK call: the SDK enters/closes it itself
+                # (async-with in sse_client), so no shared entered client is
+                # reused here. ``auth`` is the None passed to sse_client below.
+                del auth
                 merged = dict(self.headers or {})
                 if headers:
                     merged.update(headers)
-                if self.oauth_credential_id is not None and any(
-                    key.lower() == "authorization" for key in merged
-                ):
-                    raise McpServerHealthError(
-                        "OAuth Authorization header cannot be overridden"
-                    )
-                client, _ = build_workspace_http_client(
-                    accessor,
-                    self.url,
-                    headers=merged,
-                    timeout=timeout or httpx.Timeout(30.0, read=300.0),
-                    follow_redirects=False,
-                )
-                if auth is not None:
-                    client.auth = auth
-                elif self.oauth_credential_id is not None:
-                    client.auth = McpOAuthHTTPAuth(
-                        self.oauth_credential_id, self.oauth_service_id, self.url
-                    )
-                return client
+                return new_client(merged, timeout or httpx.Timeout(30.0, read=300.0))
 
             ctx = sse_client(
                 self.url,
-                headers=headers,
+                headers=dict(self.headers or {}),
                 httpx_client_factory=_factory,  # type: ignore[arg-type]
-                auth=auth,
             )
             read, write = await stack.enter_async_context(ctx)
         self._read, self._write = read, write

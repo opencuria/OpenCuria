@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 StateDirectory=opencuria-runner
+# Workspace storage holds tenant data: everything the runner creates is private.
+UMask=0077
 Environment=RUNNER_STATE_DIR=/var/lib/opencuria-runner
 WorkingDirectory=__RUNNER_DIR__
 EnvironmentFile=__RUNNER_DIR__/.env

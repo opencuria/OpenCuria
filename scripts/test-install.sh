@@ -741,6 +741,13 @@ test_runner_only_lifecycle() {
   expect_no_path /opt/opencuria/.env
   [[ "$(env_of /opt/opencuria/runner/.env RUNNER_BACKEND_URL)" == https://cp.example.com ]] ||
     fail "runner URL not written"
+  # Workspace storage: QEMU may traverse, other local users cannot list or read.
+  local dir
+  for dir in /var/lib/opencuria /var/lib/opencuria/{images,base-images,disks,snapshots}; do
+    [[ "$(stat -c %a "${dir}")" == 711 ]] || fail "${dir} is not 0711"
+  done
+  grep -qx 'UMask=0077' /etc/systemd/system/opencuria-runner.service ||
+    fail "runner unit does not keep new files private"
   touch "${FAKE}/backend_down"
   run update
   expect_status 1

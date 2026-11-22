@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from .diagnostics import WINDOWS_MEDIA_UNAVAILABLE, OperationRejectedError
+from .host_permissions import FILE_MODE, ensure_directory
 from .storage import sha256_digest
 
 if TYPE_CHECKING:
@@ -155,8 +156,7 @@ class WindowsMedia:
         return self._cache
 
     def _ensure_cache(self) -> None:
-        self._cache.mkdir(parents=True, exist_ok=True)
-        self._cache.chmod(0o755)
+        ensure_directory(self._cache)
 
     def base_path(self, edition: str, iso_sha256: str) -> Path:
         """Return the cache path of an installed base disk."""
@@ -215,7 +215,7 @@ class WindowsMedia:
             with urllib.request.urlopen(url, timeout=300) as response, temp.open("wb") as out:
                 shutil.copyfileobj(response, out, length=4 * 1024 * 1024)
             self._verify(temp, size=size, sha256=sha256)
-            temp.chmod(0o644)
+            temp.chmod(FILE_MODE)
             os.replace(temp, target)
         finally:
             temp.unlink(missing_ok=True)
@@ -339,7 +339,7 @@ class WindowsMedia:
                 capture_output=True,
                 timeout=600,
             )
-            target.chmod(0o644)
+            target.chmod(FILE_MODE)
             return target
         finally:
             shutil.rmtree(stage, ignore_errors=True)

@@ -834,7 +834,9 @@ install_runner() {
   fi
   systemctl enable --now libvirtd >/dev/null 2>&1 ||
     die "Could not start libvirtd. Check: systemctl status libvirtd"
-  install -d -m 755 "${DATA_DIR}" "${DATA_DIR}"/{images,base-images,disks,snapshots}
+  # Workspace storage holds tenant data. QEMU only needs to traverse it; the
+  # runner keeps the files owner-only and tightens older ones on start.
+  install -d -m 711 "${DATA_DIR}" "${DATA_DIR}"/{images,base-images,disks,snapshots}
 
   step "Installing the runner in ${dir}"
   rm -rf "${new}" "${old}"

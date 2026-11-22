@@ -136,6 +136,19 @@ async def test_async_transport_connects_to_the_checked_address_only(
             await client.get(f"http://other.test:{port}/")
 
 
+async def test_async_transport_serves_concurrent_requests_when_allowed(
+    host_echo_server: int,
+) -> None:
+    """An open streaming response must not block the next request."""
+    port = host_echo_server
+    url = f"http://pinned.test:{port}/"
+    transport = async_pinned_transport("pinned.test", ("127.0.0.1",), max_connections=2)
+    timeout = httpx.Timeout(5.0, pool=1.0)
+    async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+        async with client.stream("GET", url):
+            assert (await client.get(url)).text == f"pinned.test:{port}"
+
+
 def test_sync_backend_rejects_other_hosts_and_local_sockets() -> None:
     backend = PinnedBackend("pinned.test", ("127.0.0.1",))
     with pytest.raises(httpcore.ConnectError, match="pinned host"):

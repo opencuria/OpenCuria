@@ -43,6 +43,10 @@ in `src/config.py`.
   share it between runners or delete it to resolve a failed operation.
 - Images count as ready only with a verified `.manifest.json`; cloning checks size
   and SHA-256 first.
+- Disks, images and seed media hold tenant data. Storage directories are `0711`
+  and files `0600`, also those of older runners (fixed on start). libvirt hands
+  images to the QEMU user while a VM runs, so the runner must run as root, as the
+  installed unit does (`UMask=0077`).
 
 ## Code map
 
