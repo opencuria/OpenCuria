@@ -26,6 +26,8 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
+    # ExpoModulesCore-Swift.h of a source-built ExpoModulesCore (as Expo.podspec).
+    'HEADER_SEARCH_PATHS' => '"${PODS_CONFIGURATION_BUILD_DIR}/ExpoModulesCore/Swift Compatibility Header"',
   }
   install_modules_dependencies(s)
 end
