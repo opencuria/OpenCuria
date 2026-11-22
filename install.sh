@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # OpenCuria installer: control plane (Docker Compose), QEMU runner (systemd) or both.
 #
-#   curl -fsSL https://raw.githubusercontent.com/opencuria/OpenCuria/main/install.sh | sudo bash
+#   curl -fsSL https://opencuria.dev/install.sh | sudo bash
 #
+# opencuria.dev/install.sh redirects to this file on main (raw.githubusercontent.com).
 # On a host that already runs OpenCuria it offers to update or to uninstall it.
 # See --help for non-interactive use. Everything runs from main() so a truncated
 # download never executes half a script.
@@ -10,7 +11,7 @@
 set -Eeuo pipefail
 
 REPO="opencuria/OpenCuria"
-INSTALL_URL="https://raw.githubusercontent.com/${REPO}/main/install.sh"
+INSTALL_URL="https://opencuria.dev/install.sh"
 LOCAL_BACKEND_URL="http://127.0.0.1:8000"
 
 COMPOSE_PROJECT="opencuria"

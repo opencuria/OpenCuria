@@ -23,7 +23,7 @@ const name = ref('')
 const createdToken = ref<string | null>(null)
 const submitting = ref(false)
 
-const INSTALL_SCRIPT_URL = 'https://raw.githubusercontent.com/opencuria/OpenCuria/main/install.sh'
+const INSTALL_SCRIPT_URL = 'https://opencuria.dev/install.sh'
 
 /** One-line runner setup for a KVM host, pointing at this control plane. */
 const installCommand = computed(() => {

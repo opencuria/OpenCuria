@@ -58,7 +58,7 @@ describe('CreateRunnerDialog token copy', () => {
       .find((button) => button.props('label') === 'install command')
 
     expect(copy?.props('text')).toBe(
-      'curl -fsSL https://raw.githubusercontent.com/opencuria/OpenCuria/main/install.sh' +
+      'curl -fsSL https://opencuria.dev/install.sh' +
         ' | sudo bash -s -- runner --url https://opencuria.example.com' +
         ' --token secret-runner-token',
     )

@@ -26,7 +26,7 @@ manage workspaces, chats, scheduled tasks and publish Expo apps to the mobile ap
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/opencuria/OpenCuria/main/install.sh | sudo bash
+curl -fsSL https://opencuria.dev/install.sh | sudo bash
 ```
 
 The installer asks what the host should run:
