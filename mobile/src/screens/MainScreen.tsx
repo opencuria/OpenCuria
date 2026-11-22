@@ -17,6 +17,7 @@ import { KeyboardController } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
+import { messageRenderKey } from "@opencuria/chat-core/optimisticPrompts";
 import {
   formatSendTime,
   sendLaterTaskInput,
@@ -175,9 +176,13 @@ type NavigationRequest = {
 /** A sent prompt edited in the composer; the chat's own draft waits meanwhile. */
 type PromptEdit = {
   messageId: string;
+  /** The prompt's bubble; sending the edit shows the new text in it. */
+  bubbleKey: string;
   sessionId: string;
   text: string;
   attachments: ComposerAttachment[];
+  /** Sent and waiting for the server; a failure gives the text back. */
+  sending?: boolean;
 };
 
 export function MainScreen(): React.JSX.Element {
@@ -398,14 +403,16 @@ export function MainScreen(): React.JSX.Element {
   });
   /**
    * The prompt edit on screen. It ends with its chat, offline, or once its
-   * prompt is gone, e.g. edited elsewhere.
+   * bubble is gone, e.g. edited elsewhere; sent from here, it keeps the bubble.
    */
   const activeEdit =
     editing &&
     !offline &&
     editing.sessionId === chat.activeSessionId &&
     (!navigationReady ||
-      chat.messages.some((message) => message.id === editing.messageId))
+      chat.messages.some(
+        (message) => messageRenderKey(message) === editing.bubbleKey,
+      ))
       ? editing
       : null;
   useEffect(() => {
@@ -1177,6 +1184,7 @@ export function MainScreen(): React.JSX.Element {
     if (!chat.activeSessionId) return;
     setEditing({
       messageId: message.id,
+      bubbleKey: messageRenderKey(message),
       sessionId: chat.activeSessionId,
       text: message.content,
       attachments: [],
@@ -1194,26 +1202,39 @@ export function MainScreen(): React.JSX.Element {
       throw new Error(
         "Choose an available, running workspace before editing a message.",
       );
-    const ownerGeneration = generation.current;
-    const paths = files.length
-      ? await uploadAttachments(client, workspace.id, files)
-      : [];
-    if (
-      ownerGeneration !== generation.current ||
-      controller.getSnapshot().activeSessionId !== target.sessionId
-    )
-      throw new Error(
-        "The conversation changed before sending. Please try again.",
+    const markSending = (sending: boolean) =>
+      setEditing((current) =>
+        current?.messageId === target.messageId
+          ? { ...current, sending }
+          : current,
       );
-    const prompt = appendUploadMentions(text, paths);
-    if (!prompt.trim())
-      throw new Error("Attach a file or enter a message first.");
-    await controller.edit(
-      target.messageId,
-      prompt,
-      { ...runOptions(), skillIds: usedSkills },
-      target.sessionId,
-    );
+    markSending(true);
+    try {
+      const ownerGeneration = generation.current;
+      const paths = files.length
+        ? await uploadAttachments(client, workspace.id, files)
+        : [];
+      if (
+        ownerGeneration !== generation.current ||
+        controller.getSnapshot().activeSessionId !== target.sessionId
+      )
+        throw new Error(
+          "The conversation changed before sending. Please try again.",
+        );
+      const prompt = appendUploadMentions(text, paths);
+      if (!prompt.trim())
+        throw new Error("Attach a file or enter a message first.");
+      await controller.edit(
+        target.messageId,
+        prompt,
+        { ...runOptions(), skillIds: usedSkills },
+        target.sessionId,
+      );
+    } catch (error) {
+      // The composer puts the text back into this edit.
+      markSending(false);
+      throw error;
+    }
     setEditing((current) =>
       current?.messageId === target.messageId ? null : current,
     );
@@ -1882,7 +1903,7 @@ export function MainScreen(): React.JSX.Element {
               onSend={activeEdit ? submitEdit : send}
               onSchedule={offline || activeEdit ? undefined : scheduleDraft}
               editing={
-                activeEdit
+                activeEdit && !activeEdit.sending
                   ? {
                       id: activeEdit.messageId,
                       onCancel: () => setEditing(null),

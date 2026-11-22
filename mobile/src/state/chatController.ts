@@ -1421,7 +1421,11 @@ export class ChatController {
       await this.fetchTimeline(sessionId, context, true).catch(() => undefined);
   }
 
-  /** Edit a persisted user message and reconcile its server timeline. */
+  /**
+   * Rerun from an edited prompt. The new text shows at once in the prompt's
+   * bubble and the replaced turns leave (the shared timeline owns both); a
+   * rejected edit restores them.
+   */
   async edit(
     messageId: string,
     prompt: string,
@@ -1435,18 +1439,28 @@ export class ChatController {
     const session = this.sessions.find((row) => row.id === sessionId);
     if (session) assertHarnessSessionSelection(session, options);
     const details = this.editOptions(options);
-    this.invalidatePartDetails(sessionId);
+    // Like a send: the composer shows a turn on its way, and the run it
+    // starts is not an unknown one to load.
+    this.pendingSends.add(sessionId);
     try {
-      const updated = await this.client.harness.edit(sessionId, messageId, {
-        prompt,
-        mode: details.mode,
-        model: details.model,
-        reasoning_effort: details.reasoning_effort,
-        skill_ids: details.skill_ids,
-      });
+      const request = this.timeline.edit(
+        sessionId,
+        messageId,
+        { content: prompt, skillIds: options.skillIds },
+        () =>
+          this.client.harness.edit(sessionId, messageId, {
+            prompt,
+            mode: details.mode,
+            model: details.model,
+            reasoning_effort: details.reasoning_effort,
+            skill_ids: details.skill_ids,
+          }),
+      );
+      this.publish();
+      const updated = await request;
       if (this.selectionIsCurrent(context)) {
         this.upsertSession(updated);
-        await this.fetchTimeline(sessionId, context, true).catch((error) => {
+        await this.fetchTimeline(sessionId, context).catch((error) => {
           this.setError(
             error,
             "Message was edited but transcript refresh failed",
@@ -1458,6 +1472,9 @@ export class ChatController {
       if (this.selectionIsCurrent(context))
         this.setError(error, "Failed to edit message");
       throw error;
+    } finally {
+      this.pendingSends.delete(sessionId);
+      this.publish();
     }
   }
 
@@ -1802,10 +1819,6 @@ export class ChatController {
     }
   }
 
-  private invalidatePartDetails(sessionId: string): void {
-    this.timeline.invalidateDetails(sessionId, true);
-  }
-
   private async fetchTimeline(
     sessionId: string,
     context: SelectionContext,
@@ -2010,8 +2023,17 @@ export class ChatController {
     this.publish();
   }
 
+  /** A late event of a turn an edit replaced; it must not bring it back. */
+  private replacedTurn(sessionId: string, messageId?: string): boolean {
+    return this.timeline.isDiscarded(sessionId, messageId);
+  }
+
   private onPartUpdated(data: HarnessPartUpdatedEvent): void {
-    if (!this.ownsEvent(data)) return;
+    if (
+      !this.ownsEvent(data) ||
+      this.replacedTurn(data.session_id, data.message_id)
+    )
+      return;
     const current = this.messagesBySession.get(data.session_id) ?? [];
     const matching = current.find((message) => message.id === data.message_id);
     if (
@@ -2060,7 +2082,11 @@ export class ChatController {
   }
 
   private onSubtaskStarted(event: HarnessSubtaskStartedEvent): void {
-    if (!this.ownsEvent(event)) return;
+    if (
+      !this.ownsEvent(event) ||
+      this.replacedTurn(event.session_id, event.message_id)
+    )
+      return;
     const messages = this.prepareEventMessages(
       event.session_id,
       event.message_id,
@@ -2102,7 +2128,11 @@ export class ChatController {
   }
 
   private onSubtaskFinished(event: HarnessSubtaskFinishedEvent): void {
-    if (!this.ownsEvent(event)) return;
+    if (
+      !this.ownsEvent(event) ||
+      this.replacedTurn(event.session_id, event.message_id)
+    )
+      return;
     const messages = this.prepareEventMessages(
       event.session_id,
       event.message_id,
@@ -2122,7 +2152,12 @@ export class ChatController {
   }
 
   private onSessionStatus(event: HarnessSessionStatusEvent): void {
-    if (!this.ownsEvent(event)) return;
+    // The stopped run's late "idle" must not end the edit's new run.
+    if (
+      !this.ownsEvent(event) ||
+      this.replacedTurn(event.session_id, event.message_id)
+    )
+      return;
     const session = this.sessions.find((item) => item.id === event.session_id);
     if (session) {
       const next = {

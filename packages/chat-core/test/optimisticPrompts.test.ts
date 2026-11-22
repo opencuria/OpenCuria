@@ -9,6 +9,7 @@ import {
 import {
   createOptimisticPrompt,
   messageRenderKey,
+  withEditedPrompt,
   withoutOptimisticPrompt,
 } from "../src/optimisticPrompts";
 
@@ -136,5 +137,40 @@ describe("optimistic prompts", () => {
     const messages = [...history, prompt];
     expect(withoutOptimisticPrompt(messages, prompt.id)).toEqual(history);
     expect(withoutOptimisticPrompt(history, "u1")).toBe(history);
+  });
+
+  it("puts an edited prompt into the bubble of the prompt it replaces", () => {
+    const sent = createOptimisticPrompt({ sessionId: "s", content: "second" });
+    const stored = { ...user("u2", "second", 2), client_key: sent.id };
+    const messages = [answer("a2", 3), ...history, stored];
+
+    const edited = withEditedPrompt(messages, "u2", {
+      content: "second, fixed ",
+      skillIds: ["skill"],
+    })!;
+
+    expect(edited.messages.slice(0, 2)).toEqual(history);
+    expect(edited.prompt).toMatchObject({
+      role: "user",
+      content: "second, fixed",
+      skill_ids: ["skill"],
+    });
+    expect(isOptimisticPrompt(edited.prompt)).toBe(true);
+    expect(messageRenderKey(edited.prompt)).toBe(sent.id);
+    expect(edited.messages[2]).toBe(edited.prompt);
+    expect(edited.replaced.map((row) => row.id)).toEqual(["u2", "a2"]);
+  });
+
+  it("edits only a stored prompt", () => {
+    const prompt = createOptimisticPrompt({ sessionId: "s", content: "next" });
+    const messages = [...history, prompt];
+    expect(withEditedPrompt(messages, "a1", { content: "x" })).toBeNull();
+    expect(withEditedPrompt(messages, prompt.id, { content: "x" })).toBeNull();
+    expect(withEditedPrompt(messages, "gone", { content: "x" })).toBeNull();
+    expect(
+      messageRenderKey(
+        withEditedPrompt(messages, "u1", { content: "x" })!.prompt,
+      ),
+    ).toBe("u1");
   });
 });

@@ -284,11 +284,14 @@ jest.mock("../components", () => {
             accessibilityRole: "button",
             testID: "test-send",
             onPress: () => {
-              void props.onSend({
-                text: "hello from mobile",
-                skillIds: [],
-                attachments: [],
-              });
+              // The real composer takes a rejected send back into the field.
+              void Promise.resolve(
+                props.onSend({
+                  text: "hello from mobile",
+                  skillIds: [],
+                  attachments: [],
+                }),
+              ).catch(() => undefined);
             },
           },
           ReactRuntime.createElement(Text, null, "Send"),
@@ -2619,6 +2622,61 @@ describe("steering and send later", () => {
       expect(screen.queryByTestId("composer-editing")).toBeNull(),
     );
     expect(draft()).toHaveTextContent("My own draft");
+    tree.unmount();
+  });
+
+  it("keeps a sent edit while its new text replaces the prompt and gives a rejected one back", async () => {
+    const { tree } = await renderOpenChat("idle");
+    const prompt = {
+      id: "prompt-1",
+      session_id: "session-a",
+      role: "user",
+      content: "What does GoBD compliant mean?",
+      parts: [],
+    };
+    const answer = {
+      id: "answer-1",
+      session_id: "session-a",
+      role: "assistant",
+      content: "An answer",
+      parts: [],
+    };
+    const showMessages = (messages: unknown[]) =>
+      act(async () => {
+        snapshot = { ...snapshot, messages: messages as never[] };
+        listeners.forEach((listener) => listener());
+      });
+    await showMessages([prompt, answer]);
+    act(() => mockComposer.onDraftChange!("My own draft"));
+    act(() => mockTranscript.props!.onEdit!(prompt));
+    let reject!: (error: Error) => void;
+    mockController.edit.mockImplementationOnce(
+      () => new Promise((_resolve, fail) => (reject = fail)),
+    );
+
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() => expect(mockController.edit).toHaveBeenCalled());
+    // The controller shows the new text in the prompt's bubble at once.
+    await showMessages([
+      {
+        ...prompt,
+        id: "local-user-1",
+        client_key: "prompt-1",
+        content: "hello from mobile",
+      },
+    ]);
+    expect(screen.queryByTestId("composer-editing")).toBeNull();
+
+    // Rejected: the transcript comes back and the edit with it.
+    await showMessages([prompt, answer]);
+    await act(async () => reject(new Error("active run")));
+    expect(screen.getByTestId("composer-editing")).toHaveTextContent(
+      "prompt-1",
+    );
+    expect(mockTranscript.props?.editingMessageId).toBe("prompt-1");
+    expect(screen.getByTestId("composer-draft")).not.toHaveTextContent(
+      "My own draft",
+    );
     tree.unmount();
   });
 

@@ -19,6 +19,9 @@ immutable snapshots; adapters never implement a second cache policy.
 - A sent prompt shows at once as a `local-user-*` row (`optimisticPrompts.ts`).
   Every snapshot keeps it until the server's copy arrives, which inherits its
   `client_key`; lists key rows by `messageRenderKey`, so the bubble stays.
+- `edit` sends an edited prompt the same way, in the bubble it replaces. The
+  replaced rows never return from snapshots or late events (`isDiscarded`); a
+  rejected edit restores them.
 
 ## Dictation
 

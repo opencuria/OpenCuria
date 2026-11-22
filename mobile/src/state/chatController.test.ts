@@ -1058,6 +1058,98 @@ describe("ChatController", () => {
     controller.dispose();
   });
 
+  it("shows an edited prompt at once and replaces the stopped turn for good", async () => {
+    const { client, realtime, rows } = makeClient([session("root")]);
+    const original = { ...message("u1", "user", "fix VULN-004b"), position: 0 };
+    const stopped = {
+      ...message("a1", "assistant", ""),
+      error: "aborted by user",
+      finish: "aborted",
+      completed_at: "2026-01-01T00:00:03.000Z",
+      position: 1,
+    };
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(rows.get("root")!, [original, stopped]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const sent = deferred<HarnessSession>();
+    vi.mocked(client.harness.edit).mockReturnValueOnce(sent.promise);
+
+    const editing = controller.edit("u1", "fix VULN-004");
+    // The new text shows in the prompt's bubble; the stopped turn is gone.
+    expect(controller.getSnapshot()).toMatchObject({
+      busy: true,
+      messages: [{ content: "fix VULN-004", client_key: "u1" }],
+    });
+
+    // The server starts the new run while the stopped one reports late.
+    const busy = session("root", { status: "busy" });
+    rows.set("root", busy);
+    const event = { workspace_id: "workspace-a", session_id: "root" };
+    realtime.emit("harness.session_status", {
+      ...event,
+      status: "busy",
+      message_id: "a2",
+      user_message_id: "u2",
+    });
+    realtime.emit("harness.part_updated", {
+      ...event,
+      message_id: "a1",
+      part_id: "late",
+      delta: { text: "late" },
+    });
+    realtime.emit("harness.session_status", {
+      ...event,
+      status: "idle",
+      message_id: "a1",
+    });
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(busy, [
+        { ...message("u2", "user", "fix VULN-004"), position: 2 },
+        { ...message("a2", "assistant", ""), position: 3 },
+      ]),
+    );
+    sent.resolve(busy);
+    await editing;
+
+    const after = controller.getSnapshot();
+    expect(after.messages.map((row) => row.id)).toEqual(["u2", "a2"]);
+    expect(after.messages[0]?.client_key).toBe("u1");
+    expect(after).toMatchObject({
+      busy: true,
+      error: null,
+      activeSession: { status: "busy" },
+    });
+    // Opened once, refreshed once after the server accepted the edit.
+    expect(client.harness.timeline).toHaveBeenCalledTimes(2);
+    controller.dispose();
+  });
+
+  it("restores the transcript when the server rejects an edit", async () => {
+    const { client, rows } = makeClient([session("root")]);
+    const original = [
+      { ...message("u1", "user", "prompt"), position: 0 },
+      { ...message("a1", "assistant", "answer"), position: 1 },
+    ];
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(rows.get("root")!, original),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    vi.mocked(client.harness.edit).mockRejectedValueOnce(
+      new ApiRequestError(409, "Harness session already has an active run"),
+    );
+
+    await expect(controller.edit("u1", "edited")).rejects.toThrow("active run");
+    expect(controller.getSnapshot()).toMatchObject({
+      busy: false,
+      error: "Harness session already has an active run",
+      messages: [{ id: "u1" }, { id: "a1" }],
+    });
+    controller.dispose();
+  });
+
   it("does not mark manual-unread sessions as read when opened", async () => {
     const root = session("root", { manual_unread: true, unread: true });
     const { client } = makeClient([root]);

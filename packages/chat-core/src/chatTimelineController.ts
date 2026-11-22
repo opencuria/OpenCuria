@@ -17,6 +17,7 @@ import {
   collectAncestorSessions,
   collectDescendantSessionIds,
 } from "./harnessSubtaskActivity";
+import { withEditedPrompt } from "./optimisticPrompts";
 import { hydrateHarnessPart } from "./toolDisplay";
 
 /** The owner changed while transport was in flight; the response is obsolete. */
@@ -49,7 +50,6 @@ export interface ChatTimelinePorts<T extends ChatTimelineSnapshot> {
   write: (sessionId: string, messages: HarnessMessage[]) => void;
   /** Known sessions of the open scope: current status and parent lineage. */
   sessions: () => HarnessSession[];
-  discardMessage?: (sessionId: string, messageId: string) => boolean;
   onError?: (error: unknown) => void;
   onSettled?: () => void;
   /** Sessions the adapter still shows or waits on: selection, gates, todo fetches. */
@@ -126,6 +126,8 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
   private readonly details = new Map<string, HarnessPart>();
   private readonly pins = new Set<string>();
   private readonly transcripts = new Map<string, number>();
+  /** Rows an edit replaced, per session; they never come back. */
+  private readonly discarded = new Map<string, Set<string>>();
 
   constructor(private readonly ports: ChatTimelinePorts<T>) {}
 
@@ -222,6 +224,62 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
       await this.fetch(sessionId, request);
   }
 
+  /** A row an edit replaced; its late events must not bring it back. */
+  isDiscarded(sessionId: string, messageId?: string): boolean {
+    return Boolean(messageId && this.discarded.get(sessionId)?.has(messageId));
+  }
+
+  /**
+   * Send an edited prompt; `send` performs the request. The transcript ends
+   * with the new text at once. The rows it replaces never return: snapshots
+   * requested before the server answered lose their authority, and later ones
+   * skip them. A rejected edit restores the transcript it replaced.
+   */
+  async edit<R>(
+    sessionId: string,
+    messageId: string,
+    prompt: { content: string; skillIds?: string[] },
+    send: () => Promise<R>,
+  ): Promise<R> {
+    const previous = this.ports.read(sessionId);
+    const edited = previous && withEditedPrompt(previous, messageId, prompt);
+    const discarded = this.discarded.get(sessionId) ?? new Set<string>();
+    const added = (edited?.replaced ?? [])
+      .map((message) => message.id)
+      .filter((id) => !discarded.has(id));
+    for (const id of added) discarded.add(id);
+    if (discarded.size) this.discarded.set(sessionId, discarded);
+    // Snapshots in flight, e.g. after Stop, still hold the replaced rows.
+    this.invalidate(sessionId);
+    this.invalidateDetails(sessionId);
+    if (edited) {
+      this.ports.write(sessionId, edited.messages);
+      this.touch(sessionId, true);
+    }
+    try {
+      const result = await send();
+      // A snapshot requested during admission may predate the replacement.
+      this.invalidate(sessionId);
+      return result;
+    } catch (error) {
+      this.invalidate(sessionId);
+      for (const id of added) discarded.delete(id);
+      if (!discarded.size && this.discarded.get(sessionId) === discarded)
+        this.discarded.delete(sessionId);
+      // Only while the edit is still shown; a forgotten chat stays forgotten.
+      const shown = this.ports.read(sessionId);
+      if (
+        previous &&
+        edited &&
+        shown?.some((message) => message.id === edited.prompt.id)
+      ) {
+        this.ports.write(sessionId, previous);
+        this.touch(sessionId, true);
+      }
+      throw error;
+    }
+  }
+
   private apply(
     sessionId: string,
     messages: HarnessMessage[],
@@ -235,9 +293,7 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     );
     const incoming = sortHarnessMessages(
       messages
-        .filter(
-          (message) => !this.ports.discardMessage?.(sessionId, message.id),
-        )
+        .filter((message) => !this.isDiscarded(sessionId, message.id))
         .map((message) => {
           const parts = (message.parts ?? []).map((raw) => {
             const prior = previousParts.get(raw.id);
@@ -586,10 +642,12 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     this.invalidate(sessionId);
     this.invalidateDetails(sessionId, true);
     this.transcripts.delete(sessionId);
+    this.discarded.delete(sessionId);
   }
 
   clear(): void {
     this.epoch += 1;
+    this.discarded.clear();
     this.versions.clear();
     this.detailVersions.clear();
     this.detailFlights.clear();
