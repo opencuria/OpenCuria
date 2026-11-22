@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import httpx
 import pytest
 
 from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tools import webfetch
 from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.webfetch import (
     BROWSER_USER_AGENT,
     HONEST_USER_AGENT,
     WEBFETCH_MAX_BYTES,
+    WEBFETCH_MAX_REDIRECTS,
     WebfetchTool,
     convert_html_to_markdown,
     extract_text_from_html,
-    is_blocked_url,
 )
+
+pytestmark = pytest.mark.usefixtures("fake_dns")
 
 
 def _ctx(accessor: FakeAccessor | None = None) -> ToolContext:
@@ -281,26 +288,150 @@ async def test_max_size_arg_ignored_large_html_succeeds() -> None:
     assert "<p>" not in result.output or "readme" in result.output
 
 
-async def test_redirect_to_private_host_blocked() -> None:
-    """The final URL after redirects is SSRF-checked."""
+def _never_called(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"blocked URL reached the network: {request.url}")
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "example.com":
-            return httpx.Response(
-                302,
-                headers={"location": "http://127.0.0.1/secret"},
-            )
-        return httpx.Response(
-            200,
-            headers={"content-type": "text/plain"},
-            text="secret",
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost/secret",
+        "http://127.0.0.1:8000/",
+        "http://2130706433/",
+        "http://10.1.2.3/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://100.100.100.200/latest/meta-data/",
+        "http://[::1]/",
+        "http://[::ffff:169.254.169.254]/",
+        "http://[fd00:ec2::254]/",
+        "http://[64:ff9b::a9fe:a9fe]/",
+    ],
+)
+async def test_private_targets_blocked_before_connecting(url: str) -> None:
+    """Every notation of a private target fails before any request is sent."""
+    with pytest.raises(ToolError, match="Blocked private/internal URL"):
+        await _tool(_never_called).execute({"url": url}, _ctx())
+
+
+async def test_name_with_any_private_answer_blocked(
+    fake_dns: dict[str, list[str]],
+) -> None:
+    """DNS rebinding: one private A/AAAA answer blocks the whole name."""
+    fake_dns["rebind.example"] = ["93.184.216.34", "::1"]
+    with pytest.raises(ToolError, match="Blocked private/internal URL"):
+        await _tool(_never_called).execute(
+            {"url": "https://rebind.example/"}, _ctx()
         )
 
-    with pytest.raises(ToolError, match="[Bb]locked"):
+
+async def test_unresolvable_host_fails_closed(
+    fake_dns: dict[str, list[str]],
+) -> None:
+    fake_dns["metadata.google.internal"] = []
+    with pytest.raises(ToolError, match="could not be resolved"):
+        await _tool(_never_called).execute(
+            {"url": "http://metadata.google.internal/computeMetadata/v1/"}, _ctx()
+        )
+
+
+async def test_redirect_hop_to_private_host_blocked_before_request() -> None:
+    """Each redirect hop is checked before it connects, not after."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://127.0.0.1/secret"})
+
+    with pytest.raises(ToolError, match="Blocked private/internal URL"):
         await _tool(handler).execute({"url": "https://example.com/go"}, _ctx())
+    assert requested == ["https://example.com/go"]
 
 
-def test_ssrf_guard_still_exported() -> None:
-    """is_blocked_url remains the public SSRF helper."""
-    assert is_blocked_url("https://localhost/secret") is True
-    assert is_blocked_url("https://169.254.169.254/latest") is True
+async def test_public_redirects_are_followed() -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if request.url.path == "/a":
+            return httpx.Response(301, headers={"location": "/moved"})
+        if request.url.path == "/moved":
+            return httpx.Response(
+                307, headers={"location": "https://docs.example/final"}
+            )
+        return httpx.Response(200, headers={"content-type": "text/plain"}, text="ok")
+
+    result = await _tool(handler).execute({"url": "https://example.com/a"}, _ctx())
+    assert result.output == "ok"
+    assert requested == [
+        "https://example.com/a",
+        "https://example.com/moved",
+        "https://docs.example/final",
+    ]
+
+
+async def test_redirect_to_other_scheme_rejected() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "file:///etc/passwd"})
+
+    with pytest.raises(ToolError, match="http:// or https://"):
+        await _tool(handler).execute({"url": "https://example.com/"}, _ctx())
+
+
+async def test_redirect_loop_is_bounded() -> None:
+    hops: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hops.append(str(request.url))
+        return httpx.Response(302, headers={"location": f"/{len(hops)}"})
+
+    with pytest.raises(ToolError, match="Too many redirects"):
+        await _tool(handler).execute({"url": "https://example.com/"}, _ctx())
+    assert len(hops) == WEBFETCH_MAX_REDIRECTS + 1
+
+
+@pytest.fixture
+def local_page() -> Iterator[int]:
+    """Serve a text page on 127.0.0.1 that echoes the request's Host header."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = f"host={self.headers.get('Host')}".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
+async def test_default_transport_connects_to_the_checked_address(
+    monkeypatch: pytest.MonkeyPatch, local_page: int
+) -> None:
+    """Without an injected transport the request uses the pinned addresses.
+
+    ``pinned.test`` has no DNS record; the page is only reachable because the
+    connection goes to the address the check returned, with the original Host.
+    """
+    checked: list[tuple[str, int]] = []
+
+    def resolve(host: str, port: int) -> tuple[str, ...]:
+        checked.append((host, port))
+        return ("127.0.0.1",)
+
+    monkeypatch.setattr(webfetch, "resolve_public_addresses", resolve)
+    url = f"http://pinned.test:{local_page}/page"
+    result = await WebfetchTool().execute({"url": url}, _ctx())
+    assert result.output == f"host=pinned.test:{local_page}"
+    assert checked == [("pinned.test", local_page)]

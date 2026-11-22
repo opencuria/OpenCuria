@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from apps.harness.models import HarnessSession
+from apps.harness.provider_accounts import WorkspaceAccountRequiredError
 from apps.scheduled_tasks.services import ScheduledTaskService
 from common.exceptions import AuthenticationError, NotFoundError
 
@@ -297,17 +298,30 @@ def test_codex_schedule_stores_catalog_normalized_settings(monkeypatch):
             "Connect your personal Claude authorization before scheduling Claude tasks",
         ),
         (
+            "claude",
+            CLAUDE_RESOLVE,
+            WorkspaceAccountRequiredError(),
+            "Connect your personal Claude authorization before scheduling Claude tasks",
+        ),
+        (
             "codex",
             CODEX_VALIDATE,
             NotFoundError("ProviderAccount", "7"),
-            "Connect your selected ChatGPT or OpenRouter account before "
+            "Select a personal ChatGPT or OpenRouter account before "
             "scheduling Codex tasks",
         ),
         (
             "codex",
             CODEX_VALIDATE,
             AuthenticationError("ChatGPT authorization expired"),
-            "Connect your selected ChatGPT or OpenRouter account before "
+            "Select a personal ChatGPT or OpenRouter account before "
+            "scheduling Codex tasks",
+        ),
+        (
+            "codex",
+            CODEX_VALIDATE,
+            WorkspaceAccountRequiredError(),
+            "Select a personal ChatGPT or OpenRouter account before "
             "scheduling Codex tasks",
         ),
         # Only a missing Claude authorization becomes an actionable hint.

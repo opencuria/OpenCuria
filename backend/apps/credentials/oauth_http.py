@@ -7,16 +7,20 @@ no settings, credentials or database state are needed here.
 
 from __future__ import annotations
 
-import ipaddress
 import json
-import socket
 import ssl
-from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlparse
 
 import httpcore
 import httpx
+
+from common.public_egress import (
+    NonPublicAddressError,
+    PinnedBackend,
+    UnresolvableHostError,
+    resolve_public_addresses,
+)
 
 from .oauth_errors import OAuthError
 
@@ -25,25 +29,15 @@ MAX_RESPONSE = 256 * 1024
 
 
 def _public_addresses(host: str, port: int) -> tuple[str, ...]:
-    """Resolve once, reject non-global answers, and pin requests to checked IPs."""
+    """Resolve once, reject non-public answers, and pin requests to checked IPs."""
     try:
-        results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except OSError:
+        return resolve_public_addresses(host, port)
+    except NonPublicAddressError:
+        raise OAuthError(
+            "OAuth endpoints cannot target private or local addresses"
+        ) from None
+    except UnresolvableHostError:
         raise OAuthError("OAuth endpoint host could not be resolved") from None
-    addresses = []
-    for result in results:
-        try:
-            address = ipaddress.ip_address(result[4][0])
-        except ValueError:
-            raise OAuthError("OAuth endpoint DNS response is invalid") from None
-        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-            address = address.ipv4_mapped
-        if not address.is_global:
-            raise OAuthError("OAuth endpoints cannot target private or local addresses")
-        addresses.append(str(address))
-    if not addresses:
-        raise OAuthError("OAuth endpoint host could not be resolved")
-    return tuple(dict.fromkeys(addresses))
 
 
 def validate_endpoint(
@@ -73,52 +67,6 @@ def validate_endpoint(
     return url, addresses
 
 
-class _PinnedBackend(httpcore.NetworkBackend):
-    """httpcore backend avoiding a second, untrusted DNS lookup."""
-
-    def __init__(self, host: str, addresses: tuple[str, ...]) -> None:
-        self.host = host.lower()
-        self.addresses = addresses
-
-    def connect_tcp(
-        self,
-        host: str,
-        port: int,
-        timeout: float | None = None,
-        local_address: str | None = None,
-        socket_options: Iterable[tuple] | None = None,
-    ) -> httpcore.NetworkStream:
-        """Connect to a checked address without resolving the hostname again."""
-        if host.lower() != self.host:
-            raise httpcore.ConnectError("OAuth request escaped its pinned host")
-        last_error = None
-        for address in self.addresses:
-            try:
-                sock = socket.create_connection(
-                    (address, port),
-                    timeout,
-                    source_address=(local_address, 0) if local_address else None,
-                )
-                for option in socket_options or ():
-                    sock.setsockopt(*option)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                from httpcore._backends.sync import SyncStream
-
-                return SyncStream(sock)
-            except OSError as exc:
-                last_error = exc
-        raise httpcore.ConnectError("OAuth endpoint connection failed") from last_error
-
-    def connect_unix_socket(
-        self,
-        path: str,
-        timeout: float | None = None,
-        socket_options: Iterable[tuple] | None = None,
-    ) -> httpcore.NetworkStream:
-        """Reject local socket connections for outbound OAuth requests."""
-        raise httpcore.ConnectError("OAuth endpoints cannot use local sockets")
-
-
 def request(
     method: str,
     url: str,
@@ -134,7 +82,7 @@ def request(
     # httpx lacks a public custom-network-backend hook; replace its core pool
     # explicitly so DNS is not looked up again after address validation.
     transport._pool = httpcore.ConnectionPool(
-        network_backend=_PinnedBackend(parsed.hostname, addresses),
+        network_backend=PinnedBackend(parsed.hostname, addresses),
         max_connections=1,
         max_keepalive_connections=0,
         ssl_context=ssl.create_default_context(),

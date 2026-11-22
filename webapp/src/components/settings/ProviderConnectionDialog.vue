@@ -24,6 +24,8 @@ import {
   chatGptOAuthOutcome,
   providerAccountForm,
   providerAccountPayload,
+  providerAccountShareable,
+  sharedAccountNote,
   unsharePayload,
   type ProviderAccountForm,
   type ProviderAccountProvider,
@@ -71,6 +73,13 @@ let dialogGeneration = 0
 const isEditing = computed(() => creating.value || selectedAccount.value !== null)
 const canEdit = computed(() => creating.value || Boolean(selectedAccount.value?.can_manage))
 const secretHint = computed(() => selectedAccount.value?.api_key_hint || '')
+// Older shared accounts of non-shareable providers keep the Unshare button.
+const showShareToggle = computed(
+  () => props.isAdmin && Boolean(props.provider) && providerAccountShareable(props.provider!),
+)
+const shareNote = computed(() =>
+  props.provider && form.value.shared ? sharedAccountNote(props.provider) : undefined,
+)
 
 function resetForm(account: ProviderAccount | null = null, isCreating = false): void {
   stopPolling()
@@ -382,7 +391,7 @@ onBeforeUnmount(() => {
               placeholder="e.g. Personal or Production"
             />
           </div>
-          <label v-if="isAdmin" class="flex items-center gap-2 text-sm">
+          <label v-if="showShareToggle" class="flex items-center gap-2 text-sm">
             <Checkbox
               v-model="form.shared"
               :disabled="Boolean(selectedAccount && !selectedAccount.can_manage)"
@@ -390,6 +399,13 @@ onBeforeUnmount(() => {
             />
             Share with this organization
           </label>
+          <p
+            v-if="showShareToggle && shareNote"
+            class="text-xs text-muted-foreground"
+            data-testid="account-shared-note"
+          >
+            {{ shareNote }}
+          </p>
           <p
             v-if="!isAdmin && selectedAccount?.scope === 'personal'"
             class="text-xs text-muted-foreground"

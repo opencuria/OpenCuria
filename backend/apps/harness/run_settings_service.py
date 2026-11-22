@@ -19,6 +19,7 @@ from .engines.connections import EngineConnectionService
 from .engines.service import EngineCatalogService
 from .harness_service import HarnessService, get_harness_service
 from .models import HarnessSession
+from .provider_accounts import WorkspaceAccountRequiredError
 from .providers.models_catalog import normalize_reasoning_effort
 
 
@@ -91,7 +92,7 @@ class RunSettingsService:
                 )
             except (AuthenticationError, NotFoundError) as exc:
                 raise ValueError(
-                    "Connect your selected ChatGPT or OpenRouter account "
+                    "Select a personal ChatGPT or OpenRouter account "
                     "before scheduling Codex tasks"
                 ) from exc
             return normalized_model, effort
@@ -103,7 +104,7 @@ class RunSettingsService:
         # the connection again for each actual run.
         try:
             EngineConnectionService().resolve(organization_id, owner_id)
-        except NotFoundError as exc:
+        except (WorkspaceAccountRequiredError, NotFoundError) as exc:
             raise ValueError(
                 "Connect your personal Claude authorization before scheduling "
                 "Claude tasks"

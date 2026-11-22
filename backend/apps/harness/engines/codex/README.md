@@ -24,6 +24,8 @@ and transports; it makes no model, prompt, tool or permission decisions.
 
 - Engine and provider are fixed per chat. Model IDs are `chatgpt/<id>` or
   `openrouter/<vendor>/<model>`.
+- Only the caller's own personal account reaches the workspace; org-shared accounts
+  serve the native engine only (`provider_accounts.py`).
 - No refresh token reaches the workspace. ChatGPT tokens are refreshed centrally
   (`providers/chatgpt_credentials.py`) and passed over stdio; the OpenRouter key goes
   only into the runner's private stdin environment preamble.

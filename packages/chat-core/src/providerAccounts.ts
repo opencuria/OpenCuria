@@ -101,10 +101,30 @@ export const PROVIDER_ACCOUNT_PROVIDERS: ProviderAccountInfo[] = [
     id: "claude-agent",
     name: "Claude Agent",
     description:
-      "Run the separate Claude Agent harness with an Anthropic account.",
+      "Run the Claude Agent harness in your workspace with your own Anthropic account.",
     catalogProvider: "claude",
   },
 ];
+
+/**
+ * Whether admins may share this provider's accounts. Claude Agent tokens run
+ * inside each member's workspace, where any process can read them, so these
+ * accounts stay personal. Org-shared secrets never leave the server.
+ */
+export function providerAccountShareable(
+  provider: ProviderAccountProvider,
+): boolean {
+  return provider !== "claude-agent";
+}
+
+/** Shown while sharing an account Codex could otherwise use. */
+export function sharedAccountNote(
+  provider: ProviderAccountProvider,
+): string | undefined {
+  return provider === "chatgpt" || provider === "openrouter"
+    ? "Shared accounts work with the OpenCuria engine, not with Codex."
+    : undefined;
+}
 
 export const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const DEFAULT_BEDROCK_REGION = "us-east-1";

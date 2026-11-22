@@ -6,7 +6,10 @@ import ast
 from importlib.util import resolve_name
 from pathlib import Path
 
-CREDENTIALS = Path(__file__).resolve().parents[2] / "apps" / "credentials"
+BACKEND = Path(__file__).resolve().parents[2]
+CREDENTIALS = BACKEND / "apps" / "credentials"
+#: Leaf modules the OAuth transport may share; they have no app dependencies.
+SHARED_LEAVES = {"apps.credentials.oauth_errors", "common.public_egress"}
 
 
 def _imports(tree: ast.Module) -> set[str]:
@@ -32,8 +35,9 @@ def test_oauth_http_has_no_application_or_persistence_dependencies() -> None:
         for module in imports:
             if module.split(".")[0] not in {"apps", "common", "config", "django"}:
                 continue
-            if module == "apps.credentials.oauth_errors" or module.startswith(
-                "apps.credentials.oauth_errors."
+            if any(
+                module == leaf or module.startswith(f"{leaf}.")
+                for leaf in SHARED_LEAVES
             ):
                 continue
             violations.append(f"{name} imports {module}")
@@ -41,6 +45,13 @@ def test_oauth_http_has_no_application_or_persistence_dependencies() -> None:
         "OAuth HTTP must not depend on workflows, services, settings or ORM:\n"
         + "\n".join(sorted(violations))
     )
+
+
+def test_public_egress_is_a_leaf() -> None:
+    """The shared egress policy imports no application, settings or ORM code."""
+    imports = _imports(ast.parse((BACKEND / "common" / "public_egress.py").read_text()))
+    internal = {"apps", "common", "config", "django"}
+    assert sorted(m for m in imports if m.split(".")[0] in internal) == []
 
 
 def test_oauth_workflow_delegates_outbound_connections_to_http_boundary() -> None:

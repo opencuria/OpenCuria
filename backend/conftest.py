@@ -34,3 +34,45 @@ def fast_test_password_hashing():
         ]
     ):
         yield
+
+
+#: Public address returned for names a test does not list.
+FAKE_DNS_PUBLIC_ADDRESS = "93.184.216.34"
+
+
+@pytest.fixture
+def fake_dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
+    """Resolve hosts offline for egress checks; tests edit the returned table.
+
+    IP literals resolve as the system resolver would (``AI_NUMERICHOST``),
+    listed names return their answers (``[]`` = NXDOMAIN) and every other
+    name returns one public address.
+    """
+    import socket
+
+    real_getaddrinfo = socket.getaddrinfo
+    table: dict[str, list[str]] = {"localhost": ["127.0.0.1", "::1"]}
+
+    def getaddrinfo(host, port, *args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            return real_getaddrinfo(
+                host, port, type=socket.SOCK_STREAM, flags=socket.AI_NUMERICHOST
+            )
+        except socket.gaierror:
+            pass
+        answers = table.get(str(host).lower(), [FAKE_DNS_PUBLIC_ADDRESS])
+        if not answers:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        return [
+            (
+                socket.AF_INET6 if ":" in answer else socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (answer, port),
+            )
+            for answer in answers
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return table

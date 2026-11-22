@@ -513,6 +513,7 @@ class HarnessService:
                     )
                 if account is None:
                     raise NotFoundError("ProviderAccount", str(user_id))
+                accounts.require_workspace_account(account, user_id)
             session_kwargs.update(
                 harness_id=engine_id,
                 created_by_id=user_id,

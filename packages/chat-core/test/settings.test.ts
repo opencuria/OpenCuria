@@ -12,8 +12,10 @@ import {
   chatGptOAuthOutcome,
   providerAccountForm,
   providerAccountPayload,
+  providerAccountShareable,
   providerAccountsSummary,
   PROVIDER_ACCOUNT_PROVIDERS,
+  sharedAccountNote,
   unsharePayload,
 } from "../src/providerAccounts";
 import {
@@ -187,6 +189,17 @@ describe("provider accounts", () => {
         },
       ),
     ).toEqual({ error: "Account name is required." });
+  });
+
+  it("keeps workspace-engine secrets personal", () => {
+    expect(
+      PROVIDER_ACCOUNT_PROVIDERS.filter(
+        (provider) => !providerAccountShareable(provider.id),
+      ).map((provider) => provider.id),
+    ).toEqual(["claude-agent"]);
+    expect(sharedAccountNote("chatgpt")).toContain("not with Codex");
+    expect(sharedAccountNote("openrouter")).toContain("not with Codex");
+    expect(sharedAccountNote("amazon-bedrock")).toBeUndefined();
   });
 
   it("maps device login statuses", () => {

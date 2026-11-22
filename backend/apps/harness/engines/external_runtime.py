@@ -85,7 +85,7 @@ async def prepare_external_runtime(
     )
     if provider_id == "chatgpt":
         credentials = await get_fresh_chatgpt_credentials(
-            organization_id, user_id, auth.connection_id
+            organization_id, user_id, auth.connection_id, for_workspace=True
         )
         auth = replace(auth, credentials=credentials)
     await ensure_current()
@@ -112,6 +112,7 @@ async def prepare_external_runtime(
             user_id,
             auth.connection_id,
             rejected_access_token=str(auth.credentials.get("access") or ""),
+            for_workspace=True,
         )
         await ensure_current()
         auth = replace(auth, credentials=credentials)
