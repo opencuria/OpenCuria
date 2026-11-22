@@ -80,3 +80,10 @@ npm run type-check
 npm run test
 npm run export -w mobile    # JS bundle for both platforms, not a signed build
 ```
+
+## TestFlight
+
+`.github/workflows/testflight-dev.yml` uploads `dev` nightly when the app changed,
+or on demand (Actions → TestFlight (dev) → Run workflow). It uses the `production`
+profile of `eas.json` with credentials and build numbers stored on EAS; the
+secrets it needs are listed at the top of the workflow.

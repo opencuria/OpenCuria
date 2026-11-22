@@ -54,6 +54,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "Let apps you open in OpenCuria confirm it is you.",
         NSMotionUsageDescription:
           "Let apps you open in OpenCuria use motion and fitness data.",
+        // Standard HTTPS and platform crypto only; skips the export prompt.
+        ITSAppUsesNonExemptEncryption: false,
         // HTTP is limited to local-network hosts (unqualified, .local, IPs).
         NSAppTransportSecurity: { NSAllowsLocalNetworking: true },
       },
@@ -150,5 +152,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
     ],
     experiments: { typedRoutes: true },
+    extra: {
+      eas: { projectId: "0b5e3cf0-67d2-4a79-9d66-c482ca4b6873" },
+    },
   };
 };
