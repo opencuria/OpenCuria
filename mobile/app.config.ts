@@ -139,9 +139,16 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
       [
         "expo-build-properties",
-        // Android cannot scope cleartext to IP ranges; normalizeServerUrl only
-        // accepts http:// for local-network hosts, public hosts need https://.
-        { android: { usesCleartextTraffic: true } },
+        {
+          // Android cannot scope cleartext to IP ranges; normalizeServerUrl only
+          // accepts http:// for local-network hosts, public hosts need https://.
+          android: { usesCleartextTraffic: true },
+          // Build every Expo module from source: the app runtime needs the
+          // patched expo-modules-core (patches/), and a precompiled module next
+          // to a source-built core links frameworks the app does not contain,
+          // so iOS kills the app at launch (ExpoCameraBarcodeScanning did).
+          ios: { usePrecompiledModules: false },
+        },
       ],
       [
         "react-native-maps",

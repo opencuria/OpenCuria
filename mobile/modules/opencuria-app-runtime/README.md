@@ -20,9 +20,13 @@ data and draws the Android Apps widget.
   and ImageStore and `expo/fetch`: an app reads and writes its data and cache,
   reads its installed files and nothing else of OpenCuria. On iOS the Expo part
   needs `patches/expo-modules-core+57.0.23.patch` (root `postinstall`); without it
-  the runtime does not compile. It only takes effect because `mobile/package.json`
-  builds `expo-modules-core` from source (`expo.autolinking.ios.buildFromSource`),
-  not as Expo's precompiled framework. After an Expo upgrade regenerate it with
+  the runtime does not compile. It only takes effect because `app.config.ts` turns
+  off Expo's precompiled frameworks (`ios.usePrecompiledModules: false`), so
+  `expo-modules-core` builds from the patched sources. Do not build only some
+  modules from source instead (`expo.autolinking.ios.buildFromSource`): a
+  precompiled module then links `ExpoModulesCore.framework`, which the app no
+  longer contains, and iOS kills the app at launch. After an Expo upgrade regenerate
+  the patch with
   `npx patch-package expo-modules-core --include '^ios/FileSystemUtilities/'`.
   Notifications, AsyncStorage and background tasks are not scoped, and libraries
   that open paths on their own (expo-sqlite, WebView file access, Skia and others)
