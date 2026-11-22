@@ -16,6 +16,7 @@ from pydantic import ConfigDict, Field
 
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from .timeline import (
+    TIMELINE_MAX_LIMIT,
     TIMELINE_TEXT_PART_TYPES,
     project_question_definitions,
     timeline_part_payload,
@@ -484,6 +485,14 @@ def session_to_out_with_unread(
     )
 
 
+class TimelineWindowIn(Schema):
+    """Optional bounds on the messages a timeline returns (message positions)."""
+
+    limit: int | None = Field(None, ge=1, le=TIMELINE_MAX_LIMIT)
+    before: int | None = Field(None, ge=0)
+    since: int | None = Field(None, ge=0)
+
+
 def timeline_to_out(
     conversations: ConversationService,
     session: HarnessSession,
@@ -491,10 +500,19 @@ def timeline_to_out(
     interactions: InteractionService,
     pending_steers: Callable[[uuid.UUID], list[SteerEntry]],
     scheduled_messages: Callable[[uuid.UUID], list[dict[str, Any]]] | None = None,
+    limit: int | None = None,
+    before: int | None = None,
+    since: int | None = None,
 ) -> dict[str, Any]:
-    """Present saved history with explicit interaction and live steering ports."""
-    messages = conversations.list_timeline_messages(session.id)
-    parts = conversations.list_timeline_parts(session.id)
+    """Present saved history with explicit interaction and live steering ports.
+
+    Without bounds every message is returned. *limit* keeps the newest messages
+    of the range from *since* (inclusive) to *before* (exclusive, message
+    positions); ``older_count`` is how many messages precede the returned ones.
+    """
+    messages, parts, older_count = conversations.read_timeline(
+        session.id, limit=limit, before=before, since=since
+    )
     message_positions = {
         str(message.id): int(getattr(message, "position", 0) or 0)
         for message in messages
@@ -556,6 +574,8 @@ def timeline_to_out(
         "scheduled_messages": (
             scheduled_messages(session.id) if scheduled_messages else []
         ),
+        "older_count": older_count,
+        "todos": conversations.todo_rows(session.id),
     }
 
 

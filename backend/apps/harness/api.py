@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime
 
 from django.http import HttpRequest
-from ninja import Router
+from ninja import Query, Router
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
@@ -64,6 +64,7 @@ from .schemas import (
     RecentModelSaveIn,
     SubagentConfigIn,
     SubagentConfigOut,
+    TimelineWindowIn,
     computer_use_config_to_out,
     part_to_out,
     provider_config_to_out,
@@ -926,10 +927,19 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
 @harness_router.get(
     "/harness/sessions/{session_id}/timeline",
     response={200: dict, 403: dict, 404: dict},
-    summary="Load all session messages with lightweight part projections",
+    summary="Load session messages with lightweight part projections",
 )
-def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
-    """Return the session envelope without heavyweight detail fields."""
+def get_harness_timeline(
+    request: HttpRequest,
+    session_id: uuid.UUID,
+    window: TimelineWindowIn = Query(...),
+):
+    """Return the session envelope without heavyweight detail fields.
+
+    All messages by default. ``limit`` keeps the newest ones of the range
+    from ``since`` (inclusive) up to ``before`` (exclusive), both message
+    positions; ``older_count`` is how many messages precede the returned ones.
+    """
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
@@ -945,6 +955,9 @@ def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
             interactions=service.interactions,
             pending_steers=service.list_pending_steers,
             scheduled_messages=_scheduled_messages().snapshot,
+            limit=window.limit,
+            before=window.before,
+            since=window.since,
         )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

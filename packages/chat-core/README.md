@@ -22,6 +22,11 @@ immutable snapshots; adapters never implement a second cache policy.
 - `edit` sends an edited prompt the same way, in the bubble it replaces. The
   replaced rows never return from snapshots or late events (`isDiscarded`); a
   rejected edit restores them.
+- `tailLimit` opts in to ranged loading: a chat opens with its newest messages,
+  `backfill` adds older pages in front, and a reload asks only for messages from
+  the last two held ones on. Held messages must match the server's `older_count`,
+  otherwise the controller reloads everything. Without it, or on a backend that
+  ignores ranges, every load is complete.
 
 ## Dictation
 

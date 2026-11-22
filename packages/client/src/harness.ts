@@ -20,12 +20,23 @@ import type {
   HarnessSession,
   HarnessSteer,
   HarnessTimeline,
+  HarnessTimelineRange,
   HarnessTodo,
   ProviderConfig,
   ProviderConfigInput,
   ProviderModel,
   RecentModelUsage,
 } from "./types";
+
+/** Query string bounding a timeline to a range of messages. */
+function timelineQuery(range?: HarnessTimelineRange): string {
+  const query = new URLSearchParams();
+  if (range?.limit !== undefined) query.set("limit", String(range.limit));
+  if (range?.before !== undefined) query.set("before", String(range.before));
+  if (range?.since !== undefined) query.set("since", String(range.since));
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
 
 function segment(value: string): string {
   return encodeURIComponent(value);
@@ -74,10 +85,14 @@ export function createHarnessApi(getApi: () => ApiClient) {
         input,
         signal,
       ),
-    timeline: (sessionId: string, signal?: AbortSignal) =>
+    timeline: (
+      sessionId: string,
+      signal?: AbortSignal,
+      range?: HarnessTimelineRange,
+    ) =>
       request<HarnessTimeline>(
         "GET",
-        `/harness/sessions/${segment(sessionId)}/timeline`,
+        `/harness/sessions/${segment(sessionId)}/timeline${timelineQuery(range)}`,
         undefined,
         signal,
       ),

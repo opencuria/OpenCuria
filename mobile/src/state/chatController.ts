@@ -50,10 +50,34 @@ import {
   createOptimisticPrompt,
   withoutOptimisticPrompt,
 } from "@opencuria/chat-core/optimisticPrompts";
-import { ChatTimelineController } from "@opencuria/chat-core/chatTimelineController";
+import {
+  ChatTimelineController,
+  type TimelineRange,
+} from "@opencuria/chat-core/chatTimelineController";
 import type { HarnessTimeline } from "@opencuria/client";
 
 const EMPTY_MESSAGES = Object.freeze([]) as unknown as HarnessMessage[];
+
+/** Messages a chat opens with; the rest is added in front afterwards. */
+const TAIL_MESSAGES = 30;
+/** Pause before older messages are added, so the list can place the newest. */
+const EARLIER_DELAY_MS = 300;
+/** Messages per page while the earlier ones load. */
+const EARLIER_PAGE_MESSAGES = 100;
+/** Realtime events whose state a timeline snapshot also carries. */
+const SNAPSHOT_EVENTS = [
+  "harness.part_updated",
+  "harness.todo_updated",
+  "harness.subtask_started",
+  "harness.subtask_finished",
+  "harness.session_status",
+  "harness.permission_required",
+  "harness.permission_resolved",
+  "harness.question_required",
+  "harness.question_resolved",
+  "harness.steer_queue",
+  "harness.scheduled_messages",
+] as const;
 
 /** Options used when creating a conversation or sending/editing a turn. */
 export interface ChatRunOptions {
@@ -83,6 +107,8 @@ export interface ChatControllerSnapshot {
   activeSessionLineage: HarnessSession[];
   workspaceId: string | null;
   loading: boolean;
+  /** Only the newest messages of the open chat are loaded so far. */
+  partial?: boolean;
   error: string | null;
   connected: boolean;
   /** The active session is running, or its send/create request is in flight. */
@@ -263,6 +289,24 @@ export class ChatController {
   private readonly readFlights = new Map<string, Promise<void>>();
   private readonly unreadFlights = new Map<string, Promise<void>>();
   private readonly dismissedNotices = new Map<string, string>();
+  /**
+   * The newest messages of a chat being opened, requested while the session
+   * list loads; the first matching timeline load takes them over.
+   */
+  private prefetched: {
+    sessionId: string;
+    promise: Promise<HarnessTimeline>;
+    abort: AbortController;
+    /** A timeline load has taken the response over. */
+    taken: boolean;
+    /** `snapshotEvents` when it was requested. */
+    events: number;
+  } | null = null;
+  /**
+   * Realtime events that change state a timeline snapshot also carries. A
+   * prefetched response older than one of them would overwrite it.
+   */
+  private snapshotEvents = 0;
   private readonly todoRevisions = new Map<string, number>();
 
   private workspaceId: string | null = null;
@@ -284,7 +328,10 @@ export class ChatController {
 
   constructor(private readonly client: OpenCuriaClient) {
     this.timeline = new ChatTimelineController({
-      load: (sessionId) => this.client.harness.timeline(sessionId),
+      load: (sessionId, range) => this.loadTimeline(sessionId, range),
+      tailLimit: TAIL_MESSAGES,
+      pageLimit: EARLIER_PAGE_MESSAGES,
+      onChange: () => this.publish(),
       loadDetail: (sessionId, partId) =>
         this.client.harness.getPart(sessionId, partId),
       read: (sessionId) => this.messagesBySession.get(sessionId),
@@ -371,6 +418,9 @@ export class ChatController {
       activeSessionLineage: lineage,
       workspaceId: this.workspaceId,
       loading: this.loading,
+      partial: Boolean(
+        this.activeSessionId && this.timeline.hasOlder(this.activeSessionId),
+      ),
       error: this.error,
       connected: this.connected,
       busy: Boolean(
@@ -440,6 +490,11 @@ export class ChatController {
         if (event.workspace_id === this.workspaceId)
           void this.refresh().catch(() => undefined);
       }),
+      ...SNAPSHOT_EVENTS.map((name) =>
+        on(name, () => {
+          this.snapshotEvents += 1;
+        }),
+      ),
     );
   }
 
@@ -646,12 +701,63 @@ export class ChatController {
     }
   }
 
+  private loadTimeline(
+    sessionId: string,
+    range?: TimelineRange,
+  ): Promise<HarnessTimeline> {
+    const prefetched = this.prefetched;
+    if (
+      prefetched?.sessionId === sessionId &&
+      !prefetched.taken &&
+      // Baselines for live state are taken now; an event since the request
+      // would be overwritten by the older response.
+      prefetched.events === this.snapshotEvents &&
+      range?.limit === TAIL_MESSAGES &&
+      range.since === undefined &&
+      range.before === undefined
+    ) {
+      prefetched.taken = true;
+      return prefetched.promise;
+    }
+    return this.client.harness.timeline(sessionId, undefined, range);
+  }
+
   /** Load workspace session summaries and optionally open one session. */
   async openWorkspace(workspaceId: string, sessionId?: string): Promise<void> {
     const navigation = ++this.navigationGeneration;
-    await this.loadWorkspace(workspaceId);
-    if (this.disposed || navigation !== this.navigationGeneration) return;
-    if (sessionId) await this.openSession(sessionId);
+    // The chat does not wait for the session list: both requests travel
+    // together and the chat is shown as soon as the list is there too.
+    let prefetch: NonNullable<ChatController["prefetched"]> | null = null;
+    if (
+      sessionId &&
+      (this.workspaceId !== workspaceId || !this.activeWorkspaceSessionsLoaded)
+    ) {
+      const abort = new AbortController();
+      const promise = this.client.harness.timeline(sessionId, abort.signal, {
+        limit: TAIL_MESSAGES,
+      });
+      // A failure surfaces where the response is used; unused, it is dropped.
+      promise.catch(() => undefined);
+      prefetch = {
+        sessionId,
+        promise,
+        abort,
+        taken: false,
+        events: this.snapshotEvents,
+      };
+      this.prefetched = prefetch;
+    }
+    try {
+      await this.loadWorkspace(workspaceId);
+      if (this.disposed || navigation !== this.navigationGeneration) return;
+      if (sessionId) await this.openSession(sessionId);
+    } finally {
+      if (prefetch) {
+        // Navigation moved on, or the session is not here: nothing to wait for.
+        if (!prefetch.taken) prefetch.abort.abort();
+        if (this.prefetched === prefetch) this.prefetched = null;
+      }
+    }
   }
 
   private async loadWorkspace(
@@ -822,11 +928,11 @@ export class ChatController {
     this.publish();
     this.maybeMarkRead(sessionId);
     try {
-      const lineageIds = collectDescendantSessionIds(sessionId, this.sessions);
-      await Promise.all([
-        ...lineageIds.map((id) => this.fetchTimeline(id, context)),
-        this.fetchTodos(sessionId, context),
-      ]);
+      // The chat is shown once its own messages are there; subtasks and the
+      // messages before the newest ones follow in the background.
+      const withTodos = await this.fetchTimeline(sessionId, context);
+      if (!withTodos) await this.fetchTodos(sessionId, context);
+      this.loadRest(sessionId, context);
     } catch (error) {
       if (this.selectionIsCurrent(context))
         this.setError(error, "Failed to open session");
@@ -838,6 +944,23 @@ export class ChatController {
         this.publish();
       }
     }
+  }
+
+  /** Everything of an open chat beyond its newest messages, without waiting. */
+  private loadRest(sessionId: string, context: SelectionContext): void {
+    const subtasks = collectDescendantSessionIds(
+      sessionId,
+      this.sessions,
+    ).filter((id) => id !== sessionId);
+    // Every result publishes itself; failures leave the chat as it is shown
+    // and are retried the next time it is opened or refreshed.
+    for (const id of subtasks)
+      void this.fetchTimeline(id, context).catch(() => undefined);
+    setTimeout(() => {
+      void this.timeline.backfill(sessionId, {
+        isCurrent: () => this.selectionIsCurrent(context, sessionId),
+      });
+    }, EARLIER_DELAY_MS);
   }
 
   /** Reconcile server session summaries and the currently open lineage. */
@@ -877,10 +1000,14 @@ export class ChatController {
         activeSessionId,
         this.sessions,
       );
-      await Promise.all([
-        ...lineageIds.map((id) => this.fetchTimeline(id, context, true)),
-        this.fetchTodos(activeSessionId, context, true),
-      ]);
+      const [withTodos] = await Promise.all(
+        lineageIds.map((id) => this.fetchTimeline(id, context, true)),
+      );
+      if (!withTodos) await this.fetchTodos(activeSessionId, context, true);
+      // Older messages that failed to load are retried.
+      void this.timeline.backfill(activeSessionId, {
+        isCurrent: () => this.selectionIsCurrent(context, activeSessionId),
+      });
     } catch (error) {
       if (
         !this.disposed &&
@@ -1819,11 +1946,13 @@ export class ChatController {
     }
   }
 
+  /** Load a transcript; true when the response also carried the todos. */
   private async fetchTimeline(
     sessionId: string,
     context: SelectionContext,
     refreshAfterExisting = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let withTodos = false;
     try {
       await this.timeline.fetch(sessionId, {
         context: `${context.workspaceGeneration}:${context.selectionGeneration}`,
@@ -1842,6 +1971,7 @@ export class ChatController {
           ]);
           const steerRevision = this.steerRevisions.get(sessionId) ?? 0;
           const scheduledRevision = this.scheduledRevisions.get(sessionId) ?? 0;
+          const todosBefore = this.todosBySession.get(sessionId);
           return (snapshot) => {
             // Socket snapshots that landed during the request are newer.
             if (
@@ -1855,6 +1985,14 @@ export class ChatController {
                 (this.scheduledRevisions.get(sessionId) ?? 0)
             )
               this.setScheduled(sessionId, snapshot.scheduled_messages);
+            if (snapshot.todos) {
+              withTodos = true;
+              if (todosBefore === this.todosBySession.get(sessionId))
+                this.todosBySession.set(
+                  sessionId,
+                  snapshot.todos.map(cloneTodo),
+                );
+            }
             this.applyTimelineGates(sessionId, snapshot, knownGates);
           };
         },
@@ -1863,6 +2001,7 @@ export class ChatController {
       this.setError(error, "Failed to load conversation");
       throw error;
     }
+    return withTodos;
   }
 
   private applyTimelineGates(
@@ -1871,17 +2010,25 @@ export class ChatController {
     knownGates: Set<string>,
   ): void {
     const session = this.sessions.find((item) => item.id === sessionId);
-    // A timeline response is authoritative only for gates belonging to that
-    // session. Never wipe a concurrently pending gate from a child/sibling.
+    // A timeline response lists the gates of its session and of the subtasks
+    // below it, and is authoritative for exactly those. Never wipe a
+    // concurrently pending gate from a parent or sibling.
+    const scope = new Set(
+      collectDescendantSessionIds(sessionId, this.sessions),
+    );
     for (const [id, request] of this.permissionsById) {
-      if (request.session_id === sessionId && knownGates.has(id))
+      if (scope.has(request.session_id) && knownGates.has(id))
         this.permissionsById.delete(id);
     }
     for (const request of timeline.permissions ?? []) {
-      if (request.session_id === sessionId) {
+      if (scope.has(request.session_id)) {
+        const owner =
+          request.session_id === sessionId
+            ? session
+            : this.sessions.find((item) => item.id === request.session_id);
         const enriched = request.agent_name
           ? request
-          : { ...request, agent_name: session?.agent_name };
+          : { ...request, agent_name: owner?.agent_name };
         this.permissionsById.set(request.request_id, {
           ...enriched,
           status: "pending",
@@ -1889,14 +2036,18 @@ export class ChatController {
       }
     }
     for (const [id, request] of this.questionsById) {
-      if (request.session_id === sessionId && knownGates.has(id))
+      if (scope.has(request.session_id) && knownGates.has(id))
         this.questionsById.delete(id);
     }
     for (const request of timeline.questions ?? []) {
-      if (request.session_id === sessionId) {
+      if (scope.has(request.session_id)) {
+        const owner =
+          request.session_id === sessionId
+            ? session
+            : this.sessions.find((item) => item.id === request.session_id);
         const enriched = request.agent_name
           ? request
-          : { ...request, agent_name: session?.agent_name };
+          : { ...request, agent_name: owner?.agent_name };
         this.questionsById.set(request.request_id, {
           ...enriched,
           status: "pending",

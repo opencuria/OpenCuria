@@ -542,7 +542,8 @@ export function applySubtaskFinished(
 
 // --- Ordering ---------------------------------------------------------------
 
-function messagePosition(message: HarnessMessage): number | undefined {
+/** Persisted position of a message; undefined for rows the server lacks. */
+export function messagePosition(message: HarnessMessage): number | undefined {
   const raw = message.position ?? message.message_position;
   return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
 }

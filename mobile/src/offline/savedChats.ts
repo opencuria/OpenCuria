@@ -301,6 +301,8 @@ export class SavedChatWriter {
     const session = chat.activeSession;
     if (
       chat.loading ||
+      // A chat still missing its older messages must not replace a whole copy.
+      chat.partial ||
       !session ||
       chat.workspaceId !== session.workspace_id ||
       !chat.messages.length

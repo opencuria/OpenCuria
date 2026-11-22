@@ -991,6 +991,24 @@ export interface HarnessTimeline {
   steers?: HarnessSteer[];
   /** Messages scheduled for later; absent on older backends. */
   scheduled_messages?: HarnessScheduledMessage[];
+  /**
+   * Messages preceding the returned ones; absent on older backends, which
+   * always return every message.
+   */
+  older_count?: number;
+  /** Todos of the session; absent on older backends. */
+  todos?: HarnessTodo[];
+}
+
+/**
+ * Messages a timeline request returns, by message position. `limit` keeps the
+ * newest ones of the range from `since` (inclusive) to `before` (exclusive).
+ * Older backends ignore the range and return every message.
+ */
+export interface HarnessTimelineRange {
+  limit?: number;
+  before?: number;
+  since?: number;
 }
 
 export interface Todo extends HarnessTodo {}

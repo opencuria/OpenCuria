@@ -239,7 +239,7 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   const timeline = new ChatTimelineController({
-    load: listHarnessParts,
+    load: (sessionId) => listHarnessParts(sessionId),
     loadDetail: getHarnessPart,
     read: (sessionId) => messagesBySession.value[sessionId],
     write: publishTranscript,

@@ -7,7 +7,9 @@
  */
 import type { HarnessMessage, HarnessPart, HarnessSession } from "./harness";
 import {
+  isOptimisticPrompt,
   mergeBusyFetchedMessages,
+  messagePosition,
   reconcileOptimisticPrompts,
   settleOpenStreamParts,
   sortHarnessMessages,
@@ -29,6 +31,21 @@ export class StaleChatRequestError extends Error {
 
 export interface ChatTimelineSnapshot {
   messages: HarnessMessage[];
+  /**
+   * Messages preceding the returned ones. Absent when the transport ignored
+   * the range and returned every message.
+   */
+  older_count?: number;
+}
+
+/**
+ * Messages one request returns, by message position: the newest `limit` of
+ * the range from `since` (inclusive) up to `before` (exclusive).
+ */
+export interface TimelineRange {
+  limit?: number;
+  before?: number;
+  since?: number;
 }
 
 export interface TimelineRequest<T> {
@@ -38,13 +55,15 @@ export interface TimelineRequest<T> {
   isCurrent?: () => boolean;
   /** A terminal event requires a snapshot requested after the existing flight. */
   refreshAfterExisting?: boolean;
+  /** Reload every message even when a range would do. */
+  full?: boolean;
   /** Capture request-scoped metadata before transport starts. */
   onSnapshot?: (snapshot: T) => void | Promise<void>;
   prepare?: () => (snapshot: T) => void | Promise<void>;
 }
 
 export interface ChatTimelinePorts<T extends ChatTimelineSnapshot> {
-  load: (sessionId: string) => Promise<T>;
+  load: (sessionId: string, range?: TimelineRange) => Promise<T>;
   loadDetail?: (sessionId: string, partId: string) => Promise<HarnessPart>;
   read: (sessionId: string) => HarnessMessage[] | undefined;
   write: (sessionId: string, messages: HarnessMessage[]) => void;
@@ -60,7 +79,20 @@ export interface ChatTimelinePorts<T extends ChatTimelineSnapshot> {
   detailLimit?: number;
   transcriptLimit?: number;
   transcriptBudgetBytes?: number;
+  /**
+   * Opt in to ranged loading: a chat opens with its newest `tailLimit`
+   * messages, the rest follows in `backfill` pages, and a reload asks only for
+   * the messages that can have changed. Without it every load is complete.
+   */
+  tailLimit?: number;
+  /** Messages per backfill page; defaults to 100. */
+  pageLimit?: number;
+  /** Older messages were added to a transcript outside a fetch. */
+  onChange?: (sessionId: string) => void;
 }
+
+/** Held messages a reload checks for a reply that is still streaming. */
+const RECENT_MESSAGES = 6;
 
 interface Flight {
   sessionId: string;
@@ -128,6 +160,9 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
   private readonly transcripts = new Map<string, number>();
   /** Rows an edit replaced, per session; they never come back. */
   private readonly discarded = new Map<string, Set<string>>();
+  /** Messages the server holds before the oldest one shown, per session. */
+  private readonly older = new Map<string, number>();
+  private readonly backfills = new Map<string, Promise<void>>();
 
   constructor(private readonly ports: ChatTimelinePorts<T>) {}
 
@@ -192,9 +227,20 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     const flight: Flight = { sessionId, context, promise: Promise.resolve() };
     flight.promise = (async () => {
       try {
-        const snapshot = await this.ports.load(sessionId);
+        const range = this.rangeFor(sessionId, request.full);
+        let snapshot = await (range
+          ? this.ports.load(sessionId, range)
+          : this.ports.load(sessionId));
         if (!current()) return;
-        this.apply(sessionId, snapshot.messages, statusAtRequest);
+        let messages = this.joinRange(sessionId, snapshot, range);
+        if (!messages) {
+          // The messages held no longer match the server's: start over.
+          snapshot = await this.ports.load(sessionId);
+          if (!current()) return;
+          this.older.delete(sessionId);
+          messages = snapshot.messages;
+        }
+        this.apply(sessionId, messages, statusAtRequest);
         await onSnapshot?.(snapshot);
       } catch (error) {
         if (!current()) return;
@@ -208,6 +254,156 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     });
     this.flights.set(key, flight);
     return flight.promise;
+  }
+
+  /**
+   * What a load needs to ask for. The first load of a chat takes its newest
+   * messages. A reload takes everything from the last two held messages, or
+   * from the first recent one still streaming, on: older ones are final.
+   */
+  private rangeFor(
+    sessionId: string,
+    full: boolean | undefined,
+  ): TimelineRange | undefined {
+    const limit = this.ports.tailLimit;
+    if (!limit || full) return undefined;
+    const held = (this.ports.read(sessionId) ?? [])
+      .filter((message) => !isOptimisticPrompt(message))
+      .flatMap((message) => {
+        const position = messagePosition(message);
+        return position === undefined ? [] : [{ message, position }];
+      })
+      .sort((a, b) => a.position - b.position);
+    if (!held.length) return { limit };
+    // Only the newest messages can still be streaming; older ones that never
+    // finished are leftovers of interrupted runs and stay as they are.
+    const recent = held.slice(-RECENT_MESSAGES);
+    const streaming = recent.find(
+      ({ message }) =>
+        message.role === "assistant" && message.completed_at == null,
+    );
+    return {
+      since: Math.min(
+        held[Math.max(0, held.length - 2)]!.position,
+        streaming?.position ?? Number.POSITIVE_INFINITY,
+      ),
+    };
+  }
+
+  /**
+   * The messages a ranged response stands for: every message of the session
+   * up to its newest, or null when the held messages contradict the server's
+   * count and only a complete load can be trusted.
+   */
+  private joinRange(
+    sessionId: string,
+    snapshot: T,
+    range: TimelineRange | undefined,
+  ): HarnessMessage[] | null {
+    if (!range || snapshot.older_count === undefined) {
+      this.older.delete(sessionId);
+      return snapshot.messages;
+    }
+    if (range.since === undefined) {
+      this.older.set(sessionId, snapshot.older_count);
+      return snapshot.messages;
+    }
+    const retained = (this.ports.read(sessionId) ?? []).filter((message) => {
+      const position = messagePosition(message);
+      return (
+        !isOptimisticPrompt(message) &&
+        position !== undefined &&
+        position < range.since!
+      );
+    });
+    const missing = this.older.get(sessionId) ?? 0;
+    return retained.length + missing === snapshot.older_count
+      ? [...retained, ...snapshot.messages]
+      : null;
+  }
+
+  /** Whether the server holds messages older than those shown. */
+  hasOlder(sessionId: string): boolean {
+    return (this.older.get(sessionId) ?? 0) > 0;
+  }
+
+  /**
+   * Load the messages before the oldest one shown, a page at a time, until
+   * the whole chat is there. Pages never touch the newer messages. Never
+   * rejects: a failed page ends the run and `hasOlder` stays true.
+   */
+  backfill(
+    sessionId: string,
+    request: { isCurrent?: () => boolean } = {},
+  ): Promise<void> {
+    const existing = this.backfills.get(sessionId);
+    if (existing) return existing;
+    const epoch = this.epoch;
+    const promise = (async () => {
+      while (this.hasOlder(sessionId)) {
+        if (epoch !== this.epoch || (request.isCurrent && !request.isCurrent()))
+          return;
+        const oldest = this.oldestPosition(sessionId);
+        if (oldest === undefined) return;
+        const snapshot = await this.ports.load(sessionId, {
+          limit: this.ports.pageLimit ?? 100,
+          before: oldest,
+        });
+        // A complete reload or forgotten chat leaves nothing to add.
+        if (epoch !== this.epoch || !this.hasOlder(sessionId)) return;
+        // The transcript was replaced meanwhile: the page no longer adjoins it.
+        if (this.oldestPosition(sessionId) !== oldest) continue;
+        if (!this.prepend(sessionId, snapshot)) {
+          this.older.delete(sessionId);
+          return;
+        }
+      }
+    })()
+      // A failed page leaves the shown messages as they are; the next
+      // backfill carries on where this one stopped.
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.backfills.get(sessionId) === promise)
+          this.backfills.delete(sessionId);
+      });
+    this.backfills.set(sessionId, promise);
+    return promise;
+  }
+
+  private oldestPosition(sessionId: string): number | undefined {
+    let oldest: number | undefined;
+    for (const message of this.ports.read(sessionId) ?? []) {
+      const position = messagePosition(message);
+      if (position !== undefined && (oldest === undefined || position < oldest))
+        oldest = position;
+    }
+    return oldest;
+  }
+
+  /** Put a page of older messages in front; false when it added nothing. */
+  private prepend(sessionId: string, snapshot: T): boolean {
+    const shown = this.ports.read(sessionId);
+    const oldest = this.oldestPosition(sessionId);
+    if (!shown || oldest === undefined) return false;
+    const known = new Set(shown.map((message) => message.id));
+    const page = snapshot.messages.filter(
+      (message) =>
+        !known.has(message.id) &&
+        !this.isDiscarded(sessionId, message.id) &&
+        (messagePosition(message) ?? Number.POSITIVE_INFINITY) < oldest,
+    );
+    if (!page.length) return false;
+    this.ports.write(
+      sessionId,
+      sortHarnessMessages([
+        ...page.map((message) => this.hydrate(sessionId, message, new Map())),
+        ...shown,
+      ]),
+    );
+    this.older.set(sessionId, snapshot.older_count ?? 0);
+    this.touch(sessionId, true);
+    this.ports.onChange?.(sessionId);
+    return true;
   }
 
   /** Refresh only after every pre-terminal request for this session settles. */
@@ -280,6 +476,43 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     }
   }
 
+  /** A server message as shown: stored details merged in, ids set. */
+  private hydrate(
+    sessionId: string,
+    message: HarnessMessage,
+    previousParts: Map<string, HarnessPart>,
+  ): HarnessMessage {
+    const parts = (message.parts ?? []).map((raw) => {
+      const prior = previousParts.get(raw.id);
+      const cached = prior?.detail_loaded
+        ? prior
+        : this.cachedDetail(sessionId, raw.id);
+      const merged = cached
+        ? {
+            ...raw,
+            input: cached.input,
+            output: cached.output,
+            meta: cached.meta,
+            detail_loaded: true,
+            ...(cached.display ? { display: cached.display } : {}),
+          }
+        : raw;
+      return hydrateHarnessPart({
+        ...merged,
+        session_id: sessionId,
+        message_id: message.id,
+      });
+    });
+    const content =
+      message.role === "assistant" && !message.content
+        ? parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.output)
+            .join("")
+        : message.content;
+    return { ...message, content, session_id: sessionId, parts };
+  }
+
   private apply(
     sessionId: string,
     messages: HarnessMessage[],
@@ -294,37 +527,7 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     const incoming = sortHarnessMessages(
       messages
         .filter((message) => !this.isDiscarded(sessionId, message.id))
-        .map((message) => {
-          const parts = (message.parts ?? []).map((raw) => {
-            const prior = previousParts.get(raw.id);
-            const cached = prior?.detail_loaded
-              ? prior
-              : this.cachedDetail(sessionId, raw.id);
-            const merged = cached
-              ? {
-                  ...raw,
-                  input: cached.input,
-                  output: cached.output,
-                  meta: cached.meta,
-                  detail_loaded: true,
-                  ...(cached.display ? { display: cached.display } : {}),
-                }
-              : raw;
-            return hydrateHarnessPart({
-              ...merged,
-              session_id: sessionId,
-              message_id: message.id,
-            });
-          });
-          const content =
-            message.role === "assistant" && !message.content
-              ? parts
-                  .filter((part) => part.type === "text")
-                  .map((part) => part.output)
-                  .join("")
-              : message.content;
-          return { ...message, content, session_id: sessionId, parts };
-        }),
+        .map((message) => this.hydrate(sessionId, message, previousParts)),
     );
     // Prompts still on their way survive every snapshot until echoed.
     const reconciled =
@@ -643,11 +846,14 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     this.invalidateDetails(sessionId, true);
     this.transcripts.delete(sessionId);
     this.discarded.delete(sessionId);
+    this.older.delete(sessionId);
   }
 
   clear(): void {
     this.epoch += 1;
     this.discarded.clear();
+    this.older.clear();
+    this.backfills.clear();
     this.versions.clear();
     this.detailVersions.clear();
     this.detailFlights.clear();

@@ -18,6 +18,8 @@ from .mcp_client.naming import mcp_tool_name
 
 #: Part types whose full text travels with the lightweight timeline.
 TIMELINE_TEXT_PART_TYPES = ("text", "steer")
+#: Most messages one timeline request may return.
+TIMELINE_MAX_LIMIT = 500
 DISPLAY_TEXT_LIMIT = 240
 QUESTION_TEXT_LIMIT = 500
 PATCH_PREVIEW_LINES = 4
