@@ -132,7 +132,6 @@ export interface ChatMessagesProps {
    */
   editingMessageId?: string | null;
   onFork?: (messageId: string) => void | Promise<void>;
-  onDismissNotice?: (messageId: string) => void | Promise<void>;
   onCopy?: (message: HarnessMessage, text: string) => void | Promise<void>;
   onOpenSubtask?: (childSessionId: string) => void;
   onRequestPartDetail?: (
@@ -218,7 +217,6 @@ export function ChatMessages({
   editingMessageId = null,
   onFork,
   onCopy,
-  onDismissNotice,
   onOpenSubtask,
   onRequestPartDetail,
   onOpenFile,
@@ -327,7 +325,6 @@ export function ChatMessages({
   const handleEdit = useLatestHandler(onEdit);
   const handleFork = useLatestHandler(onFork);
   const handleCopy = useLatestHandler(onCopy);
-  const handleDismissNotice = useLatestHandler(onDismissNotice);
   const handleOpenSubtask = useLatestHandler(onOpenSubtask);
   const handleRequestPartDetail = useLatestHandler(onRequestPartDetail);
   const handleOpenFile = useLatestHandler(onOpenFile);
@@ -353,7 +350,6 @@ export function ChatMessages({
         onEdit={handleEdit}
         onFork={handleFork}
         onCopy={handleCopy}
-        onDismissNotice={handleDismissNotice}
         onOpenSubtask={handleOpenSubtask}
         onRequestPartDetail={handleRequestPartDetail}
         onOpenFile={handleOpenFile}
@@ -365,7 +361,6 @@ export function ChatMessages({
       disabled,
       editingMessageId,
       handleCopy,
-      handleDismissNotice,
       handleEdit,
       handleFork,
       handleOpenAttachment,
@@ -695,7 +690,6 @@ const MessageRow = memo(function MessageRow({
   onEdit,
   onFork,
   onCopy,
-  onDismissNotice,
   onOpenSubtask,
   onRequestPartDetail,
   onOpenFile,
@@ -790,23 +784,6 @@ const MessageRow = memo(function MessageRow({
         </PromptBubble>
       ) : (
         <View style={styles.assistantBody}>
-          {message.error && !message.notice_dismissed_at ? (
-            <Banner
-              tone="neutral"
-              title="Run failed"
-              message={message.error}
-              onDismiss={
-                onDismissNotice
-                  ? () => {
-                      void Promise.resolve(onDismissNotice(message.id)).catch(
-                        () => undefined,
-                      );
-                    }
-                  : undefined
-              }
-              testID={`chat-message-error-${message.id}`}
-            />
-          ) : null}
           {blocks.map((block, index) => (
             <BlockView
               key={blockKey(block, index)}
@@ -825,14 +802,6 @@ const MessageRow = memo(function MessageRow({
           ))}
           {todos?.length && todoPartId === null ? (
             <TodoCard todos={todos} />
-          ) : null}
-          {message.finish === "aborted" &&
-          !streaming &&
-          !message.notice_dismissed_at &&
-          !message.error ? (
-            <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-              Run stopped.
-            </Text>
           ) : null}
           {streaming ? (
             <View

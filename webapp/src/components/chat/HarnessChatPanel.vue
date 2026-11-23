@@ -11,6 +11,7 @@ import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness
 import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 import {
   buildComposerSheets,
+  runNotice,
   type ContextSheetState,
   type NoticeSheetState,
 } from '@opencuria/chat-core/composerSheets'
@@ -109,32 +110,9 @@ const contextSheet = computed<ContextSheetState | null>(() => {
   }
 })
 
-const activeNotice = computed<NoticeSheetState | null>(() => {
-  const messages = harness.activeMessages
-  // Instant auto-clear: only errors *after* the last user message count.
-  // The backend additionally dismisses priors on send (incl. edit rerun).
-  let lastUserIndex = -1
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i]?.role === 'user') {
-      lastUserIndex = i
-      break
-    }
-  }
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]
-    if (message?.role !== 'assistant' || !message.error) continue
-    if (i < lastUserIndex) break
-    if (message.notice_dismissed_at) continue
-    if (harness.dismissedNoticeIds[message.id]) continue
-    const stoppedByUser = message.finish === 'aborted' && message.error === 'aborted by user'
-    return {
-      messageId: message.id,
-      text: stoppedByUser ? 'Run stopped by user' : message.error,
-      tone: stoppedByUser ? 'info' : 'error',
-    }
-  }
-  return null
-})
+const activeNotice = computed<NoticeSheetState | null>(() =>
+  runNotice(harness.activeMessages, harness.dismissedNoticeIds),
+)
 
 const composerSheets = computed(() =>
   buildComposerSheets({

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildComposerSheets, optionLetter } from "../src/composerSheets";
+import {
+  buildComposerSheets,
+  optionLetter,
+  runNotice,
+  type RunNoticeMessage,
+} from "../src/composerSheets";
 import type {
   HarnessPermissionRequest,
   HarnessQuestionRequest,
@@ -218,6 +223,73 @@ describe("buildComposerSheets queue", () => {
       "soon",
       "late",
     ]);
+  });
+});
+
+function makeMessage(
+  id: string,
+  role: RunNoticeMessage["role"],
+  fields: Partial<RunNoticeMessage> = {},
+): RunNoticeMessage {
+  return { id, role, ...fields };
+}
+
+describe("runNotice", () => {
+  it("reports the newest run error after the last prompt", () => {
+    const notice = runNotice([
+      makeMessage("u1", "user"),
+      makeMessage("a1", "assistant", { error: "Old failure" }),
+      makeMessage("a2", "assistant", {
+        finish: "error",
+        error: "Rate limited",
+      }),
+    ]);
+
+    expect(notice).toEqual({
+      messageId: "a2",
+      text: "Rate limited",
+      tone: "error",
+    });
+  });
+
+  it("reads a stop by the user as information", () => {
+    const notice = runNotice([
+      makeMessage("u1", "user"),
+      makeMessage("a1", "assistant", {
+        finish: "aborted",
+        error: "aborted by user",
+      }),
+    ]);
+
+    expect(notice).toEqual({
+      messageId: "a1",
+      text: "Run stopped by user",
+      tone: "info",
+    });
+  });
+
+  it("clears once a newer prompt follows the failed run", () => {
+    expect(
+      runNotice([
+        makeMessage("a1", "assistant", { error: "Rate limited" }),
+        makeMessage("u2", "user"),
+        makeMessage("a2", "assistant"),
+      ]),
+    ).toBeNull();
+  });
+
+  it("skips notices dismissed on the server or optimistically", () => {
+    const messages = [
+      makeMessage("u1", "user"),
+      makeMessage("a1", "assistant", { error: "First" }),
+      makeMessage("a2", "assistant", {
+        error: "Second",
+        notice_dismissed_at: "2026-11-23T10:00:00Z",
+      }),
+    ];
+
+    expect(runNotice(messages)?.messageId).toBe("a1");
+    expect(runNotice(messages, { a1: true })).toBeNull();
   });
 });
 

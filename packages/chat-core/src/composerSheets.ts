@@ -1,4 +1,5 @@
 import type {
+  HarnessMessage,
   HarnessPermissionRequest,
   HarnessQuestionRequest,
   HarnessScheduledMessage,
@@ -41,6 +42,40 @@ export interface NoticeSheetState {
   messageId: string;
   text: string;
   tone: "error" | "info";
+}
+
+/** Message fields the run notice reads. */
+export type RunNoticeMessage = Pick<
+  HarnessMessage,
+  "id" | "role" | "error" | "finish" | "notice_dismissed_at"
+>;
+
+/**
+ * The failed or stopped run the composer reports in its `notice` sheet: the
+ * newest undismissed assistant error after the last user message, so a new
+ * prompt clears it at once (the backend also dismisses older notices on
+ * send). A stop by the user reads as information, not as an error.
+ * `dismissedIds` holds optimistic dismissals the server has not confirmed.
+ */
+export function runNotice(
+  messages: readonly RunNoticeMessage[],
+  dismissedIds: Readonly<Record<string, boolean>> = {},
+): NoticeSheetState | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.role === "user") return null;
+    if (!message.error) continue;
+    if (message.notice_dismissed_at || dismissedIds[message.id]) continue;
+    const stoppedByUser =
+      message.finish === "aborted" && message.error === "aborted by user";
+    return {
+      messageId: message.id,
+      text: stoppedByUser ? "Run stopped by user" : message.error,
+      tone: stoppedByUser ? "info" : "error",
+    };
+  }
+  return null;
 }
 
 export interface MentionSheetState {

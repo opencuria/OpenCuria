@@ -58,6 +58,7 @@ import {
 import {
   ComposerSheetStack,
   type ComposerGates,
+  type ComposerNotice,
   type ComposerQueue,
 } from "./ComposerSheets";
 import { SendLaterSheet } from "./SendLaterSheet";
@@ -174,6 +175,8 @@ export interface ChatComposerProps {
   gates?: ComposerGates;
   /** Queued steers and scheduled messages, shown as a sheet above the editor. */
   queue?: ComposerQueue;
+  /** The chat's failed or stopped run, shown as a sheet above the editor. */
+  notice?: ComposerNotice;
   /**
    * The draft is a sent prompt being edited: a banner above the field cancels
    * it, and `onSend` receives the edit.
@@ -236,6 +239,7 @@ export function ChatComposer({
   onChooseFiles,
   gates,
   queue,
+  notice,
   editing,
   voice,
   testID = "chat-composer",
@@ -320,11 +324,13 @@ export function ChatComposer({
         permissions: gates?.permissions,
         queue: queue?.steers,
         scheduled: queue?.scheduled,
+        notice: notice?.notice,
       }),
     [
       candidates,
       gates?.permissions,
       gates?.questions,
+      notice?.notice,
       query,
       queue?.scheduled,
       queue?.steers,
@@ -978,6 +984,7 @@ export function ChatComposer({
         sheets={sheets}
         gates={gates}
         queue={queue}
+        onDismissNotice={notice?.onDismiss}
         onChangeTime={(message) => {
           dismissKeyboard();
           setTimePicker({ kind: "reschedule", message });

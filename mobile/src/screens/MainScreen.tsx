@@ -17,6 +17,7 @@ import { KeyboardController } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
+import { runNotice } from "@opencuria/chat-core/composerSheets";
 import { messageRenderKey } from "@opencuria/chat-core/optimisticPrompts";
 import {
   formatSendTime,
@@ -60,7 +61,10 @@ import {
 } from "../components";
 import type { ComposerSubmission } from "../components/ChatComposer";
 import { subagentHeader } from "../components/subagentHeader";
-import type { ComposerQueue } from "../components/ComposerSheets";
+import type {
+  ComposerNotice,
+  ComposerQueue,
+} from "../components/ComposerSheets";
 import {
   ModelSheet,
   modelSheetEngines,
@@ -1394,6 +1398,18 @@ export function MainScreen(): React.JSX.Element {
             }),
         }
       : undefined;
+  // Failed and stopped runs show above the composer, as in the webapp.
+  const runNoticeState = useMemo(
+    () => runNotice(chat.messages),
+    [chat.messages],
+  );
+  const notice: ComposerNotice | undefined =
+    controller && navigationReady && !offline
+      ? {
+          notice: runNoticeState,
+          onDismiss: (id) => controller.dismissNotice(id),
+        }
+      : undefined;
 
   const requestNavigation = (
     workspaceId: string,
@@ -1976,6 +1992,7 @@ export function MainScreen(): React.JSX.Element {
                   ),
               }}
               queue={outgoing}
+              notice={notice}
               testID="chat-composer"
             />
           }
@@ -2025,9 +2042,6 @@ export function MainScreen(): React.JSX.Element {
                 !navigationReady &&
                 !error &&
                 !chat.error)
-            }
-            onDismissNotice={
-              offline ? undefined : (id) => controller!.dismissNotice(id)
             }
             messages={navigationReady ? chat.messages : EMPTY.messages}
             sessions={chat.sessions}

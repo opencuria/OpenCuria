@@ -395,3 +395,80 @@ describe("ComposerSheetStack outgoing messages", () => {
     );
   });
 });
+
+describe("ComposerSheetStack run notice", () => {
+  function renderNotice(
+    notice: React.ComponentProps<typeof ChatComposer>["notice"],
+    pending?: ComposerGates,
+  ) {
+    return render(
+      <ThemeProvider>
+        <ChatComposer
+          draft=""
+          onDraftChange={jest.fn()}
+          onSend={jest.fn()}
+          gates={pending}
+          notice={notice}
+        />
+      </ThemeProvider>,
+    );
+  }
+
+  it("reports a failed run above the composer and dismisses it", async () => {
+    const onDismiss = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(undefined);
+    renderNotice({
+      notice: { messageId: "msg-1", text: "Rate limited", tone: "error" },
+      onDismiss,
+    });
+
+    expect(screen.getByTestId("composer-notice-sheet")).toBeTruthy();
+    expect(screen.getByText("Run failed")).toBeTruthy();
+    expect(screen.getByText("Rate limited")).toBeTruthy();
+
+    // A failed dismissal leaves the notice for another try.
+    fireEvent.press(screen.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(onDismiss).toHaveBeenCalledWith("msg-1"));
+    fireEvent.press(screen.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(onDismiss).toHaveBeenCalledTimes(2));
+  });
+
+  it("reads a stopped run as information without the failure caption", () => {
+    renderNotice({
+      notice: { messageId: "msg-1", text: "Run stopped by user", tone: "info" },
+    });
+
+    expect(screen.getByText("Run stopped by user")).toBeTruthy();
+    expect(screen.queryByText("Run failed")).toBeNull();
+    // Nothing to dismiss without a host handler, e.g. offline.
+    expect(screen.queryByTestId("composer-notice-dismiss")).toBeNull();
+  });
+
+  it("peeks beneath an agent gate and shows nothing without a notice", () => {
+    const view = renderNotice(
+      {
+        notice: { messageId: "msg-1", text: "Rate limited", tone: "error" },
+        onDismiss: jest.fn(),
+      },
+      gates({ questions: [question] }),
+    );
+    expect(screen.getByTestId("composer-question-sheet")).toBeTruthy();
+    expect(screen.queryByTestId("composer-notice-sheet")).toBeNull();
+    expect(screen.getAllByTestId("composer-sheet-peek")).toHaveLength(1);
+
+    view.rerender(
+      <ThemeProvider>
+        <ChatComposer
+          draft=""
+          onDraftChange={jest.fn()}
+          onSend={jest.fn()}
+          notice={{ notice: null, onDismiss: jest.fn() }}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByTestId("composer-notice-sheet")).toBeNull();
+    expect(screen.queryByTestId("composer-sheet-top")).toBeNull();
+  });
+});

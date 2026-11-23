@@ -258,6 +258,32 @@ describe("ChatMessages", () => {
     expect(screen.getByRole("button", { name: "Copy message" })).toBeDisabled();
   });
 
+  it("leaves failed and stopped runs to the composer's notice sheet", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              ...message([part("t1", "text", "Partial answer", 0)]),
+              finish: "error",
+              error: "Rate limited",
+            },
+            {
+              ...message([]),
+              id: "m2",
+              finish: "aborted",
+              error: "aborted by user",
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByText("Partial answer")).toBeTruthy();
+    expect(screen.queryByText("Run failed")).toBeNull();
+    expect(screen.queryByText("Rate limited")).toBeNull();
+    expect(screen.queryByText(/aborted by user|Run stopped/)).toBeNull();
+  });
+
   it("keeps a live reply without a server position after the persisted turns", () => {
     const persisted = (
       id: string,

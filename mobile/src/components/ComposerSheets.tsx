@@ -21,6 +21,7 @@ import {
   Clock,
   Ellipsis,
   FileText,
+  Info,
   MessageCircleQuestion,
   PenLine,
   Plus,
@@ -28,7 +29,10 @@ import {
   Sparkles,
   X,
 } from "lucide-react-native";
-import type { ComposerSheet } from "@opencuria/chat-core/composerSheets";
+import type {
+  ComposerSheet,
+  NoticeSheetState,
+} from "@opencuria/chat-core/composerSheets";
 import type {
   HarnessPermissionRequest,
   HarnessPermissionResponse,
@@ -95,11 +99,18 @@ export interface ComposerQueue {
   onDelete: (messageId: string) => void | Promise<void>;
 }
 
+/** The open chat's failed or stopped run (`runNotice`); the host dismisses it. */
+export interface ComposerNotice {
+  notice: NoticeSheetState | null;
+  onDismiss?: (messageId: string) => void | Promise<void>;
+}
+
 export interface ComposerSheetStackProps {
   /** Ordered by `buildComposerSheets`; only the first sheet is interactive. */
   sheets: ComposerSheet[];
   gates?: ComposerGates;
   queue?: ComposerQueue;
+  onDismissNotice?: ComposerNotice["onDismiss"];
   /** Opens a date and time picker for a scheduled message. */
   onChangeTime?: (message: HarnessScheduledMessage) => void;
   onSelectCandidate: (candidate: MentionCandidate) => void;
@@ -138,6 +149,7 @@ export function ComposerSheetStack({
   sheets,
   gates,
   queue,
+  onDismissNotice,
   onChangeTime,
   onSelectCandidate,
   testID = "composer-sheet-stack",
@@ -199,6 +211,8 @@ export function ComposerSheetStack({
         onChangeTime={onChangeTime}
       />
     );
+  else if (top?.kind === "notice" && top.notice)
+    content = <NoticeSheet notice={top.notice} onDismiss={onDismissNotice} />;
 
   const shown = content !== null;
   // Without sheets the stack adds nothing, also before its next layout pass.
@@ -993,6 +1007,70 @@ function QueueText({
   );
 }
 
+/**
+ * The failed or stopped run, laid out like an outgoing message row. A long
+ * error scrolls within the sheet and stays selectable for copying.
+ */
+function NoticeSheet({
+  notice,
+  onDismiss,
+}: {
+  notice: NoticeSheetState;
+  onDismiss?: ComposerNotice["onDismiss"];
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const failed = notice.tone === "error";
+  return (
+    <View
+      accessibilityRole="alert"
+      testID="composer-notice-sheet"
+      style={styles.noticeRow}
+    >
+      <View style={styles.noticeIcon}>
+        {failed ? (
+          <CircleAlert size={17} color={theme.danger} />
+        ) : (
+          <Info size={17} color={theme.mutedText} />
+        )}
+      </View>
+      <ScrollView
+        style={styles.noticeScroll}
+        contentContainerStyle={styles.noticeText}
+        nestedScrollEnabled
+        scrollsToTop={false}
+      >
+        {failed ? (
+          <Text style={[styles.queueCaption, { color: theme.danger }]}>
+            Run failed
+          </Text>
+        ) : null}
+        <Text
+          selectable
+          style={[styles.queueBody, { color: theme.text }]}
+          testID="composer-notice-text"
+        >
+          {notice.text}
+        </Text>
+      </ScrollView>
+      {onDismiss ? (
+        <View style={styles.noticeIcon}>
+          <IconButton
+            symbol="xmark"
+            icon={<X size={17} color={theme.mutedText} />}
+            label="Dismiss"
+            tone="quiet"
+            size={40}
+            onPress={() => {
+              void settle(() => onDismiss(notice.messageId));
+            }}
+            testID="composer-notice-dismiss"
+          />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function MentionSheet({
   candidates,
   onSelect,
@@ -1176,4 +1254,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  // A queue row that grows with a long error; icon and dismiss stay at the top.
+  noticeRow: {
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingLeft: 16,
+    paddingRight: 6,
+  },
+  noticeIcon: { alignSelf: "flex-start", height: 52, justifyContent: "center" },
+  noticeScroll: { flex: 1, minWidth: 0, maxHeight: 160 },
+  noticeText: { gap: 1, paddingVertical: 8 },
 });
