@@ -98,6 +98,7 @@ function setup(
     operation: vi.fn(async () => ({ ok: true, snapshot: repo })),
     commitMessage: vi.fn(async () => ({ message: " Subject " })),
     fileContent: vi.fn(),
+    fileLink: vi.fn(),
   };
   const notify = vi.fn();
   const controller = new GitController(git, "ws", { notify, selection });
@@ -497,5 +498,29 @@ describe("GitController history and polling", () => {
     controller.setVisible(false);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(git.repos).not.toHaveBeenCalled();
+  });
+});
+
+describe("GitController diffs", () => {
+  it("links the new side of a change: index, worktree or a commit", async () => {
+    const { controller, git } = setup();
+    await controller.refresh();
+    const link = { path: "/workspace/app/a.png", objectId: "b".repeat(40) };
+    git.fileLink.mockResolvedValue(link);
+    await expect(controller.newFileLink("a.png", { staged: true })).resolves.toBe(link);
+    expect(git.fileLink).toHaveBeenLastCalledWith("ws", "/workspace/app", "a.png", "index");
+    await controller.newFileLink("a.png", { staged: false });
+    expect(git.fileLink).toHaveBeenLastCalledWith("ws", "/workspace/app", "a.png", "worktree");
+    git.fileLink.mockResolvedValue(null);
+    await expect(controller.newFileLink("a.png", { hash: "abc123" })).resolves.toBeNull();
+    expect(git.fileLink).toHaveBeenLastCalledWith("ws", "/workspace/app", "a.png", "abc123");
+  });
+
+  it("needs a selected repository", async () => {
+    const { controller, git } = setup();
+    await expect(controller.newFileLink("a.png", { staged: false })).rejects.toThrow(
+      "No repository selected",
+    );
+    expect(git.fileLink).not.toHaveBeenCalled();
   });
 });

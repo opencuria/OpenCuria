@@ -166,13 +166,41 @@ export class MediaCache {
     // expo-video streams and seeks with range requests.
     if (kind === "video")
       return { uri: link.contentUrl, release: () => undefined };
+    return this.pinImage(safePath, safePath, link, generation);
+  }
+
+  /**
+   * Pin an image behind a link the caller signed, such as a Git index or
+   * commit version (cached by its object id), like resolvePinned.
+   */
+  async pinLink(link: WorkspaceFileLink): Promise<PinnedWorkspaceMedia> {
+    const safePath = validateWorkspaceMediaPath(link.path);
+    if (classifyWorkspaceFile(safePath) !== "image") {
+      throw new NativeMediaError(
+        "Only workspace images can be previewed.",
+        "unsupported_preview",
+      );
+    }
+    const generation = this.assertUsable();
+    assertTransferable(link);
+    const key = link.objectId ? `git-blob:${link.objectId}` : safePath;
+    return this.pinImage(key, safePath, link, generation);
+  }
+
+  /** Download `link` into the cache under `key` and pin it until release(). */
+  private async pinImage(
+    key: string,
+    path: string,
+    link: WorkspaceFileLink,
+    generation: number,
+  ): Promise<PinnedWorkspaceMedia> {
     let current: CacheEntry | undefined;
     // Fresh downloads are reserved until awaiting callers pin them; load
     // again if the file still went away (e.g. it was deleted from the cache).
     for (let attempt = 0; attempt < 2 && !current; attempt += 1) {
-      const entry = await this.getFile(safePath, safePath, link, "image");
+      const entry = await this.getFile(key, path, link, "image");
       this.assertGeneration(generation);
-      const cached = this.cache.get(safePath);
+      const cached = this.cache.get(key);
       if (cached?.uri === entry.uri) current = cached;
     }
     if (!current) {
@@ -190,7 +218,7 @@ export class MediaCache {
       release: () => {
         if (released) return;
         released = true;
-        this.unpin(safePath, pinned.uri);
+        this.unpin(key, pinned.uri);
       },
     };
   }

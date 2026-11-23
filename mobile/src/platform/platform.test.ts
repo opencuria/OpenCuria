@@ -161,6 +161,57 @@ describe("MediaCache", () => {
     await media.dispose();
   });
 
+  it("pins Git blob links by object id and file links like their path", async () => {
+    const { client, link } = filesClient(3, "img");
+    const media = new MediaCache(client, "workspace", "scope");
+    const blob = (objectId: string) =>
+      fileLink("/workspace/repo/logo.png", 3, {
+        modifiedAt: 0,
+        objectId,
+        contentUrl: `https://curia.test/blob/${objectId}`,
+      });
+    const staged = await media.pinLink(blob("a".repeat(40)));
+    const again = await media.pinLink(blob("a".repeat(40)));
+    const committed = await media.pinLink(blob("c".repeat(40)));
+    expect(again.uri).toBe(staged.uri);
+    expect(committed.uri).not.toBe(staged.uri);
+    expect(__downloads.map(([url]) => url)).toEqual([
+      `https://curia.test/blob/${"a".repeat(40)}`,
+      `https://curia.test/blob/${"c".repeat(40)}`,
+    ]);
+    expect(link).not.toHaveBeenCalled();
+
+    // The worktree version shares the cached copy of its path.
+    const onDisk = await media.pinLink(fileLink("/workspace/repo/logo.png", 3));
+    const resolved = await media.resolvePinned("/workspace/repo/logo.png");
+    expect(resolved.uri).toBe(onDisk.uri);
+    expect(__downloads).toHaveLength(3);
+    for (const pinned of [staged, again, committed, onDisk, resolved])
+      pinned.release();
+    await media.dispose();
+    expect(__files.size).toBe(0);
+  });
+
+  it("refuses links to non-images, unsafe paths and oversized files", async () => {
+    const { client } = filesClient(3);
+    const media = new MediaCache(client, "workspace", "scope");
+    await expect(
+      media.pinLink(fileLink("/workspace/repo/notes.txt", 3)),
+    ).rejects.toMatchObject({ code: "unsupported_preview" });
+    await expect(
+      media.pinLink(fileLink("/etc/logo.png", 3)),
+    ).rejects.toMatchObject({ code: "invalid_path" });
+    await expect(
+      media.pinLink(
+        fileLink("/workspace/huge.png", FILE_TRANSFER_MAX_BYTES + 1, {
+          objectId: "b".repeat(40),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "size_limit" });
+    expect(__downloads).toHaveLength(0);
+    await media.dispose();
+  });
+
   it("describes files and refuses those above the transfer limit", async () => {
     const { client } = filesClient(FILE_TRANSFER_MAX_BYTES + 1);
     const media = new MediaCache(client, "workspace", "scope");

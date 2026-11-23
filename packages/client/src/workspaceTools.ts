@@ -10,7 +10,13 @@ import type {
   RawGitReposResponse,
 } from "@opencuria/chat-core/gitTypes";
 import { GIT_HISTORY_LIMIT } from "@opencuria/chat-core/gitModel";
+import type { WorkspaceFileLink } from "@opencuria/chat-core/workspaceFiles";
 import type { ApiClient } from "./api";
+import {
+  fileLinkError,
+  workspaceFileLink,
+  type RawWorkspaceFileLinks,
+} from "./files";
 import type { RealtimeClient } from "./realtime";
 
 function workspacePath(workspaceId: string, suffix: string): string {
@@ -102,6 +108,29 @@ export function createGitApi(api: () => ApiClient) {
         ),
         signal,
       ),
+    /**
+     * Signed streaming link to one file side, any size up to the transfer
+     * limit; null when that side has no such file.
+     */
+    fileLink: async (
+      workspaceId: string,
+      repoPath: string,
+      path: string,
+      revision: GitFileRevision,
+      signal?: AbortSignal,
+    ): Promise<WorkspaceFileLink | null> => {
+      const response = await api().get<RawWorkspaceFileLinks>(
+        workspacePath(
+          workspaceId,
+          `git/file-link/?${new URLSearchParams({ repo_path: repoPath, path, revision })}`,
+        ),
+        signal,
+      );
+      const entry = response.files[0];
+      if (entry?.error === "file_not_found") return null;
+      if (!entry || entry.error) throw fileLinkError(entry?.error || "file_unreadable");
+      return workspaceFileLink(entry, response.expires_at, api().getContext().baseUrl);
+    },
   };
 }
 

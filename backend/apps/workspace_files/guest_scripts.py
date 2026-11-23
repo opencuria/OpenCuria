@@ -1,5 +1,7 @@
 """Commands that stat, stream, archive, write and thumbnail workspace files.
 
+Git blobs (a file as the index or a commit has it) stat and stream like files.
+
 They run inside the guest (Linux, or MSYS2 bash on Windows) through the
 runner's process streams. Paths are always argv values, never interpolated
 into source. Every command resolves symlinks in the guest and refuses targets
@@ -25,6 +27,20 @@ real=$(realpath -e -- "$1" 2>/dev/null) || { echo 'ERR missing'; exit 0; }
 case $real in "$root"|"$root"/*) ;; *) echo 'ERR outside'; exit 0 ;; esac
 """
 
+# Byte range of a payload of $size bytes from the arguments $2 (first),
+# $3 (last) and $4 (suffix length): sets $first and $last or answers RANGE.
+_RANGE = r"""
+first=0; last=$((size - 1))
+if [ "$4" != - ]; then
+    [ "$4" -gt 0 ] && [ "$size" -gt 0 ] || { echo "RANGE $size"; exit 0; }
+    [ "$4" -lt "$size" ] && first=$((size - $4))
+elif [ "$2" != - ]; then
+    [ "$2" -lt "$size" ] || { echo "RANGE $size"; exit 0; }
+    first=$2
+    [ "$3" != - ] && [ "$3" -lt "$last" ] && last=$3
+fi
+"""
+
 _READ = (
     _RESOLVE
     + r"""
@@ -37,19 +53,59 @@ if [ "$size" -gt "$5" ]; then echo "ERR too_large $size"; exit 0; fi
 if [ "$6" = "$size-$mtime" ]; then
     echo "NOTMOD $size $mtime"; exit 0
 fi
-first=0; last=$((size - 1))
-if [ "$4" != - ]; then
-    [ "$4" -gt 0 ] && [ "$size" -gt 0 ] || { echo "RANGE $size"; exit 0; }
-    [ "$4" -lt "$size" ] && first=$((size - $4))
-elif [ "$2" != - ]; then
-    [ "$2" -lt "$size" ] || { echo "RANGE $size"; exit 0; }
-    first=$2
-    [ "$3" != - ] && [ "$3" -lt "$last" ] && last=$3
-fi
+"""
+    + _RANGE
+    + r"""
 echo "OK $size $mtime $first $last"
 [ "$size" -gt 0 ] || exit 0
 if [ "$first" -eq 0 ] && [ "$last" -eq $((size - 1)) ]; then exec cat -- "$real"; fi
 tail -c +"$((first + 1))" -- "$real" | head -c "$((last - first + 1))"
+"""
+)
+
+# Git commands run in the repository named by $1, which must be inside
+# /workspace. Blobs have no modification time (0); their object id is their
+# version, so a matching ETag is the object id itself.
+_GIT_REPOSITORY = r"""
+root=$(realpath -e /workspace 2>/dev/null) || { echo 'ERR unavailable'; exit 0; }
+repo=$(realpath -e -- "$1" 2>/dev/null) || { echo 'ERR missing'; exit 0; }
+case $repo in "$root"|"$root"/*) ;; *) echo 'ERR outside'; exit 0 ;; esac
+cd -- "$repo" 2>/dev/null || { echo 'ERR missing'; exit 0; }
+command -v git >/dev/null 2>&1 || { echo 'ERR unavailable'; exit 0; }
+"""
+
+# $2 is a blob name such as ':0:path', 'HEAD:path' or '<commit>:path'. A path
+# the revision lacks (or an unborn HEAD) is missing; trees and submodules are
+# not files.
+_GIT_STAT = (
+    _GIT_REPOSITORY
+    + r"""
+oid=$(git rev-parse --verify --quiet "$2" 2>/dev/null) || {
+    echo 'ERR missing'; exit 0; }
+[ "$(git cat-file -t "$oid" 2>/dev/null)" = blob ] || {
+    echo 'ERR unsupported'; exit 0; }
+size=$(git cat-file -s "$oid" 2>/dev/null) || { echo 'ERR unreadable'; exit 0; }
+echo "OK $oid $size"
+"""
+)
+
+# Arguments as for _READ, plus the object id as $7.
+_GIT_READ = (
+    _GIT_REPOSITORY
+    + r"""
+[ "$(git cat-file -t "$7" 2>/dev/null)" = blob ] || { echo 'ERR missing'; exit 0; }
+size=$(git cat-file -s "$7" 2>/dev/null) || { echo 'ERR unreadable'; exit 0; }
+if [ "$size" -gt "$5" ]; then echo "ERR too_large $size"; exit 0; fi
+if [ "$6" = "$7" ]; then echo "NOTMOD $size 0"; exit 0; fi
+"""
+    + _RANGE
+    + r"""
+echo "OK $size 0 $first $last"
+[ "$size" -gt 0 ] || exit 0
+if [ "$first" -eq 0 ] && [ "$last" -eq $((size - 1)) ]; then
+    exec git cat-file blob "$7"
+fi
+git cat-file blob "$7" | tail -c +"$((first + 1))" | head -c "$((last - first + 1))"
 """
 )
 
@@ -203,6 +259,37 @@ def read_command(
         _optional(suffix),
         str(maximum),
         etag or "-",
+    ]
+
+
+def git_stat_command(repo: str, name: str) -> list[str]:
+    """Return argv printing ``OK <object id> <size>`` of the blob *name*."""
+    return ["sh", "-c", _GIT_STAT, "opencuria-git-stat", repo, name]
+
+
+def git_read_command(
+    repo: str,
+    object_id: str,
+    *,
+    first: int | None,
+    last: int | None,
+    suffix: int | None,
+    maximum: int,
+    etag: str = "",
+) -> list[str]:
+    """Return argv streaming one Git blob or one byte range of it."""
+    return [
+        "sh",
+        "-c",
+        _GIT_READ,
+        "opencuria-git-read",
+        repo,
+        _optional(first),
+        _optional(last),
+        _optional(suffix),
+        str(maximum),
+        etag or "-",
+        object_id,
     ]
 
 

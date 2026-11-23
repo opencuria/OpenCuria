@@ -46,6 +46,8 @@ export interface WorkspaceFileLink {
   downloadUrl: string;
   /** Absolute URL of a tiny blurred JPEG (images and videos), else empty. */
   thumbnailUrl: string;
+  /** The Git blob a link to an index or commit version streams. */
+  objectId?: string;
   /** Unix seconds after which the URLs stop working. */
   expiresAt: number;
 }

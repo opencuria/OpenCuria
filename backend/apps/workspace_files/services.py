@@ -5,7 +5,8 @@ link (:meth:`WorkspaceFileService.create_upload`) over the authenticated REST
 API, then transfer bytes through :mod:`.http`. Bytes travel as one runner
 process stream per request (:mod:`.guest_scripts`), so neither the backend nor
 the client ever holds a whole file: transfers are bounded by
-:data:`FILE_TRANSFER_MAX_BYTES`, not by memory.
+:data:`FILE_TRANSFER_MAX_BYTES`, not by memory. Files as a Git index or commit
+has them (:meth:`WorkspaceFileService.git_link`) stream the same way.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from asgiref.sync import sync_to_async
 from django.core.cache import cache
 
 from apps.harness.access.base import StreamClosedError, WorkspaceByteStream
+from apps.runners.git_validation import validate_git_args, validate_repo_path
 
 from . import guest_scripts, tokens
 from .media_types import ARCHIVE_TYPE, MediaType, media_type
@@ -151,6 +153,8 @@ class FileLink:
     content_url: str = ""
     download_url: str = ""
     thumbnail_url: str = ""
+    #: Git object the link streams (Git index and commit sides only).
+    object_id: str = ""
     error: str = ""
 
 
@@ -353,6 +357,90 @@ class WorkspaceFileService:
             )
         return FileLinks(files=files, expires_at=expires_at)
 
+    async def git_link(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        repo_path: str,
+        path: str,
+        revision: str,
+        user: Any,
+        organization_id: uuid.UUID,
+    ) -> FileLinks:
+        """Sign a link to one side of a file in a Git repository.
+
+        ``worktree`` is the file on disk (see :meth:`links`). ``index``,
+        ``head`` and commits resolve to a Git blob whose link names that
+        immutable object. A side without the file links ``file_not_found``.
+        """
+        try:
+            repo = clean_workspace_path(validate_repo_path(repo_path))
+            args = validate_git_args(
+                "file_content", {"path": path, "revision": revision}
+            )
+        except ValueError as exc:
+            raise FileAccessError(400, "invalid_path", str(exc)) from exc
+        file_path = clean_workspace_path(posixpath.join(repo, args["path"]))
+        if args["revision"] == "worktree":
+            return await self.links(
+                workspace_id, [file_path], user=user, organization_id=organization_id
+            )
+        await self._authorize_user(
+            workspace_id, user=user, organization_id=organization_id
+        )
+        # Stage 0 keeps a file named like "1:x" from naming a merge stage.
+        prefix = {"index": ":0:", "head": "HEAD:"}.get(
+            args["revision"], f"{args['revision']}:"
+        )
+        entry = await self._stat_blob(workspace_id, repo, prefix + args["path"])
+        expires_at = tokens.read_link_expiry()
+        link = self._link(
+            entry,
+            file_path,
+            user.id,
+            organization_id,
+            workspace_id,
+            expires_at,
+            requested=file_path,
+        )
+        return FileLinks(files=[link], expires_at=expires_at)
+
+    async def _stat_blob(
+        self, workspace_id: uuid.UUID, repo: str, name: str
+    ) -> dict[str, Any]:
+        """Return a stat entry for the Git blob *name* of *repo*."""
+        try:
+            accessor = await self._accessor_factory(str(workspace_id))
+            result = await accessor.exec_wait(
+                guest_scripts.git_stat_command(repo, name), timeout=STAT_TIMEOUT
+            )
+        except Exception as exc:
+            raise _map_access_errors(exc) from exc
+        words = result.stdout.split()
+        if (
+            len(words) == 3
+            and words[0] == "OK"
+            and tokens.is_object_id(words[1])
+            and words[2].isdigit()
+        ):
+            return {
+                "type": "file",
+                "size": int(words[2]),
+                "mtime": 0,
+                "repo": repo,
+                "object_id": words[1],
+            }
+        if len(words) == 2 and words[0] == "ERR" and words[1] != "unavailable":
+            return {"error": words[1]}
+        log.warning(
+            "workspace_files_git_stat_failed",
+            workspace_id=str(workspace_id),
+            exit_code=result.exit_code,
+        )
+        raise FileAccessError(
+            503, "workspace_unavailable", "The workspace did not answer."
+        )
+
     async def _stat(self, workspace_id: uuid.UUID, paths: list[str]) -> dict[str, Any]:
         """Return guest metadata per path in one guest call."""
         try:
@@ -396,14 +484,27 @@ class WorkspaceFileService:
         kind_of_entry = "directory" if entry.get("type") == "directory" else "file"
         size = int(entry.get("size") or 0) if kind_of_entry == "file" else 0
         modified_at = int(entry.get("mtime") or 0)
-        token = tokens.issue_read_token(
-            user_id=user_id,
-            organization_id=str(organization_id),
-            workspace_id=str(workspace_id),
-            path=path,
-            expires_at=expires_at,
-        )
-        version = f"{size}-{modified_at}"
+        object_id = str(entry.get("object_id") or "")
+        if object_id:
+            token = tokens.issue_blob_token(
+                user_id=user_id,
+                organization_id=str(organization_id),
+                workspace_id=str(workspace_id),
+                path=path,
+                repo=str(entry["repo"]),
+                object_id=object_id,
+                expires_at=expires_at,
+            )
+            version = object_id
+        else:
+            token = tokens.issue_read_token(
+                user_id=user_id,
+                organization_id=str(organization_id),
+                workspace_id=str(workspace_id),
+                path=path,
+                expires_at=expires_at,
+            )
+            version = f"{size}-{modified_at}"
         if kind_of_entry == "directory":
             archive = f"{name}.tar.gz"
             return FileLink(
@@ -429,9 +530,10 @@ class WorkspaceFileService:
             download_url=url + "&download=1",
             thumbnail_url=(
                 thumbnail_url(token, version)
-                if media.kind in ("image", "video") and size > 0
+                if media.kind in ("image", "video") and size > 0 and not object_id
                 else ""
             ),
+            object_id=object_id,
         )
 
     # -- Uploads ------------------------------------------------------------
@@ -560,27 +662,43 @@ class WorkspaceFileService:
     ) -> FileTransfer:
         """Open the linked file (or one range of it) as a streaming response.
 
-        Directories stream as a ``.tar.gz`` archive. The caller must call
-        :attr:`FileTransfer.close` after the body, also on errors.
+        Directories stream as a ``.tar.gz`` archive, blob links the Git object
+        they name. The caller must call :attr:`FileTransfer.close` after the
+        body, also on errors.
         """
         await self.authorize(claims)
         name = posixpath.basename(claims.path) or "workspace"
         first, last, suffix = byte_range or (None, None, None)
+        if claims.operation == "blob":
+            command = guest_scripts.git_read_command(
+                claims.repo,
+                claims.object_id,
+                first=first,
+                last=last,
+                suffix=suffix,
+                maximum=FILE_TRANSFER_MAX_BYTES,
+                etag=if_none_match,
+            )
+        else:
+            command = guest_scripts.read_command(
+                claims.path,
+                first=first,
+                last=last,
+                suffix=suffix,
+                maximum=FILE_TRANSFER_MAX_BYTES,
+                etag=if_none_match,
+            )
         slot = self._transfer_slot(claims.workspace_id)
         await slot.__aenter__()
         try:
             stream, words, leftover = await self._open_with_header(
-                claims.workspace_id,
-                guest_scripts.read_command(
-                    claims.path,
-                    first=first,
-                    last=last,
-                    suffix=suffix,
-                    maximum=FILE_TRANSFER_MAX_BYTES,
-                    etag=if_none_match,
-                ),
+                claims.workspace_id, command
             )
-            if words[:2] == ["ERR", "directory"] and byte_range is None:
+            if (
+                words[:2] == ["ERR", "directory"]
+                and byte_range is None
+                and claims.operation == "read"
+            ):
                 await stream.aclose()
                 stream, words, leftover = await self._open_with_header(
                     claims.workspace_id,
@@ -592,7 +710,13 @@ class WorkspaceFileService:
                 transfer.ranged = False
             else:
                 transfer = await self._transfer(
-                    words, leftover, stream, media_type(name), name, head
+                    words,
+                    leftover,
+                    stream,
+                    media_type(name),
+                    name,
+                    head,
+                    etag=claims.object_id,
                 )
         except BaseException:
             await slot.__aexit__(None, None, None)
@@ -616,8 +740,14 @@ class WorkspaceFileService:
         media: MediaType,
         filename: str,
         head: bool,
+        *,
+        etag: str = "",
     ) -> FileTransfer:
-        """Turn a guest header into a response and its body iterator."""
+        """Turn a guest header into a response and its body iterator.
+
+        The ETag is ``<size>-<mtime>`` unless the caller knows a better one
+        (a blob's object id).
+        """
         tag = words[0] if words else ""
         if tag == "NOTMOD" and len(words) == 3:
             size, modified_at = int(words[1]), int(words[2])
@@ -627,7 +757,7 @@ class WorkspaceFileService:
                 media,
                 filename,
                 size=size,
-                etag=f"{size}-{modified_at}",
+                etag=etag or f"{size}-{modified_at}",
                 modified_at=modified_at,
             )
         if tag == "RANGE" and len(words) == 2:
@@ -649,7 +779,7 @@ class WorkspaceFileService:
             size=size,
             first=first,
             last=last,
-            etag=f"{size}-{modified_at}",
+            etag=etag or f"{size}-{modified_at}",
             modified_at=modified_at,
             close=stream.aclose,
         )

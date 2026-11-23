@@ -35,6 +35,7 @@ import {
   getGitRepo,
   getGitRepos,
   readGitFileContent,
+  readGitFileLink,
   runGitOperation,
 } from '@/services/git.api'
 import { useNotificationStore } from '@/stores/notifications'
@@ -71,6 +72,8 @@ const transport: GitTransport = {
   commitMessage: (workspaceId, repoPath) => generateGitCommitMessage(workspaceId, repoPath),
   fileContent: (workspaceId, repoPath, path, revision) =>
     readGitFileContent(workspaceId, repoPath, path, revision),
+  fileLink: (workspaceId, repoPath, path, revision) =>
+    readGitFileLink(workspaceId, repoPath, path, revision),
 }
 
 export const useGitStore = defineStore('git', () => {

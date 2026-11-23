@@ -6,8 +6,10 @@ import gzip
 import io
 import json
 import shutil
+import subprocess
 import tarfile
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -77,6 +79,38 @@ def test_upload_tokens_carry_the_exact_file():
     claims = tokens.verify_token(token, "upload", now=100)
     assert (claims.filename, claims.size, claims.conflict) == ("a.txt", 3, "replace")
     assert tokens.verify_token(token, "read", now=100) is None
+
+
+def test_blob_tokens_name_one_git_object_and_only_stream_it():
+    object_id = "a" * 40
+    token = tokens.issue_blob_token(
+        user_id=3,
+        organization_id="org",
+        workspace_id="ws",
+        path="/workspace/repo/logo.png",
+        repo="/workspace/repo",
+        object_id=object_id,
+        expires_at=5000,
+    )
+    claims = tokens.verify_token(token, "blob", now=1000)
+    assert claims is not None and claims.operation == "blob"
+    assert (claims.repo, claims.object_id) == ("/workspace/repo", object_id)
+    assert tokens.verify_token(token, "read", now=1000) is None
+    assert tokens.verify_token(token, "upload", now=1000) is None
+    read = tokens.issue_read_token(
+        user_id=3, organization_id="org", workspace_id="ws", path="/a", expires_at=5000
+    )
+    assert tokens.verify_token(read, "blob", now=1000) is None
+    forged = tokens.issue_blob_token(
+        user_id=3,
+        organization_id="org",
+        workspace_id="ws",
+        path="/workspace/repo/logo.png",
+        repo="/workspace/repo",
+        object_id="HEAD",
+        expires_at=5000,
+    )
+    assert tokens.verify_token(forged, "blob", now=1000) is None
 
 
 @pytest.mark.parametrize(
@@ -259,6 +293,141 @@ def test_busy_workspaces_answer_retry_later(file_world, monkeypatch):
     url = _api(file_world.links("/workspace/a.txt")["/workspace/a.txt"]["content_url"])
     status, headers, _ = call("GET", url)
     assert status == 503 and headers["retry-after"] == "2"
+
+
+# -- Git file sides -----------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=T", "-c", "user.email=t@x.test", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def git_world(file_world):
+    """A repository whose logo differs between commit, index and worktree."""
+    repo = file_world.root / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    committed, staged = _png(30, 20), _png(60, 20)
+    (repo / "assets").mkdir()
+    (repo / "assets" / "logo.png").write_bytes(committed)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "Logo")
+    (repo / "assets" / "logo.png").write_bytes(staged)
+    _git(repo, "add", ".")
+    (repo / "assets" / "logo.png").unlink()
+    file_world.git = file_world.client(
+        permissions=[APIKeyPermission.WORKSPACES_GIT_READ.value]
+    )
+    commit = _git(repo, "rev-parse", "HEAD")
+    file_world.blobs = {
+        revision: (data, _git(repo, "rev-parse", f"{name}:assets/logo.png"))
+        for revision, name, data in (
+            ("head", "HEAD", committed),
+            (commit, commit, committed),
+            ("index", ":0", staged),
+        )
+    }
+    return file_world
+
+
+def _git_link(world, revision, *, path="assets/logo.png", client=None):
+    response = (client or world.git).get(
+        f"/api/v1/workspaces/{world.workspace.id}/git/file-link/",
+        {"repo_path": "/workspace/repo", "path": path, "revision": revision},
+    )
+    return response
+
+
+def test_git_links_stream_index_head_and_commit_blobs(git_world):
+    for revision, (data, object_id) in git_world.blobs.items():
+        response = _git_link(git_world, revision)
+        assert response.status_code == 200, response.content
+        link = response.json()["files"][0]
+        assert link["path"] == "/workspace/repo/assets/logo.png"
+        assert (link["kind"], link["size"]) == ("image", len(data))
+        assert link["object_id"] == object_id
+        assert link["thumbnail_url"] == ""
+        assert link["content_url"].endswith(f"/logo.png?v={link['object_id']}")
+        status, headers, body = call("GET", _api(link["content_url"]))
+        assert status == 200 and body == data
+        assert headers["content-type"] == "image/png"
+        assert headers["etag"] == f'"{link["object_id"]}"'
+        assert headers["cache-control"] == "private, max-age=3600"
+        assert "last-modified" not in headers
+    staged = git_world.blobs["index"][0]
+    link = _git_link(git_world, "index").json()["files"][0]
+    url = _api(link["content_url"])
+    status, headers, body = call("GET", url, headers={"Range": "bytes=10-19"})
+    assert status == 206 and body == staged[10:20]
+    assert headers["content-range"] == f"bytes 10-19/{link['size']}"
+    etag = f'"{link["object_id"]}"'
+    status, _, body = call("GET", url, headers={"If-None-Match": etag})
+    assert status == 304 and body == b""
+    # A blob link is no file link: it never previews or reads the worktree.
+    thumbnail = url.replace("/content/", "/thumbnail/").split("/logo.png")[0]
+    assert call("GET", thumbnail)[0] == 404
+    assert all(stream.closed for stream in git_world.accessor.streams)
+
+
+def test_git_links_keep_streaming_the_signed_blob(git_world):
+    link = _git_link(git_world, "index").json()["files"][0]
+    repo = git_world.root / "repo"
+    (repo / "assets" / "logo.png").write_bytes(b"newer")
+    _git(repo, "add", ".")
+    status, _, body = call("GET", _api(link["content_url"]))
+    assert status == 200 and body == git_world.blobs["index"][0]
+    assert _git_link(git_world, "index").json()["files"][0]["size"] == 5
+
+
+def test_git_links_report_missing_sides_and_worktree_files(git_world):
+    deleted = _git_link(git_world, "worktree").json()["files"][0]
+    assert deleted["error"] == "file_not_found"
+    assert (
+        _git_link(git_world, "index", path="nope.png").json()["files"][0]["error"]
+        == "file_not_found"
+    )
+    assert (
+        _git_link(git_world, "head", path="assets").json()["files"][0]["error"]
+        == "unsupported_file"
+    )
+    (git_world.root / "repo" / "assets" / "logo.png").write_bytes(b"disk")
+    on_disk = _git_link(git_world, "worktree").json()["files"][0]
+    assert on_disk["object_id"] == "" and on_disk["size"] == 4
+    assert call("GET", _api(on_disk["content_url"]))[2] == b"disk"
+
+
+def test_git_links_validate_input_permission_and_ownership(git_world):
+    for path, revision in (
+        ("../secret", "index"),
+        ("a", "HEAD:../x"),
+        (".git/config", "head"),
+    ):
+        assert _git_link(git_world, revision, path=path).status_code == 400
+    outside = git_world.git.get(
+        f"/api/v1/workspaces/{git_world.workspace.id}/git/file-link/",
+        {"repo_path": "/etc", "path": "passwd", "revision": "head"},
+    )
+    assert outside.status_code == 400
+    files_only = git_world.client(permissions=[APIKeyPermission.WORKSPACES_READ.value])
+    assert _git_link(git_world, "index", client=files_only).status_code == 403
+    stranger = git_world.client(
+        git_world.stranger, permissions=[APIKeyPermission.WORKSPACES_GIT_READ.value]
+    )
+    assert _git_link(git_world, "index", client=stranger).status_code == 404
+
+
+def test_oversized_git_blobs_are_refused(git_world, monkeypatch):
+    link = _git_link(git_world, "index").json()["files"][0]
+    monkeypatch.setattr(file_services, "FILE_TRANSFER_MAX_BYTES", 10)
+    status, _, body = call("GET", _api(link["content_url"]))
+    assert status == 413 and json.loads(body)["code"] == "file_too_large"
 
 
 # -- Uploads ------------------------------------------------------------------

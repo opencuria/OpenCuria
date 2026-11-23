@@ -29,7 +29,8 @@ const LINK_ERRORS: Record<string, string> = {
   unsupported_file: "This file type cannot be opened.",
 };
 
-interface LinkResponse {
+/** Signed links as `files/links/` and `git/file-link/` return them. */
+export interface RawWorkspaceFileLinks {
   files: Array<{
     path: string;
     name: string;
@@ -41,9 +42,38 @@ interface LinkResponse {
     content_url: string;
     download_url: string;
     thumbnail_url: string;
+    object_id?: string;
     error: string;
   }>;
   expires_at: number;
+}
+
+/** The refusal behind a link's `error` code. */
+export function fileLinkError(code: string): FileTransferError {
+  return new FileTransferError(LINK_ERRORS[code] ?? code, code);
+}
+
+/** One server link with absolute URLs (`baseUrl` is the API base URL). */
+export function workspaceFileLink(
+  entry: RawWorkspaceFileLinks["files"][number],
+  expiresAt: number,
+  baseUrl: string,
+): WorkspaceFileLink {
+  const absolute = (url: string) => (url ? `${baseUrl}${url}` : "");
+  return {
+    path: entry.path,
+    name: entry.name,
+    type: entry.type === "directory" ? "directory" : "file",
+    size: entry.size,
+    modifiedAt: entry.modified_at,
+    kind: (entry.kind || "binary") as WorkspaceFileKind,
+    mimeType: entry.mime_type,
+    contentUrl: absolute(entry.content_url),
+    downloadUrl: absolute(entry.download_url),
+    thumbnailUrl: absolute(entry.thumbnail_url),
+    ...(entry.object_id ? { objectId: entry.object_id } : {}),
+    expiresAt,
+  };
 }
 
 interface UploadResponse {
@@ -170,26 +200,10 @@ export function createWorkspaceFilesApi(
     return !!link && link.expiresAt - nowSeconds() > LINK_RENEW_MARGIN_SECONDS;
   }
 
-  function toLink(entry: LinkResponse["files"][number], expiresAt: number): WorkspaceFileLink {
-    return {
-      path: entry.path,
-      name: entry.name,
-      type: entry.type === "directory" ? "directory" : "file",
-      size: entry.size,
-      modifiedAt: entry.modified_at,
-      kind: (entry.kind || "binary") as WorkspaceFileKind,
-      mimeType: entry.mime_type,
-      contentUrl: absolute(entry.content_url),
-      downloadUrl: absolute(entry.download_url),
-      thumbnailUrl: absolute(entry.thumbnail_url),
-      expiresAt,
-    };
-  }
-
   async function request(workspaceId: string, batch: Pending[]): Promise<void> {
     const started = generation;
     try {
-      const response = await api().post<LinkResponse>(
+      const response = await api().post<RawWorkspaceFileLinks>(
         `/workspaces/${encodeURIComponent(workspaceId)}/files/links/`,
         { paths: batch.map((item) => item.path) },
       );
@@ -197,11 +211,14 @@ export function createWorkspaceFilesApi(
       for (const item of batch) {
         const entry = byPath.get(item.path);
         if (!entry || entry.error) {
-          const code = entry?.error || "file_not_found";
-          item.reject(new FileTransferError(LINK_ERRORS[code] ?? code, code));
+          item.reject(fileLinkError(entry?.error || "file_not_found"));
           continue;
         }
-        const link = toLink(entry, response.expires_at);
+        const link = workspaceFileLink(
+          entry,
+          response.expires_at,
+          api().getContext().baseUrl,
+        );
         if (started === generation) cache.set(key(workspaceId, item.path), link);
         item.resolve(link);
       }

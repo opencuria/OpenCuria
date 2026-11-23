@@ -226,3 +226,31 @@ describe("workspace file link context", () => {
     expect(files.peekLink("ws-1", "/workspace/a.png")).toBeUndefined();
   });
 });
+
+describe("git file links", () => {
+  it("signs one file side, keeps its object id and reports missing sides as null", async () => {
+    const blob = "b".repeat(40);
+    const answers = [
+      { files: [linkEntry("/workspace/r/logo.png", { object_id: blob })], expires_at: NOW },
+      { files: [{ ...linkEntry("/workspace/r/logo.png"), error: "file_not_found" }], expires_at: NOW },
+      { files: [{ ...linkEntry("/workspace/r/x"), error: "unsupported_file" }], expires_at: NOW },
+    ];
+    const fetch = vi.fn(async (_url: string) => jsonResponse(answers.shift()));
+    const client = makeClient(fetch as any);
+
+    const link = await client.git.fileLink("ws", "/workspace/r", "logo.png", "index");
+    expect(fetch.mock.calls[0]![0]).toBe(
+      "https://api.example/api/v1/workspaces/ws/git/file-link/?repo_path=%2Fworkspace%2Fr&path=logo.png&revision=index",
+    );
+    expect(link).toMatchObject({
+      path: "/workspace/r/logo.png",
+      objectId: blob,
+      expiresAt: NOW,
+      contentUrl: "https://api.example/api/v1/workspace-files/content/tok/logo.png?v=1234-1700",
+    });
+    await expect(client.git.fileLink("ws", "/workspace/r", "logo.png", "worktree")).resolves.toBeNull();
+    await expect(client.git.fileLink("ws", "/workspace/r", "x", "head")).rejects.toMatchObject({
+      code: "unsupported_file",
+    });
+  });
+});

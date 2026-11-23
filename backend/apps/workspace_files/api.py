@@ -1,4 +1,4 @@
-"""REST adapter: sign links to workspace files and single-file uploads.
+"""REST adapter: sign links to workspace files, Git file sides and uploads.
 
 The bytes themselves move through :mod:`.http`, outside Django.
 """
@@ -49,6 +49,42 @@ async def create_file_links(
         links = await get_workspace_file_service().links(
             workspace_id,
             payload.paths,
+            user=request.user,
+            organization_id=get_organization_id(request),
+        )
+    except FileAccessError as exc:
+        return _refused(exc)
+    return 200, FileLinksOut(
+        files=[FileLinkOut(**link.__dict__) for link in links.files],
+        expires_at=links.expires_at,
+    )
+
+
+@workspace_file_router.get(
+    "/{workspace_id}/git/file-link/",
+    response={200: FileLinksOut, **_ERRORS},
+    summary="Sign a link to a file in a Git worktree, index or commit",
+)
+async def create_git_file_link(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    repo_path: str,
+    path: str,
+    revision: str = "index",
+):
+    """Return one link that streams the file as *revision* has it.
+
+    ``revision`` is ``worktree``, ``index``, ``head`` or a commit hash. A
+    side without the file is a link with ``error="file_not_found"``.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        links = await get_workspace_file_service().git_link(
+            workspace_id,
+            repo_path=repo_path,
+            path=path,
+            revision=revision,
             user=request.user,
             organization_id=get_organization_id(request),
         )

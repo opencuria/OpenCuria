@@ -9,10 +9,13 @@ import {
   View,
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
+import type { PinnedWorkspaceMedia } from "../../platform";
 import { Button } from "../../ui/controls";
 import type { NativeMenuAction } from "../../ui/NativeMenu";
 import { useTheme } from "../../ui/theme";
+import { isImagePath, isSvgPath } from "../files/fileContent";
 import { resolveHighlightLanguage } from "../files/highlightLanguage";
+import { ImagePreview, SvgPreview } from "../files/ImagePreview";
 import { tokenizeCode, type HighlightedToken } from "../files/highlights";
 import { ToolDetailSheet } from "../ToolDetailSheet";
 import { diffColors, dirName, fileName } from "./gitStyle";
@@ -33,6 +36,8 @@ export interface GitDiffTarget {
   /** Second header line, e.g. "Staged" or a short commit hash. */
   label: string;
   load: () => Promise<{ original: string; modified: string }>;
+  /** The new side of a raster image, cached on the device; null when deleted. */
+  loadImage: () => Promise<PinnedWorkspaceMedia | null>;
   /** Extra actions (stage, discard …) above the shared ones. */
   actions?: NativeMenuAction[];
   onAction?: (id: string) => void;
@@ -41,10 +46,14 @@ export interface GitDiffTarget {
 type State =
   | { phase: "loading" }
   | { phase: "error"; message: string }
-  | { phase: "large" }
+  | { phase: "large"; modified: string }
+  | { phase: "image"; uri: string | null }
   | { phase: "ready"; diff: LineDiff; original: string; modified: string };
 
-/** Unified diff of one file side in a native sheet (no WebView, no Monaco). */
+/**
+ * Unified diff of one file side in a native sheet (no WebView, no Monaco).
+ * Images show their new version; SVGs also offer the textual diff as Source.
+ */
 export function GitDiffSheet({
   target,
   onClose,
@@ -55,17 +64,43 @@ export function GitDiffSheet({
   const { theme } = useTheme();
   const [state, setState] = useState<State>({ phase: "loading" });
   const [wrap, setWrap] = useState(wrapLines);
+  const [preview, setPreview] = useState(true);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!target) return;
     let live = true;
     setState({ phase: "loading" });
+    setPreview(true);
+    const fail = (error: unknown) => {
+      if (live)
+        setState({
+          phase: "error",
+          message:
+            error instanceof Error ? error.message : "Failed to load diff",
+        });
+    };
+    if (isImagePath(target.path)) {
+      let release: (() => void) | undefined;
+      target
+        .loadImage()
+        .then((pinned) => {
+          if (!live) return pinned?.release();
+          release = pinned ? () => pinned.release() : undefined;
+          setState({ phase: "image", uri: pinned?.uri ?? null });
+        })
+        .catch(fail);
+      return () => {
+        live = false;
+        release?.();
+      };
+    }
     target
       .load()
       .then(({ original, modified }) => {
         if (!live) return;
-        if (exceedsDiffLimit(original, modified)) setState({ phase: "large" });
+        if (exceedsDiffLimit(original, modified))
+          setState({ phase: "large", modified });
         else
           setState({
             phase: "ready",
@@ -74,14 +109,7 @@ export function GitDiffSheet({
             modified,
           });
       })
-      .catch((error: unknown) => {
-        if (live)
-          setState({
-            phase: "error",
-            message:
-              error instanceof Error ? error.message : "Failed to load diff",
-          });
-      });
+      .catch(fail);
     return () => {
       live = false;
     };
@@ -93,18 +121,46 @@ export function GitDiffSheet({
       ? ` · +${state.diff.additions} −${state.diff.deletions}`
       : "";
   const folder = dirName(target.path);
+  const svg = isSvgPath(target.path);
+  // An SVG preview needs only the new markup, so it works above the diff limit.
+  const svgXml =
+    svg && preview && (state.phase === "ready" || state.phase === "large")
+      ? state.modified
+      : null;
+  const showsText = state.phase === "ready" && svgXml === null;
   const actions: NativeMenuAction[] = [
+    ...(svg
+      ? [
+          {
+            id: "preview",
+            title: "Preview",
+            symbol: "eye",
+            selected: preview,
+          },
+          {
+            id: "source",
+            title: "Source",
+            symbol: "doc.text",
+            selected: !preview,
+          },
+        ]
+      : []),
     ...(target.actions ?? []),
-    {
-      id: "wrap",
-      title: "Word wrap",
-      symbol: "text.word.spacing",
-      selected: wrap,
-    },
+    ...(showsText
+      ? [
+          {
+            id: "wrap",
+            title: "Word wrap",
+            symbol: "text.word.spacing",
+            selected: wrap,
+          },
+        ]
+      : []),
     { id: "copy-path", title: "Copy path", symbol: "doc.on.doc" },
   ];
   const onAction = (id: string) => {
-    if (id === "wrap") {
+    if (id === "preview" || id === "source") setPreview(id === "preview");
+    else if (id === "wrap") {
       wrapLines = !wrap;
       setWrap(!wrap);
     } else if (id === "copy-path") void Clipboard.setStringAsync(target.path);
@@ -137,12 +193,26 @@ export function GitDiffSheet({
             style={{ alignSelf: "center" }}
           />
         </View>
+      ) : svgXml !== null ? (
+        svgXml ? (
+          <View style={styles.center}>
+            <SvgPreview xml={svgXml} />
+          </View>
+        ) : (
+          <Deleted />
+        )
       ) : state.phase === "large" ? (
         <View style={styles.center}>
           <Text style={[styles.message, { color: theme.mutedText }]}>
             This file is too large to compare on a phone.
           </Text>
         </View>
+      ) : state.phase === "image" ? (
+        state.uri ? (
+          <ImagePreview uri={state.uri} name={fileName(target.path)} />
+        ) : (
+          <Deleted />
+        )
       ) : state.diff.identical ? (
         <View style={styles.center}>
           <Text style={[styles.message, { color: theme.mutedText }]}>
@@ -159,6 +229,17 @@ export function GitDiffSheet({
         />
       )}
     </ToolDetailSheet>
+  );
+}
+
+function Deleted(): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <View style={styles.center}>
+      <Text style={[styles.message, { color: theme.mutedText }]}>
+        This image was deleted.
+      </Text>
+    </View>
   );
 }
 

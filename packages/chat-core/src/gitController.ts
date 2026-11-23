@@ -42,6 +42,7 @@ import type {
   RawGitRepoResponse,
   RawGitReposResponse,
 } from "./gitTypes";
+import type { WorkspaceFileLink } from "./workspaceFiles";
 
 /** REST port; `createGitApi` of `@opencuria/client/workspaceTools` implements it. */
 export interface GitTransport {
@@ -71,6 +72,13 @@ export interface GitTransport {
     path: string,
     revision: GitFileRevision,
   ): Promise<RawGitFileContent>;
+  /** Streaming link to one file side; null when that side has no file. */
+  fileLink(
+    workspaceId: string,
+    repoPath: string,
+    path: string,
+    revision: GitFileRevision,
+  ): Promise<WorkspaceFileLink | null>;
 }
 
 /** Feedback for a finished action; clients show it as a toast. */
@@ -1069,5 +1077,20 @@ export class GitController {
       this.git.fileContent(this.workspaceId, repo.path, path, hash),
     ]);
     return { original: original.content, modified: modified.content };
+  }
+
+  /**
+   * Streaming link to the new side of a change (staged: index, else
+   * worktree; with `hash`: that commit), or null when it deletes the file.
+   */
+  async newFileLink(
+    path: string,
+    side: { staged: boolean } | { hash: string },
+  ): Promise<WorkspaceFileLink | null> {
+    const repo = this.repo;
+    if (!repo) throw new Error("No repository selected");
+    const revision =
+      "hash" in side ? side.hash : side.staged ? "index" : "worktree";
+    return this.git.fileLink(this.workspaceId, repo.path, path, revision);
   }
 }

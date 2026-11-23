@@ -154,6 +154,7 @@ export function GitPanel({
   client,
   workspaceId,
   active,
+  media,
   bottomInset,
 }: WorkspaceToolProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -247,6 +248,15 @@ export function GitPanel({
   const isUnborn = !repo || repo.commits.length === 0 || repo.headHash === null;
 
   // -- actions ------------------------------------------------------------------
+  /** The new version of a changed image, streamed into the media cache. */
+  const pinNewImage = async (
+    path: string,
+    side: { staged: boolean } | { hash: string },
+  ) => {
+    if (!media) throw new Error("Images need a connected workspace.");
+    const link = await controller.newFileLink(path, side);
+    return link ? media.pinLink(link) : null;
+  };
   const openWorkingDiff = (
     change: GitFileChange,
     side: "staged" | "unstaged",
@@ -260,6 +270,7 @@ export function GitPanel({
           ? "Untracked"
           : "Working tree",
       load: () => controller.workingDiff(change.path, change.oldPath, isStaged),
+      loadImage: () => pinNewImage(change.path, { staged: isStaged }),
       actions: isStaged
         ? [{ id: "unstage", title: "Unstage changes", symbol: "minus" }]
         : change.conflict
@@ -1109,6 +1120,7 @@ export function GitPanel({
           label: row.hash.slice(0, 8),
           load: () =>
             controller.commitDiff(row.hash, file.newPath, file.oldPath),
+          loadImage: () => pinNewImage(file.newPath, { hash: row.hash }),
         })}
         onClose={() => controller.closeCommitDetails()}
       />

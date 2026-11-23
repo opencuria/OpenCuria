@@ -19,7 +19,8 @@ class FileLinkOut(Schema):
     URLs are relative to the API base URL (``.../api/v1``). ``content_url``
     streams the file (supports ``Range``), ``download_url`` forces a
     download (folders download as ``.tar.gz``), ``thumbnail_url`` returns a
-    tiny blurred JPEG of images and videos.
+    tiny blurred JPEG of images and videos. Links to a Git index or commit
+    side name the blob they stream in ``object_id``.
     """
 
     path: str
@@ -32,6 +33,7 @@ class FileLinkOut(Schema):
     content_url: str = ""
     download_url: str = ""
     thumbnail_url: str = ""
+    object_id: str = ""
     error: str = ""
 
 

@@ -7,11 +7,9 @@ import {
   Text,
   View,
 } from "react-native";
-import { Image } from "expo-image";
 import { useVideoPlayer, VideoView } from "expo-video";
 import * as Clipboard from "expo-clipboard";
 import * as Sharing from "expo-sharing";
-import { SvgXml } from "react-native-svg";
 import type { OpenCuriaClient } from "@opencuria/client";
 import { ChatMarkdown } from "../../components/ChatMarkdown";
 import type { ChatMediaResolver } from "../../components/useWorkspaceMedia";
@@ -32,6 +30,7 @@ import {
   readWorkspaceText,
   type WorkspaceText,
 } from "./fileContent";
+import { ImagePreview, SvgPreview } from "./ImagePreview";
 import { hasNativePdfView, PdfPreview } from "./PdfPreview";
 import { SourceView } from "./SourceView";
 
@@ -366,21 +365,7 @@ export function FileViewerSheet({
       />
     );
   else if (content.phase === "image")
-    body = (
-      <ScrollView
-        contentContainerStyle={styles.imageScroll}
-        maximumZoomScale={4}
-        minimumZoomScale={1}
-        centerContent
-      >
-        <Image
-          source={{ uri: content.uri }}
-          style={styles.image}
-          contentFit="contain"
-          accessibilityLabel={name}
-        />
-      </ScrollView>
-    );
+    body = <ImagePreview uri={content.uri} name={name} />;
   else if (content.phase === "text" && path) {
     const file = content.file;
     const notice = file.truncated ? (
@@ -468,25 +453,6 @@ function VideoPreview({ uri }: { uri: string }): React.JSX.Element {
   );
 }
 
-function SvgPreview({ xml }: { xml: string }): React.JSX.Element {
-  const { theme } = useTheme();
-  const [failed, setFailed] = useState(false);
-  if (failed)
-    return (
-      <Text style={{ color: theme.mutedText }}>
-        This SVG can't be previewed. Use Source.
-      </Text>
-    );
-  return (
-    <SvgXml
-      xml={xml}
-      width="90%"
-      height="70%"
-      onError={() => setFailed(true)}
-    />
-  );
-}
-
 const MAX_TABLE_COLUMNS = 40;
 
 function DelimitedTable({
@@ -546,8 +512,6 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 17, fontWeight: "600" },
   detail: { fontSize: 14, textAlign: "center" },
-  imageScroll: { flexGrow: 1, alignItems: "center", justifyContent: "center" },
-  image: { width: "100%", height: 480 },
   markdown: { padding: 20 },
   notice: {
     margin: 12,

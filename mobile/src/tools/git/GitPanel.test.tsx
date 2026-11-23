@@ -12,6 +12,7 @@ import type {
   RawGitChange,
   RawGitRepoSnapshot,
 } from "@opencuria/chat-core/gitTypes";
+import type { MediaCache } from "../../platform";
 import { ThemeProvider } from "../../ui/theme";
 import { ToastHost } from "../../ui/ToastHost";
 import { dismissToast } from "../../ui/toast";
@@ -128,6 +129,10 @@ function fakeClient(repo: RawGitRepoSnapshot = snapshot()) {
     operation: jest.fn(async () => ({ ok: true, snapshot: repo })),
     commitMessage: jest.fn(async () => ({ message: "Subject" })),
     fileContent: jest.fn(async () => ({ content: "export const a = 1;\n" })),
+    fileLink: jest.fn(async () => ({
+      path: "/workspace/app/assets/logo.png",
+      objectId: "b".repeat(40),
+    })),
   };
   const api = {
     getContext: () => ({ baseUrl: "https://server.test/api/v1", organizationId: "org" }),
@@ -135,7 +140,7 @@ function fakeClient(repo: RawGitRepoSnapshot = snapshot()) {
   return { client: { api, git } as unknown as OpenCuriaClient, git };
 }
 
-function renderPanel(client: OpenCuriaClient) {
+function renderPanel(client: OpenCuriaClient, media: MediaCache | null = null) {
   return render(
     <ThemeProvider>
       <GitPanel
@@ -143,7 +148,7 @@ function renderPanel(client: OpenCuriaClient) {
         workspaceId="ws"
         workspaceName="demo"
         active
-        media={null}
+        media={media}
         bottomInset={0}
       />
       <ToastHost />
@@ -300,4 +305,27 @@ it("keeps a commit's files after a checkout and opens a file's diff above it", a
       "aaaaaaaa11",
     ),
   );
+});
+
+it("streams the staged version of a changed image into the media cache", async () => {
+  const image: RawGitChange = { ...staged, path: "assets/logo.png" };
+  const { client, git } = fakeClient(snapshot({ changes: [image] }));
+  const media = {
+    pinLink: jest.fn(async () => ({ uri: "file:///cache/logo.png", release: jest.fn() })),
+  };
+  renderPanel(client, media as unknown as MediaCache);
+  fireEvent.press(await screen.findByTestId("git-staged-file"));
+  expect(await screen.findByLabelText("logo.png")).toBeTruthy();
+  expect(git.fileLink).toHaveBeenCalledWith("ws", "/workspace/app", "assets/logo.png", "index");
+  expect(media.pinLink).toHaveBeenCalledWith(await git.fileLink.mock.results[0]!.value);
+  expect(git.fileContent).not.toHaveBeenCalled();
+});
+
+it("needs a connected workspace to show a changed image", async () => {
+  const image: RawGitChange = { ...modified, path: "assets/logo.png" };
+  const { client, git } = fakeClient(snapshot({ changes: [image] }));
+  renderPanel(client);
+  fireEvent.press(await screen.findByTestId("git-changed-file"));
+  expect(await screen.findByText("Images need a connected workspace.")).toBeTruthy();
+  expect(git.fileLink).not.toHaveBeenCalled();
 });

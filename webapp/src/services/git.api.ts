@@ -11,4 +11,5 @@ export const {
   operation: runGitOperation,
   commitMessage: generateGitCommitMessage,
   fileContent: readGitFileContent,
+  fileLink: readGitFileLink,
 } = createGitApi(getApiClient)

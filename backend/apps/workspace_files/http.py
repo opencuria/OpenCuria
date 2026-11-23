@@ -2,8 +2,8 @@
 
 ``GET|HEAD {PREFIX}content/<token>/<name>[?download=1]``
     The file, or one byte range of it (``Range: bytes=...``); a folder
-    streams as ``.tar.gz``. Media elements seek through ranges, so videos
-    play while they load.
+    streams as ``.tar.gz``, a blob link the Git object it names. Media
+    elements seek through ranges, so videos play while they load.
 ``GET {PREFIX}thumbnail/<token>``
     A tiny blurred JPEG for "tap to load" placeholders.
 ``PUT {PREFIX}upload/<token>``
@@ -40,7 +40,8 @@ PREFIX = "/api/v1/workspace-files/"
 
 _ROUTE = re.compile(r"^(content|thumbnail|upload)/([^/]+)(?:/[^/]*)?$")
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
-_ETAG = re.compile(r'"([0-9]+-[0-9]+)"')
+#: File versions are ``<size>-<mtime>``, Git blob versions their object id.
+_ETAG = re.compile(r'"([0-9]+-[0-9]+|[0-9a-f]{40}|[0-9a-f]{64})"')
 #: Workspace files may be markup: never let them run code on the API origin.
 _SANDBOX = (
     "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; "
@@ -179,7 +180,6 @@ def _content_headers(
             ),
         ),
         (b"etag", f'"{transfer.etag}"'.encode()),
-        (b"last-modified", formatdate(transfer.modified_at, usegmt=True).encode()),
         (
             b"cache-control",
             (
@@ -189,6 +189,11 @@ def _content_headers(
             ).encode(),
         ),
     ]
+    # Git blobs have no modification time.
+    if transfer.modified_at:
+        headers.append(
+            (b"last-modified", formatdate(transfer.modified_at, usegmt=True).encode())
+        )
     if transfer.ranged:
         headers.append((b"accept-ranges", b"bytes"))
     return headers + _security_headers(media.content_type)
@@ -197,7 +202,7 @@ def _content_headers(
 async def _content(
     scope: dict, receive: ASGIReceive, send: ASGISend, token: str
 ) -> None:
-    claims = tokens.verify_token(token, "read")
+    claims = tokens.verify_token(token, "read") or tokens.verify_token(token, "blob")
     if claims is None:
         raise FileAccessError(404, "link_expired", "This link expired or is invalid.")
     query = parse_qs(scope.get("query_string", b"").decode("latin-1"))

@@ -15,7 +15,8 @@ instead of base64.
 
 Clients never receive file contents over Socket.IO. They request signed,
 path-bound links (`POST /api/v1/workspaces/{id}/files/links/`, upload links via
-`.../files/uploads/`) and stream bytes through the raw ASGI transport under
+`.../files/uploads/`, Git index and commit versions via `GET .../git/file-link/`,
+bound to the blob's object id) and stream bytes through the raw ASGI transport under
 `/api/v1/workspace-files/` (`apps/workspace_files/http.py`): `Range` downloads,
 folders as `.tar.gz`, blurred 48 px previews, all-or-nothing uploads. Every request
 re-checks workspace ownership and runs one guest process stream; at most 500 MB
