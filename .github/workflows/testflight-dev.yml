@@ -91,6 +91,10 @@ jobs:
           npm run test:shared
           npm run type-check -w mobile
           npm run test -w mobile
+      # pod install fetches Hermes and React Native prebuilds with plain curl,
+      # which gives up on a reset connection. Retry those like timeouts.
+      - name: Retry downloads
+        run: printf '%s\n' 'retry = 5' 'retry-delay = 10' 'retry-all-errors' >>"${HOME}/.curlrc"
       - name: Build
         working-directory: mobile
         env:
