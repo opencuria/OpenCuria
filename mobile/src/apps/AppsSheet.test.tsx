@@ -33,6 +33,7 @@ jest.mock(
 );
 
 const SCOPE = appScope("https://curia.test", "org", 7);
+const OTHER_SCOPE = appScope("https://other.example/api/v1", "org", 3);
 
 function published(id: string, name: string, number = 1): PublishedApp {
   return {
@@ -228,6 +229,63 @@ describe("AppsSheet", () => {
       expect.any(Array),
     );
     expect(apps.uninstall).toHaveBeenCalledWith("todo");
+  });
+
+  it("lists other accounts' apps apart, to open or remove only", async () => {
+    const alert = jest
+      .spyOn(Alert, "alert")
+      .mockImplementation((_title, _message, buttons?: AlertButton[]) => {
+        buttons?.find((button) => button.style === "destructive")?.onPress?.();
+      });
+    const apps = state(
+      {},
+      appRows(
+        [published("todo", "Todo")],
+        [
+          installed("todo", "Todo"),
+          { ...installed("chess", "Chess"), scope: OTHER_SCOPE },
+        ],
+        { scope: SCOPE, platform: "android", hostSdk: 57 },
+      ),
+    );
+    renderSheet(apps);
+    expect(screen.getByText("Other accounts")).toBeTruthy();
+    expect(
+      screen.getByText(/Installed while signed in elsewhere/),
+    ).toBeTruthy();
+    expect(screen.getByText("other.example")).toBeTruthy();
+
+    await act(async () =>
+      fireEvent.press(screen.getByRole("button", { name: "Open Chess" })),
+    );
+    expect(apps.open).toHaveBeenCalledWith("chess");
+
+    fireEvent.press(screen.getByRole("button", { name: "Actions for Chess" }));
+    expect(screen.queryByText("Delete app")).toBeNull();
+    expect(screen.queryByText("Install")).toBeNull();
+    fireEvent.press(screen.getByText("Remove from device"));
+    expect(alert).toHaveBeenCalledWith(
+      "Remove Chess?",
+      "The app and its data leave this device. To install it again, sign in to its account on other.example.",
+      expect.any(Array),
+    );
+    expect(apps.uninstall).toHaveBeenCalledWith("chess");
+  });
+
+  it("shows other accounts' apps at once and keeps them usable offline", () => {
+    const rows = appRows(
+      [],
+      [{ ...installed("chess", "Chess"), scope: OTHER_SCOPE }],
+      { scope: SCOPE, platform: "android", hostSdk: 57 },
+    );
+    const { unmount } = renderSheet(state({ loaded: false }, rows));
+    expect(screen.queryByText("Loading")).toBeNull();
+    expect(screen.getByText("Chess")).toBeTruthy();
+    unmount();
+    renderSheet(state({ offline: true, loaded: false }, rows));
+    expect(
+      screen.getByText(/You’re offline\. Installed apps still open/),
+    ).toBeTruthy();
   });
 
   it("keeps installed apps usable while the server is unreachable", async () => {
@@ -533,6 +591,39 @@ describe("useApps", () => {
     await act(async () => result.current.open("game"));
 
     expect(mockOpenInstalledApp).toHaveBeenLastCalledWith({ appId: "game" });
+  });
+
+  it("opens and removes other accounts' apps without asking this server", async () => {
+    const api = client([]);
+    const local = installer([
+      { ...installed("chess", "Chess"), scope: OTHER_SCOPE },
+    ]);
+    const { result } = renderHook(() =>
+      useApps(
+        api as unknown as OpenCuriaClient,
+        SCOPE,
+        local as unknown as AppInstaller,
+      ),
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    expect(result.current.rows[0]).toMatchObject({
+      appId: "chess",
+      state: "installed",
+      otherAccount: "other.example",
+    });
+
+    await act(async () => result.current.open("chess"));
+    expect(api.apps.gatewaySession).not.toHaveBeenCalled();
+    expect(mockOpenInstalledApp).toHaveBeenLastCalledWith({ appId: "chess" });
+
+    // Gone for good: only signing in to its server lists it again.
+    await act(async () => result.current.uninstall("chess"));
+    expect(local.uninstall).toHaveBeenCalledWith("chess");
+    expect(mockClearData).toHaveBeenCalledWith("chess");
+    expect(result.current.rows).toEqual([]);
+    await act(async () => {
+      expect(await result.current.install("chess")).toBe(false);
+    });
   });
 
   it("hands out small icons for installed apps and apps to install", async () => {

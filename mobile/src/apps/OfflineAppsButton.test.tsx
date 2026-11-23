@@ -87,8 +87,20 @@ describe("OfflineAppsButton", () => {
     expect(state.open).toHaveBeenCalledWith("game");
   });
 
+  it("also opens apps installed under another account", () => {
+    const state = apps([copy(appScope("https://x.test/api/v1", "org", 8))]);
+    mockUseApps.mockReturnValue(state);
+    renderButton();
+
+    fireEvent.press(screen.getByTestId("session-apps"));
+    expect(screen.getByText("Other accounts")).toBeTruthy();
+    fireEvent.press(screen.getByText("Game"));
+
+    expect(state.open).toHaveBeenCalledWith("game");
+  });
+
   it("stays hidden without installed apps or a known account", () => {
-    mockUseApps.mockReturnValue(apps([copy(appScope("x", "org", 8))]));
+    mockUseApps.mockReturnValue(apps([]));
     renderButton();
     expect(screen.queryByTestId("session-apps")).toBeNull();
 

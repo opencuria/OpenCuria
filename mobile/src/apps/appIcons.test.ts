@@ -102,6 +102,7 @@ describe("appIconSource", () => {
       state: "available",
       installed: null,
       published: null,
+      otherAccount: null,
       ...overrides,
     };
   }

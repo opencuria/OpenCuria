@@ -38,6 +38,8 @@ function confirm(
 /**
  * Apps agents built and sent to the user. Installed apps open inside
  * OpenCuria and keep working offline; newer versions show as updates.
+ * Apps installed under other accounts are listed apart: they open and
+ * leave the device, nothing else.
  */
 export function AppsSheet({
   visible,
@@ -57,7 +59,9 @@ export function AppsSheet({
     else if (id === "uninstall")
       confirm(
         `Remove ${row.name}?`,
-        "The app and its data leave this device.",
+        row.otherAccount !== null
+          ? `The app and its data leave this device. To install it again, sign in to its account on ${row.otherAccount}.`
+          : "The app and its data leave this device.",
         "Remove",
         () => void apps.uninstall(row.appId),
       );
@@ -142,8 +146,10 @@ export function AppsSheet({
     };
   };
 
-  const { installed, available } = appSections(apps.rows);
-  const hasRows = installed.length > 0 || available.length > 0;
+  const { installed, available, other } = appSections(apps.rows);
+  // Apps on this device, of this account or another: they open offline.
+  const local = installed.length + other.length;
+  const hasRows = local > 0 || available.length > 0;
   const retry = () => void apps.refresh();
   const notes: NativeFormSection[] = [];
   if (!apps.supported)
@@ -166,7 +172,7 @@ export function AppsSheet({
         {
           kind: "note",
           id: "apps-offline",
-          text: installed.length
+          text: local
             ? "You’re offline. Installed apps still open; new apps and updates show up once you are back online."
             : "You’re offline. New apps show up here once you are back online.",
           tone: "muted",
@@ -179,7 +185,7 @@ export function AppsSheet({
     notes.push({
       id: "error",
       // With installed apps the failure reassures (muted, like offline).
-      rows: installed.length
+      rows: local
         ? [
             {
               kind: "note",
@@ -213,9 +219,19 @@ export function AppsSheet({
           },
         ]
       : []),
+    ...(other.length
+      ? [
+          {
+            id: "other",
+            title: "Other accounts",
+            footer:
+              "Installed while signed in elsewhere. They open without their server; sign in there to update them.",
+            rows: other.map(item),
+          },
+        ]
+      : []),
   ];
-  const waiting =
-    !apps.offline && !apps.loaded && !apps.error && !installed.length;
+  const waiting = !apps.offline && !apps.loaded && !apps.error && !local;
   const empty: NativeFormEmptyState =
     apps.error && !apps.offline
       ? loadErrorState("apps", apps.error, retry, apps.loading)

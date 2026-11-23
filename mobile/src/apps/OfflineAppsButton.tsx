@@ -9,7 +9,7 @@ import { useApps } from "./useApps";
 /**
  * Installed apps while the server cannot be reached: they run offline, so
  * the connection error must not lock them away. Shows nothing when this
- * account has no installed app.
+ * device has no installed app, of this account or another.
  */
 export function OfflineAppsButton({
   client,

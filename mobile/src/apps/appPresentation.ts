@@ -1,4 +1,5 @@
 import type { PublishedApp } from "@opencuria/client";
+import { describeServerUrl } from "../screens/serverConfig";
 import type { InstalledApp } from "./appInstaller";
 
 export type AppPlatform = "android" | "ios";
@@ -23,6 +24,12 @@ export interface AppRow {
   state: AppState;
   installed: InstalledApp | null;
   published: PublishedApp | null;
+  /**
+   * Server of the other account (server, organization or user) the copy was
+   * installed under; null for the signed-in account's apps. Such copies only
+   * open and leave the device: their server is not signed in.
+   */
+  otherAccount: string | null;
 }
 
 /** Major Expo SDK of a version such as "57.0.0". */
@@ -38,6 +45,12 @@ export function appScope(
   userId: string | number | null | undefined,
 ): string {
   return `${serverUrl}|${organizationId ?? ""}|${userId ?? ""}`;
+}
+
+/** The server of an {@link appScope}, as people know it: "curia.example". */
+export function scopeServerLabel(scope: string): string {
+  const api = scope.split("|").slice(0, -2).join("|");
+  return describeServerUrl(api.replace(/\/api\/v1$/, "")) || "another server";
 }
 
 function publishedState(
@@ -56,7 +69,7 @@ function publishedState(
 /**
  * Join the server's apps with the ones installed on this device. Installed
  * apps stay listed offline or after the server deleted them; apps installed
- * under another account or server are left out.
+ * under another account or server are listed too, with `otherAccount` set.
  */
 export function appRows(
   published: PublishedApp[],
@@ -67,6 +80,12 @@ export function appRows(
     installed
       .filter((app) => app.scope === options.scope)
       .map((app) => [app.appId, app]),
+  );
+  const listed = new Set(published.map((app) => app.id));
+  // The server listing an app another scope installed (the same server under
+  // another URL) keeps the server's row, which installs over that copy.
+  const elsewhere = installed.filter(
+    (app) => app.scope !== options.scope && !listed.has(app.appId),
   );
   const rows: AppRow[] = published.map((app) => {
     const copy = local.get(app.id) ?? null;
@@ -84,6 +103,7 @@ export function appRows(
       state,
       installed: copy,
       published: app,
+      otherAccount: null,
     };
   });
   for (const copy of local.values())
@@ -93,19 +113,35 @@ export function appRows(
       state: "installed",
       installed: copy,
       published: null,
+      otherAccount: null,
+    });
+  for (const copy of elsewhere)
+    rows.push({
+      appId: copy.appId,
+      name: copy.name,
+      state: "installed",
+      installed: copy,
+      published: null,
+      otherAccount: scopeServerLabel(copy.scope),
     });
   return rows;
 }
 
-/** Installed apps first (by name), then apps to install. */
+/**
+ * Installed apps first (by name), then apps to install, then apps installed
+ * under other accounts.
+ */
 export function appSections(rows: AppRow[]): {
   installed: AppRow[];
   available: AppRow[];
+  other: AppRow[];
 } {
   const byName = (a: AppRow, b: AppRow) => a.name.localeCompare(b.name);
+  const own = rows.filter((row) => row.otherAccount === null);
   return {
-    installed: rows.filter((row) => row.installed).sort(byName),
-    available: rows.filter((row) => !row.installed).sort(byName),
+    installed: own.filter((row) => row.installed).sort(byName),
+    available: own.filter((row) => !row.installed).sort(byName),
+    other: rows.filter((row) => row.otherAccount !== null).sort(byName),
   };
 }
 
@@ -135,6 +171,8 @@ export function appSubtitle(
     case "update":
       return `Version ${row.installed?.versionName ?? "?"} → ${latest?.version_name ?? "new"}`;
     case "installed":
+      // Another account's copy never updates here: where it came from matters.
+      if (row.otherAccount !== null) return row.otherAccount;
       return version(row.installed?.versionName) || "Installed";
     case "incompatible":
       return `Needs Expo SDK ${sdkMajor(latest?.sdk_version) ?? "?"}; update OpenCuria`;

@@ -51,6 +51,7 @@ export interface AppsState {
   /** Install the newest version, or update to it; resolves to success. */
   install: (appId: string) => Promise<boolean>;
   open: (appId: string) => Promise<void>;
+  /** Remove the app and its data from this device, for any account. */
   uninstall: (appId: string) => Promise<void>;
   /** Delete the app from the server; an installed copy stays. */
   remove: (appId: string) => Promise<void>;
@@ -135,7 +136,8 @@ export async function openApp(
 
 /**
  * The apps agents published to the signed-in user, joined with the ones
- * installed on this device. Installed apps open offline; the server list
+ * installed on this device, including other accounts' apps, which only open
+ * and uninstall. Installed apps open offline; the server list
  * refreshes on demand and whenever a run finishes. While `offline`, the
  * server is not asked and only installed apps show.
  */
@@ -312,6 +314,13 @@ export function useApps(
   const open = useCallback(
     (appId: string): Promise<void> =>
       once(appId, undefined, async () => {
+        const row = rowsRef.current.find((item) => item.appId === appId);
+        // Another account's app opens without a route: its server is not
+        // signed in, so it runs as if offline.
+        if (row?.installed && row.otherAccount !== null) {
+          await openApp(null, row.installed.scope, appId, installer);
+          return;
+        }
         // Offline, the app opens at once instead of waiting for a route.
         await openApp(server, scope, appId, installer);
       }),

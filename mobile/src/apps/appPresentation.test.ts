@@ -9,6 +9,7 @@ import {
   appSubtitle,
   formatBytes,
   pendingAppCount,
+  scopeServerLabel,
   sdkMajor,
 } from "./appPresentation";
 
@@ -85,6 +86,7 @@ describe("appRows", () => {
       future: "incompatible",
       "ios-only": "unsupported",
       deleted: "installed",
+      "other-account": "installed",
     });
     expect(pendingAppCount(rows)).toBe(2);
     const sections = appSections(rows);
@@ -98,6 +100,42 @@ describe("appRows", () => {
       "new",
       "ios-only",
     ]);
+    expect(sections.other.map((row) => row.appId)).toEqual(["other-account"]);
+  });
+
+  it("lists apps of other servers and accounts apart, with their server", () => {
+    const rows = appRows(
+      [published("mine", "Mine")],
+      [
+        installed("mine", 1),
+        installed("chess", 1, appScope("https://other.example/api/v1", "o", 3)),
+        installed("notes", 2, appScope("http://10.0.2.2:8000/api/v1", "o", 3)),
+        installed("lost", 1, appScope("", "o", 3)),
+      ],
+      options,
+    );
+    const other = appSections(rows).other;
+    expect(other.map((row) => [row.appId, row.otherAccount])).toEqual([
+      ["chess", "other.example"],
+      ["lost", "another server"],
+      ["notes", "http://10.0.2.2:8000"],
+    ]);
+    expect(other.every((row) => row.state === "installed")).toBe(true);
+    expect(appSubtitle(other[0]!, "android")).toBe("other.example");
+    expect(appSections(rows).installed.map((row) => row.appId)).toEqual([
+      "mine",
+    ]);
+    expect(pendingAppCount(rows)).toBe(1);
+  });
+
+  it("keeps the server's row when it lists an app another scope installed", () => {
+    const rows = appRows(
+      [published("app", "App")],
+      [installed("app", 1, appScope("https://alias.curia", "org", 1))],
+      options,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ state: "available", otherAccount: null });
   });
 
   it("never offers an update the device cannot run", () => {
@@ -137,6 +175,9 @@ describe("appSubtitle", () => {
     expect(formatBytes(3 * 1024 * 1024)).toBe("3.0 MB");
     expect(sdkMajor("57.0.0")).toBe(57);
     expect(sdkMajor(undefined)).toBeNull();
+    expect(scopeServerLabel(appScope("https://a.b/curia/api/v1", "o", 1))).toBe(
+      "a.b/curia",
+    );
   });
 });
 
