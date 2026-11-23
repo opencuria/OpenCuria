@@ -23,7 +23,9 @@ describe('favicon assets', () => {
     expect(svg).toContain('viewBox="0 0 64 64"')
     expect(svg).toMatch(/<rect class="oc-tile"[^>]*rx="[\d.]+"\/>/)
     expect(lightCss).toContain('.oc-tile { fill: #F7F7F8;')
-    expect(darkCss).toContain('.oc-tile { fill: url(#oc-bg);')
+    // Flat tiles in both schemes: the app icon has no background gradient.
+    expect(darkCss).toContain('.oc-tile { fill: #0B0A14;')
+    expect(svg).not.toContain('id="oc-bg"')
     for (const facet of ['18,23 32,15 32,32', '46,23 32,32 46,41', '32,32 32,49 18,41']) {
       expect(svg).toContain(`points="${facet}"`)
     }

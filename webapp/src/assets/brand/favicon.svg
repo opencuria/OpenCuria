@@ -10,7 +10,7 @@
       .oc-br { fill: #433A93 }
       .oc-seam { stroke: #F7F7F8; stroke-opacity: .9 }
       @media (prefers-color-scheme: dark) {
-        .oc-tile { fill: url(#oc-bg); stroke: #FFFFFF; stroke-opacity: .1 }
+        .oc-tile { fill: #0B0A14; stroke: #FFFFFF; stroke-opacity: .1 }
         .oc-tl { fill: #D6D2F2; fill-opacity: 1 }
         .oc-tr { fill: #FFFFFF; fill-opacity: 1 }
         .oc-l { fill: #9B95C9; fill-opacity: 1 }
@@ -20,10 +20,6 @@
         .oc-seam { stroke: #14112A; stroke-opacity: .55 }
       }
     </style>
-    <linearGradient id="oc-bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2A2456"/>
-      <stop offset="1" stop-color="#0B0A14"/>
-    </linearGradient>
     <linearGradient id="oc-r" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#9A8DFF"/>
       <stop offset="1" stop-color="#7464F2"/>

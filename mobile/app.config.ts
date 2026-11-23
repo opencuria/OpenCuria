@@ -71,7 +71,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       // monochrome feeds Android 13+ themed icons.
       adaptiveIcon: {
         foregroundImage: "./assets/adaptive-icon.png",
-        backgroundImage: "./assets/adaptive-icon-background.png",
+        // Flat, like the iOS icon background in brand/opencuria-app-icon.svg.
+        backgroundColor: "#0B0A14",
         monochromeImage: "./assets/adaptive-icon-monochrome.png",
       },
       // Camera for chat photos; the rest for apps agents publish, which run
