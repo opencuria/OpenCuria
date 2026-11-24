@@ -316,6 +316,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
     ) -> engine_contracts.RunResult:
         """Execute the step loop (cancellation handled by :meth:`run`)."""
         schemas = self._filtered_schemas(agent, mode, depth=depth, max_depth=max_depth)
+        catalog = opts.skill_catalog
         composed = await compose_system_prompt(
             agent=agent,
             mode=mode,
@@ -324,6 +325,11 @@ class HarnessRunner(AuthorizedToolDispatcher):
             accessor=self.accessor,
             cwd=cwd,
             skills=list(opts.skills or []),
+            skill_catalog=[
+                (entry.identifier, entry.description) for entry in catalog.entries()
+            ]
+            if catalog
+            else None,
         )
         messages: list[LLMMessage] = [
             LLMMessage(role="system", content=composed.system),
@@ -588,6 +594,16 @@ class HarnessRunner(AuthorizedToolDispatcher):
                     opts=opts,
                     limits=limits,
                 )
+            # Plugins the agent (or the user) enabled or edited during this
+            # step become usable with the next provider call.
+            if opts.refresh_plugins is not None:
+                change = await opts.refresh_plugins()
+                if change:
+                    if change.tools_changed:
+                        schemas = self._filtered_schemas(
+                            agent, mode, depth=depth, max_depth=max_depth
+                        )
+                    messages.append(LLMMessage(role="user", content=change.message()))
             # Tool results must stay adjacent to their calls, so a steer joins
             # the conversation only after every outcome (and any compaction).
             messages.extend(

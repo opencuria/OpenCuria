@@ -110,9 +110,16 @@ function run(overrides: Partial<ScheduledTaskRun>): ScheduledTaskRun {
   };
 }
 
-const skills = [
-  { id: "skill-review", name: "Code review checklist" },
-] as Skill[];
+const skills: Skill[] = [
+  {
+    id: "skill-review",
+    name: "Code review checklist",
+    description: "Reviews a pull request.",
+    plugin_id: "plugin-review",
+    plugin_name: "Reviews",
+    scope: "personal",
+  },
+];
 
 const catalog: AgentCatalog = {
   engines: [

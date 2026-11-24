@@ -4,6 +4,7 @@
  */
 import {
   evaluateWorkspacePluginSelection,
+  autoAttachCredentials,
   isCredentialConnected,
   toggleWorkspaceCredentialSelection,
 } from "@opencuria/chat-core/workspaceConfiguration";
@@ -38,8 +39,9 @@ function pluginSubtitle(
   credentials: Credential[],
   selectedCredentials: Credential[],
 ): { text?: string; tone?: "muted" | "warning" } {
+  // Credentials the plugin brings itself need nothing from the workspace.
   const required = plugin.credential_requirements.filter(
-    (requirement) => requirement.required,
+    (requirement) => requirement.required && !requirement.credential_id,
   );
   if (!selected || !required.length)
     return { text: plugin.description || undefined };
@@ -133,12 +135,19 @@ export function pluginCredentialSections({
     pluginIds,
     credentialIds,
   });
-  const togglePlugin = (id: string) =>
-    onPluginIds(
-      pluginIds.includes(id)
-        ? pluginIds.filter((entry) => entry !== id)
-        : [...pluginIds, id],
-    );
+  const togglePlugin = (id: string) => {
+    if (pluginIds.includes(id)) {
+      onPluginIds(pluginIds.filter((entry) => entry !== id));
+      return;
+    }
+    onPluginIds([...pluginIds, id]);
+    // Attach the only matching credential so nobody has to pick it.
+    const plugin = selection.catalog.find((entry) => entry.id === id);
+    const attached = plugin
+      ? autoAttachCredentials(plugin, credentialIds, catalog.credentials)
+      : credentialIds;
+    if (attached !== credentialIds) onCredentialIds(attached);
+  };
   const pluginRows: NativeFormRow[] = [
     ...selection.catalog.map((plugin): NativeFormRow => {
       const subtitle = pluginSubtitle(

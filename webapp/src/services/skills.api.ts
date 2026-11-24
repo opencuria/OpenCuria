@@ -1,10 +1,5 @@
-/** Skills REST API service. */
+/** Skills REST API service: the skills of the plugins the user can use. */
 import { createSkillsApi } from '@opencuria/client/settings'
 import { getApiClient } from './api'
 
-export const {
-  list: listSkills,
-  create: createSkill,
-  update: updateSkill,
-  delete: deleteSkill,
-} = createSkillsApi(getApiClient)
+export const { list: listSkills } = createSkillsApi(getApiClient)

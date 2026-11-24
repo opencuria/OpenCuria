@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import uuid
 
+from apps.plugins.skills import PluginSkillService
 from apps.runners.services.workspace_admission import WorkspaceAdmissionService
-from apps.skills.services import SkillService
 from common.exceptions import NotFoundError
 
 from .conversation_events import ConversationEvents
@@ -28,13 +28,13 @@ class SessionSettingsService:
         self,
         *,
         sessions: type[HarnessSessionRepository] | None = None,
-        skills: SkillService | None = None,
+        skills: PluginSkillService | None = None,
         events: ConversationEvents | None = None,
         workspace_admission: WorkspaceAdmissionService | None = None,
     ) -> None:
         """Inject persistence, skills, notifications and the workspace fence."""
         self.sessions = sessions or HarnessSessionRepository
-        self.skills = skills or SkillService()
+        self.skills = skills or PluginSkillService()
         self.events = events or ConversationEvents()
         self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
 
@@ -129,7 +129,7 @@ class SessionSettingsService:
     ) -> HarnessSession:
         """Persist skill selection after validating visibility."""
         session = self._editable_session(session_id)
-        normalized = SkillService.normalize_ids(skill_ids)
+        normalized = PluginSkillService.normalize_ids(skill_ids)
         if normalized:
             self.skills.resolve_bodies(
                 normalized,

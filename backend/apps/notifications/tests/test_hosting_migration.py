@@ -14,10 +14,12 @@ from django.db.migrations.executor import MigrationExecutor
 executor = MigrationExecutor(connection)
 before = [
     node for node in executor.loader.graph.leaf_nodes()
-    if node[0] not in {"credentials", "notifications"}
+    if node[0] not in {"credentials", "notifications", "plugins"}
 ] + [
     ("credentials", "0012_alter_credentialservice_credential_type"),
     ("notifications", "0004_server_only_push_credentials"),
+    # Later plugin migrations depend on later credential migrations.
+    ("plugins", "0016_opencuria_plugin_apps"),
 ]
 executor.migrate(before)
 old = executor.loader.project_state(before).apps

@@ -154,6 +154,7 @@ async def compose_system_prompt(
     skills: list[str] | None = None,
     references: list[str] | None = None,
     native_tool_contracts: bool = False,
+    skill_catalog: list[tuple[str, str]] | None = None,
 ) -> ComposedPrompt:
     """Compose the full system prompt for an agent run.
 
@@ -167,7 +168,10 @@ async def compose_system_prompt(
             environment text.
         cwd: Working directory the walk-up starts from.
         now: Timestamp for the environment section (defaults to UTC).
-        skills: Extension point (M5/M7): skill names/blobs to append.
+        skills: SKILL.md documents the user selected; appended in full.
+        skill_catalog: ``(name, description)`` of the loadable plugin
+            skills; only these lines enter the prompt (progressive
+            disclosure through the ``skill`` tool).
         references: Extension point (M5/M7): ``@file``-style references.
         native_tool_contracts: The CLI owns native tool names and descriptions.
 
@@ -269,14 +273,33 @@ async def compose_system_prompt(
 
     skills = skills or []
     references = references or []
+    if skill_catalog:
+        sections.append(render_skill_catalog(skill_catalog))
     if skills:
-        sections.append("# Skills\n" + "\n".join(f"- {skill}" for skill in skills))
+        sections.append(
+            "# Selected skills\nThe user selected these skills for this chat; "
+            "follow them.\n\n" + "\n\n".join(skill.strip() for skill in skills)
+        )
     if references:
         sections.append("# References\n" + "\n".join(f"- {ref}" for ref in references))
 
     return ComposedPrompt(
         system="\n\n".join(sections), sources=sources, truncated=truncated
     )
+
+
+def render_skill_catalog(catalog: list[tuple[str, str]]) -> str:
+    """Render the loadable skills: names and descriptions only."""
+    lines = [
+        "# Skills",
+        "Skills hold specialized instructions for specific tasks. When a task "
+        "matches a skill's description, load it with the skill tool before you "
+        "start.",
+        "<available_skills>",
+        *[f"- {name}: {description}" for name, description in catalog],
+        "</available_skills>",
+    ]
+    return "\n".join(lines)
 
 
 def describe_tools_for_prompt(tools: list[ToolSchema] | None) -> list[str]:

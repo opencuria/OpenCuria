@@ -8,6 +8,7 @@ repositories encapsulate all ORM access.
 from __future__ import annotations
 
 import re
+import shlex
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -18,8 +19,9 @@ from django.utils.text import slugify
 
 from apps.credentials.oauth_metadata import validate_oauth_server_url
 from apps.credentials.services import CredentialServiceSvc, CredentialSvc
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import ConflictError, NotFoundError, ServiceError
 
+from .credential_links import usable_credential
 from .models import (
     Plugin,
     PluginCredentialRequirement,
@@ -34,6 +36,11 @@ from .repositories import (
     PluginRepository,
     PluginSkillRepository,
     WorkspacePluginActivationRepository,
+)
+from .skill_documents import (
+    MAX_DESCRIPTION_LEN,
+    default_description,
+    parse_skill_markdown,
 )
 
 logger = structlog.get_logger(__name__)
@@ -51,6 +58,16 @@ _MAX_MAPPING_ENTRIES = 64
 _MAX_MAPPING_KEY_LEN = 256
 _MAX_MAPPING_VALUE_LEN = 4096
 _MAX_URL_LEN = 2048
+
+#: Timeouts of user-defined MCP servers; users never configure them. Startup
+#: covers a cold ``npx``/``uvx`` download inside the workspace; requests may
+#: run long (browsers, builds) and the user can stop a run at any time.
+DEFAULT_STARTUP_TIMEOUT_SECONDS = 60
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600
+
+SCOPE_PERSONAL = "personal"
+SCOPE_ORGANIZATION = "organization"
+SCOPE_BUILTIN = "builtin"
 
 PLAYWRIGHT_PLUGIN_SLUG = "playwright"
 #: Headed Chromium on the shared workspace desktop (KasmVNC :1) so the
@@ -158,21 +175,70 @@ def validate_placeholder_mapping(mapping: dict, *, field: str) -> dict[str, str]
 
 
 def normalize_skill_payload(item: dict, index: int) -> dict:
-    """Validate a nested skill payload."""
-    name = validate_name(item.get("name", ""), field="Skill name")
-    slug = normalize_slug(item.get("slug") or item.get("name", ""), field="Skill slug")
-    body = item.get("body") or ""
-    if not isinstance(body, str) or not body.strip():
+    """Validate a nested skill payload.
+
+    A body that starts with SKILL.md frontmatter fills an empty name or
+    description from it; the frontmatter itself is not stored.
+    """
+    raw_body = item.get("body") or ""
+    if not isinstance(raw_body, str):
+        raise ValueError("Skill body must be text")
+    document = parse_skill_markdown(raw_body)
+    name = validate_name(
+        (item.get("name") or "").strip() or document.name, field="Skill name"
+    )
+    slug = normalize_slug(item.get("slug") or name, field="Skill slug")
+    body = document.body
+    if not body.strip():
         raise ValueError("Skill body must not be empty")
     if len(body) > _MAX_BODY_LEN:
         raise ValueError(f"Skill body must be at most {_MAX_BODY_LEN} characters")
+    description = item.get("description")
+    if description is not None and not isinstance(description, str):
+        raise ValueError("Skill description must be text")
+    description = " ".join(
+        ((description or "").strip() or document.description).split()
+    ) or default_description(body)
+    if len(description) > MAX_DESCRIPTION_LEN:
+        raise ValueError(
+            f"Skill description must be at most {MAX_DESCRIPTION_LEN} characters"
+        )
     try:
         position = int(item.get("position", index))
     except (TypeError, ValueError):
         raise ValueError("Skill position must be an integer") from None
     if position < 0 or position > 10_000:
         raise ValueError("Skill position must be between 0 and 10000")
-    return {"name": name, "slug": slug, "body": body, "position": position}
+    return {
+        "id": item.get("id") or None,
+        "name": name,
+        "slug": slug,
+        "description": description,
+        "body": body,
+        "position": position,
+    }
+
+
+def split_command_line(command: str, args: list[str]) -> tuple[str, list[str]]:
+    """Split ``npx -y @acme/mcp`` into executable and arguments (no shell).
+
+    A command without whitespace is returned unchanged. A command line plus
+    separate ``args`` is ambiguous and rejected.
+    """
+    if not re.search(r"\s", command):
+        return command, args
+    if args:
+        raise ValueError(
+            "Put the whole command line into command, or the executable into "
+            "command and its arguments into args"
+        )
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError as exc:
+        raise ValueError(f"MCP command line cannot be parsed: {exc}") from None
+    if not parts:
+        raise ValueError("MCP command is required for stdio transport")
+    return parts[0], parts[1:]
 
 
 def normalize_mcp_payload(item: dict) -> dict:
@@ -196,6 +262,8 @@ def normalize_mcp_payload(item: dict) -> dict:
     args = item.get("args") or []
     if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
         raise ValueError("MCP args must be a list of strings")
+    if transport == PluginTransport.STDIO and command:
+        command, args = split_command_line(command, list(args))
     if len(args) > _MAX_ARGS_COUNT:
         raise ValueError(f"MCP args must have at most {_MAX_ARGS_COUNT} entries")
     for arg in args:
@@ -261,8 +329,12 @@ def normalize_mcp_payload(item: dict) -> dict:
     )
 
     try:
-        startup_timeout = int(item.get("startup_timeout_seconds", 30))
-        request_timeout = int(item.get("request_timeout_seconds", 60))
+        startup_timeout = int(
+            item.get("startup_timeout_seconds") or DEFAULT_STARTUP_TIMEOUT_SECONDS
+        )
+        request_timeout = int(
+            item.get("request_timeout_seconds") or DEFAULT_REQUEST_TIMEOUT_SECONDS
+        )
     except (TypeError, ValueError):
         raise ValueError("MCP timeouts must be integers") from None
     if not 1 <= startup_timeout <= 600:
@@ -293,6 +365,7 @@ def normalize_mcp_payload(item: dict) -> dict:
             url = validate_oauth_server_url(url)
 
     return {
+        "id": item.get("id") or None,
         "name": name,
         "slug": slug,
         "transport": transport,
@@ -325,8 +398,21 @@ class PluginSelectionError(ConflictError):
         self.gaps = gaps
 
 
+class PluginPermissionError(ServiceError):
+    """The caller may see the plugin but not change it (HTTP 403)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="forbidden")
+
+
 class PluginService:
-    """Business logic for plugins and their activations."""
+    """Business logic for plugins and their activations.
+
+    Visibility: built-in plugins, the organization's plugins and the
+    caller's own personal plugins. Built-in and organization plugins are
+    *available* in workspaces once released for the organization (admin
+    setting); personal plugins are always available to their owner.
+    """
 
     def __init__(self) -> None:
         self.plugins = PluginRepository
@@ -338,21 +424,29 @@ class PluginService:
 
     # -- Queries ------------------------------------------------------------
 
-    def list_visible(self, *, org_id: uuid.UUID, admin: bool = True) -> list[dict]:
-        """Return visible plugin definitions and their service dependencies.
+    def list_visible(
+        self, *, org_id: uuid.UUID, user: Any = None, admin: bool = True
+    ) -> list[dict]:
+        """Return the plugins the caller sees, serialized for them.
 
-        Members (``admin=False``) see only plugins activated for the
-        organization and none of the MCP server configuration admins
-        maintain: drafts, activation and server setup are admin settings.
+        Members (``admin=False``) see built-in and organization plugins only
+        once they are released for the organization, and none of the MCP
+        server configuration admins maintain. Everyone sees their own
+        personal plugins in full.
         """
-        plugins = list(self.plugins.list_visible_to_org(org_id))
-        payloads = self._serialize_plugins(plugins, org_id=org_id)
+        user_id = getattr(user, "id", None)
+        plugins = list(self.plugins.list_visible(org_id, user_id))
+        payloads = self._serialize_plugins(
+            plugins, org_id=org_id, user_id=user_id, admin=admin
+        )
         if admin:
             return payloads
         return [
-            self._member_view(payload)
+            payload
+            if payload["scope"] == SCOPE_PERSONAL
+            else self._member_view(payload)
             for payload in payloads
-            if payload["org_enabled"] and payload["enabled"] and payload["published"]
+            if payload["available"]
         ]
 
     @staticmethod
@@ -378,12 +472,30 @@ class PluginService:
             ],
         }
 
-    def get_visible_model(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID):
-        """Return the visible plugin model or raise NotFoundError."""
-        plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
+    def get_visible_model(
+        self, plugin_id: uuid.UUID, *, org_id: uuid.UUID, user: Any = None
+    ) -> Plugin:
+        """Return a plugin the caller sees or raise NotFoundError."""
+        plugin = self.plugins.get_visible_by_id(
+            plugin_id, org_id, getattr(user, "id", None)
+        )
         if plugin is None:
             raise NotFoundError("Plugin", str(plugin_id))
         return plugin
+
+    def get_visible(
+        self, plugin_id: uuid.UUID, *, org_id: uuid.UUID, user: Any, admin: bool
+    ) -> dict:
+        """Return one plugin serialized for the caller."""
+        plugin = self.get_visible_model(plugin_id, org_id=org_id, user=user)
+        payload = self._serialize_plugins(
+            [plugin], org_id=org_id, user_id=getattr(user, "id", None), admin=admin
+        )[0]
+        if admin or payload["scope"] == SCOPE_PERSONAL:
+            return payload
+        if not payload["available"]:
+            raise NotFoundError("Plugin", str(plugin_id))
+        return self._member_view(payload)
 
     def workspace_plugin_ids(self, workspace_id: uuid.UUID) -> set[uuid.UUID]:
         """Return the plugin IDs selected for a workspace."""
@@ -394,6 +506,44 @@ class PluginService:
     ) -> dict[uuid.UUID, list[uuid.UUID]]:
         """Return ordered stored selections for already-authorized workspaces."""
         return self.workspace_activations.list_plugin_ids_many(workspace_ids)
+
+    # -- Permissions ----------------------------------------------------------
+
+    @staticmethod
+    def can_edit(plugin: Plugin, *, user_id: int | None, admin: bool) -> bool:
+        """Owners edit personal plugins, admins organization plugins."""
+        if plugin.owner_id is not None:
+            return user_id is not None and plugin.owner_id == user_id
+        return plugin.organization_id is not None and admin
+
+    def _editable_model(
+        self, plugin_id: uuid.UUID, *, org_id: uuid.UUID, user: Any, admin: bool
+    ) -> Plugin:
+        plugin = self.get_visible_model(plugin_id, org_id=org_id, user=user)
+        if (
+            not admin
+            and plugin.owner_id is None
+            and not (
+                plugin.enabled
+                and plugin.published
+                and plugin.id
+                in self.org_activations.enabled_plugin_ids(
+                    org_id, plugin_ids=[plugin.id]
+                )
+            )
+        ):
+            # Members never learn about shared plugins that are not released.
+            raise NotFoundError("Plugin", str(plugin_id))
+        if plugin.owner_id is None and plugin.organization_id is None:
+            raise PluginPermissionError(
+                "Built-in plugins cannot be changed; create a personal or "
+                "organization plugin instead"
+            )
+        if not self.can_edit(plugin, user_id=getattr(user, "id", None), admin=admin):
+            raise PluginPermissionError(
+                "Only organization admins can change this plugin"
+            )
+        return plugin
 
     # -- Create / update / delete -------------------------------------------
 
@@ -415,27 +565,38 @@ class PluginService:
         )
 
     @transaction.atomic
-    def create_org_plugin(
+    def create_plugin(
         self,
         *,
         org_id: uuid.UUID,
-        user,
+        user: Any,
         name: str,
-        slug: str,
+        slug: str = "",
+        scope: str = SCOPE_PERSONAL,
+        admin: bool = False,
         description: str = "",
         enabled: bool = True,
         published: bool = True,
         skills: list[dict] | None = None,
         mcp_servers: list[dict] | None = None,
         credential_requirements: list[dict] | None = None,
-    ):
-        """Create an org-owned plugin with nested components, atomically."""
+    ) -> dict:
+        """Create a personal or (admins only) organization plugin, atomically."""
+        if scope not in {SCOPE_PERSONAL, SCOPE_ORGANIZATION}:
+            raise ValueError("Plugin scope must be 'personal' or 'organization'")
+        if scope == SCOPE_ORGANIZATION and not admin:
+            raise PluginPermissionError(
+                "Only organization admins can create organization plugins"
+            )
         name = validate_name(name, field="Plugin name")
         normalized_slug = normalize_slug(slug or name, field="Plugin slug")
-        if self.plugins.get_org_by_slug(normalized_slug, org_id):
-            raise ConflictError(
-                f"Plugin slug '{normalized_slug}' already exists in this organization"
-            )
+        taken = (
+            self.plugins.get_personal_by_slug(normalized_slug, user.id)
+            if scope == SCOPE_PERSONAL
+            else self.plugins.get_org_by_slug(normalized_slug, org_id)
+        )
+        if taken:
+            raise ConflictError(f"A plugin named '{name}' already exists")
         description = (description or "").strip()
         if len(description) > 10_000:
             raise ValueError("Plugin description is too long")
@@ -452,6 +613,8 @@ class PluginService:
         prepared_requirements = self._prepare_requirement_inputs(
             credential_requirements or [],
             org_id=org_id,
+            user=user,
+            scope=scope,
         )
         self._validate_oauth_requirements(
             normalized_mcps,
@@ -465,26 +628,36 @@ class PluginService:
             name=name,
             slug=normalized_slug,
             description=description,
-            organization_id=org_id,
+            organization_id=org_id if scope == SCOPE_ORGANIZATION else None,
+            owner=user if scope == SCOPE_PERSONAL else None,
             created_by=user,
             enabled=bool(enabled),
             published=bool(published),
         )
-        self.skills.replace_for_plugin(plugin, normalized_skills)
-        self.mcp_servers.replace_for_plugin(plugin, normalized_mcps)
+        self.skills.replace_for_plugin(plugin, self._without_ids(normalized_skills))
+        self.mcp_servers.replace_for_plugin(
+            plugin, self._without_ids(normalized_mcps)
+        )
+        self._store_values(
+            plugin, prepared_requirements, org_id=org_id, user=user, admin=admin
+        )
         self._create_requirements(plugin, prepared_requirements)
-        logger.info("Plugin created: %s (org=%s)", plugin.id, org_id)
+        logger.info("plugin_created", plugin_id=str(plugin.id), scope=scope)
         return self._serialize_plugins(
-            [self.plugins.get_by_id(plugin.id)], org_id=org_id
+            [self.plugins.get_by_id(plugin.id)],
+            org_id=org_id,
+            user_id=user.id,
+            admin=admin,
         )[0]
 
     @transaction.atomic
-    def update_org_plugin(
+    def update_plugin(
         self,
         plugin_id: uuid.UUID,
         *,
         org_id: uuid.UUID,
-        user,
+        user: Any,
+        admin: bool = False,
         name: str | None = None,
         slug: str | None = None,
         description: str | None = None,
@@ -494,29 +667,32 @@ class PluginService:
         mcp_servers: list[dict] | None = None,
         credential_requirements: list[dict] | None = None,
     ) -> dict:
-        """Replace org-owned plugin metadata + full component lists, atomically.
+        """Replace plugin metadata and full component lists, atomically.
 
-        Only org-owned plugins of the caller's org may be updated; global or
-        foreign plugins raise NotFoundError (404).
+        Owners change personal plugins, admins organization plugins;
+        built-in plugins are read-only (403). Component lists that are sent
+        replace the stored lists; omitted lists are kept.
         """
-        plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
-        if plugin is None or plugin.organization_id != org_id:
-            raise NotFoundError("Plugin", str(plugin_id))
+        plugin = self._editable_model(plugin_id, org_id=org_id, user=user, admin=admin)
 
         fields: dict = {}
         if name is not None:
             fields["name"] = validate_name(name, field="Plugin name")
         if slug is not None:
-            # An empty slug means "derive from the (new) name": the webapp
-            # never sends user-editable slugs and always ships `slug: ''`
-            # so renames re-generate the slug. `None` (field omitted) keeps
-            # the stored slug untouched for API clients.
+            # An empty slug means "derive from the (new) name": clients never
+            # send user-editable slugs and ship `slug: ''` so renames
+            # re-generate the slug. `None` (field omitted) keeps the stored
+            # slug untouched for API clients.
             slug_source = slug.strip() or fields.get("name") or plugin.name
             normalized = normalize_slug(slug_source, field="Plugin slug")
-            existing = self.plugins.get_org_by_slug(normalized, org_id)
+            existing = (
+                self.plugins.get_personal_by_slug(normalized, plugin.owner_id)
+                if plugin.owner_id is not None
+                else self.plugins.get_org_by_slug(normalized, plugin.organization_id)
+            )
             if existing is not None and existing.id != plugin.id:
                 raise ConflictError(
-                    f"Plugin slug '{normalized}' already exists in this organization"
+                    f"A plugin named '{fields.get('name', normalized)}' already exists"
                 )
             fields["slug"] = normalized
         if description is not None:
@@ -539,6 +715,7 @@ class PluginService:
                 normalize_skill_payload(dict(s), i) for i, s in enumerate(skills)
             ]
             self._assert_unique_slugs([s["slug"] for s in normalized_skills], "Skill")
+        stored_servers = self.mcp_servers.list_existing(plugin.id)
         if mcp_servers is not None:
             normalized_mcps = [normalize_mcp_payload(dict(m)) for m in mcp_servers]
             self._assert_unique_slugs(
@@ -551,6 +728,8 @@ class PluginService:
             prepared_requirements = self._prepare_requirement_inputs(
                 credential_requirements,
                 org_id=org_id,
+                user=user,
+                scope=plugin.scope,
             )
         effective_mcps = (
             normalized_mcps
@@ -576,7 +755,7 @@ class PluginService:
                         "request_timeout_seconds": m.request_timeout_seconds,
                     }
                 )
-                for m in self.mcp_servers.list_for_plugin(plugin.id)
+                for m in stored_servers
             ]
         )
         self._validate_normalized_oauth_urls(effective_mcps)
@@ -599,24 +778,35 @@ class PluginService:
         if normalized_skills is not None:
             self.skills.replace_for_plugin(plugin, normalized_skills)
         if normalized_mcps is not None:
-            self.mcp_servers.replace_for_plugin(plugin, normalized_mcps)
+            self.mcp_servers.replace_for_plugin(
+                plugin, normalized_mcps
+            )
         if prepared_requirements is not None:
+            self._store_values(
+                plugin, prepared_requirements, org_id=org_id, user=user, admin=admin
+            )
             self._replace_requirements(plugin, prepared_requirements)
+        # Touch the plugin so running agents notice changed components.
+        self.plugins.update(plugin)
 
-        logger.info("Plugin updated: %s (org=%s)", plugin.id, org_id)
+        logger.info("plugin_updated", plugin_id=str(plugin.id))
         return self._serialize_plugins(
-            [self.plugins.get_by_id(plugin.id)], org_id=org_id
+            [self.plugins.get_by_id(plugin.id)],
+            org_id=org_id,
+            user_id=getattr(user, "id", None),
+            admin=admin,
         )[0]
 
     @transaction.atomic
-    def delete_org_plugin(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID) -> None:
-        """Delete an org-owned plugin without deleting its services or credentials."""
-        plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
-        if plugin is None or plugin.organization_id != org_id:
-            raise NotFoundError("Plugin", str(plugin_id))
+    def delete_plugin(
+        self, plugin_id: uuid.UUID, *, org_id: uuid.UUID, user: Any, admin: bool
+    ) -> Plugin:
+        """Delete a personal or organization plugin; credentials are kept."""
+        plugin = self._editable_model(plugin_id, org_id=org_id, user=user, admin=admin)
         self.requirements.delete_for_plugin(plugin.id)
         self.plugins.delete(plugin.id)
-        logger.info("Plugin deleted: %s (org=%s)", plugin_id, org_id)
+        logger.info("plugin_deleted", plugin_id=str(plugin_id))
+        return plugin
 
     # -- Org activation ------------------------------------------------------
 
@@ -628,17 +818,19 @@ class PluginService:
         user,
         active: bool,
     ) -> dict:
-        """Enable/disable a visible plugin org-wide (workspace rows kept).
+        """Release or withdraw a built-in/organization plugin org-wide.
 
-        Activation (``active=True``) requires an *effective* definition:
-        the plugin must be ``enabled`` and ``published``. Disabled or
-        unpublished plugins (global or org-owned) cannot be released —
-        a 409 ``plugin_not_available`` is raised. Deactivation
-        (``active=False``) always succeeds (idempotent).
+        Workspace selections are kept. Activation requires an enabled and
+        published definition (409 ``plugin_not_available`` otherwise);
+        deactivation always succeeds. Personal plugins need no release.
         """
-        plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
-        if plugin is None:
-            raise NotFoundError("Plugin", str(plugin_id))
+        plugin = self.get_visible_model(plugin_id, org_id=org_id, user=user)
+        if plugin.owner_id is not None:
+            raise ConflictError(
+                "Personal plugins are always available to their owner and are "
+                "not released for the organization",
+                code="personal_plugin",
+            )
         if active and not (plugin.enabled and plugin.published):
             raise ConflictError(
                 f"Plugin '{plugin.slug}' is not available for activation "
@@ -649,7 +841,10 @@ class PluginService:
             org_id=org_id, plugin=plugin, enabled_by=user, active=bool(active)
         )
         return self._serialize_plugins(
-            [self.plugins.get_by_id(plugin.id)], org_id=org_id
+            [self.plugins.get_by_id(plugin.id)],
+            org_id=org_id,
+            user_id=getattr(user, "id", None),
+            admin=True,
         )[0]
 
     # -- Workspace activation -------------------------------------------------
@@ -687,20 +882,15 @@ class PluginService:
 
         valid_by_service: dict[uuid.UUID, list] = {}
         for credential in credentials:
-            service = credential.service
-            if service.credential_type == "provider_secret":
-                continue
-            if service.organization_id not in {None, org_id}:
-                continue
-            if credential.user_id is not None:
-                if (
-                    credential.user_id != owner_id
-                    or credential.organization_id is not None
-                ):
-                    continue
-            elif credential.organization_id != org_id:
-                continue
-            valid_by_service.setdefault(credential.service_id, []).append(credential)
+            if usable_credential(
+                credential,
+                service_id=credential.service_id,
+                owner_id=owner_id,
+                org_id=org_id,
+            ):
+                valid_by_service.setdefault(credential.service_id, []).append(
+                    credential
+                )
 
         gaps: dict[uuid.UUID, list[dict]] = {
             plugin_id: [] for plugin_id in plugins_by_id
@@ -708,7 +898,18 @@ class PluginService:
         for requirement in requirements:
             if not requirement.required:
                 continue
-            candidates = valid_by_service.get(requirement.credential_service_id, [])
+            # The plugin's own credential wins over one attached to the workspace.
+            linked = requirement.credential
+            candidates = (
+                [linked]
+                if usable_credential(
+                    linked,
+                    service_id=requirement.credential_service_id,
+                    owner_id=owner_id,
+                    org_id=org_id,
+                )
+                else valid_by_service.get(requirement.credential_service_id, [])
+            )
             ready = bool(candidates)
             if requirement.credential_service.credential_type == "mcp_oauth":
                 servers = servers_by_requirement.get(
@@ -739,6 +940,27 @@ class PluginService:
                 )
         return gaps
 
+    def _available_for_owner(
+        self,
+        *,
+        org_id: uuid.UUID,
+        owner_id: int | None,
+        visible: list[Plugin] | None = None,
+    ) -> list[Plugin]:
+        """Plugins a workspace of *owner_id* may enable, ordered by name.
+
+        *visible* reuses an already loaded ``list_visible`` result.
+        """
+        released = self.org_activations.enabled_plugin_ids(org_id)
+        if visible is None:
+            visible = list(self.plugins.list_visible(org_id, owner_id))
+        return [
+            plugin
+            for plugin in visible
+            if plugin.owner_id is not None
+            or (plugin.id in released and plugin.enabled and plugin.published)
+        ]
+
     def validate_workspace_plugin_selection(
         self,
         *,
@@ -750,18 +972,19 @@ class PluginService:
     ) -> list[dict]:
         """Validate a complete plugin selection and return missing requirements."""
         desired = list(dict.fromkeys(plugin_ids))
-        visible = {p.id: p for p in self.plugins.list_visible_to_org(org_id)}
+        owner_id = getattr(owner, "id", None)
+        loaded = list(self.plugins.list_visible(org_id, owner_id))
+        visible = {p.id: p for p in loaded}
         unknown = [pid for pid in desired if pid not in visible]
         if unknown:
             raise NotFoundError("Plugin", ", ".join(str(pid) for pid in unknown))
-        enabled_ids = self.org_activations.enabled_plugin_ids(org_id)
-        unavailable = [
-            pid
-            for pid in desired
-            if pid not in enabled_ids
-            or not visible[pid].enabled
-            or not visible[pid].published
-        ]
+        available = {
+            p.id
+            for p in self._available_for_owner(
+                org_id=org_id, owner_id=owner_id, visible=loaded
+            )
+        }
+        unavailable = [pid for pid in desired if pid not in available]
         if unavailable and not allow_unavailable:
             raise ConflictError(
                 "Plugins are not available for this organization: "
@@ -772,21 +995,16 @@ class PluginService:
         gaps = self._workspace_required_gaps(
             plugins=plugins,
             credentials=credentials,
-            owner_id=owner.id,
+            owner_id=owner_id,
             org_id=org_id,
         )
         return [gap for plugin in plugins for gap in gaps[plugin.id]]
 
     def list_workspace_plugins(self, *, workspace, org_id: uuid.UUID) -> list[dict]:
-        """List org-enabled plugins with workspace state + credential gaps."""
-
-        plugins = [
-            p
-            for p in self.plugins.list_visible_to_org(org_id)
-            if p.enabled and p.published
-        ]
-        enabled_ids = self.org_activations.enabled_plugin_ids(org_id)
-        plugins = [p for p in plugins if p.id in enabled_ids]
+        """List the plugins a workspace may enable, with state + credential gaps."""
+        plugins = self._available_for_owner(
+            org_id=org_id, owner_id=workspace.created_by_id
+        )
         ws_enabled = self.workspace_activations.enabled_plugin_ids(workspace.id)
         attached_credentials = CredentialSvc().list_workspace_credentials(workspace.id)
         gaps = self._workspace_required_gaps(
@@ -805,7 +1023,8 @@ class PluginService:
                     "slug": plugin.slug,
                     "description": plugin.description,
                     "organization_id": plugin.organization_id,
-                    "is_global": plugin.organization_id is None,
+                    "is_global": plugin.scope == SCOPE_BUILTIN,
+                    "scope": plugin.scope,
                     "workspace_enabled": plugin.id in ws_enabled,
                     "missing_required_credentials": missing,
                     "ready": not missing,
@@ -816,20 +1035,29 @@ class PluginService:
     # -- Credential removal guard --------------------------------------------
 
     def credential_removal_gaps(
-        self, credential, *, workspace_id: uuid.UUID, org_id: uuid.UUID
+        self, credential, *, workspace_id: uuid.UUID, org_id: uuid.UUID, owner_id=None
     ) -> list[dict]:
         """Return a workspace's effective plugin requirements *credential* backs.
 
-        ``org_id`` is the workspace's organization; the caller enumerates the
-        workspaces that have *credential* attached.
+        ``org_id`` is the workspace's organization and ``owner_id`` its
+        owner; the caller enumerates the workspaces that have *credential*
+        attached.
         """
         selected = self.workspace_activations.enabled_plugin_ids(workspace_id)
-        effective = selected & self.org_activations.enabled_plugin_ids(org_id)
         gaps = []
-        for plugin in self.plugins.list_visible_to_org(org_id):
-            if plugin.id not in effective or not (plugin.enabled and plugin.published):
+        for plugin in self._available_for_owner(org_id=org_id, owner_id=owner_id):
+            if plugin.id not in selected:
                 continue
             for requirement in self.requirements.list_for_plugin(plugin.id):
+                if usable_credential(
+                    requirement.credential,
+                    service_id=requirement.credential_service_id,
+                    owner_id=owner_id,
+                    org_id=org_id,
+                ) and requirement.credential_id != credential.id:
+                    # The plugin brings its own credential; the attachment
+                    # is not what it runs on.
+                    continue
                 if (
                     requirement.required
                     and requirement.credential_service_id == credential.service_id
@@ -848,8 +1076,18 @@ class PluginService:
 
     # -- Internal helpers ----------------------------------------------------
 
+    @staticmethod
+    def _without_ids(items: list[dict]) -> list[dict]:
+        """New plugins never adopt component IDs a client sent."""
+        return [{**item, "id": None} for item in items]
+
     def _serialize_plugins(
-        self, plugins: list[Plugin], *, org_id: uuid.UUID
+        self,
+        plugins: list[Plugin],
+        *,
+        org_id: uuid.UUID,
+        user_id: int | None = None,
+        admin: bool = True,
     ) -> list[dict]:
         """Load components once for the requested definitions, preserving order."""
         if not plugins:
@@ -874,9 +1112,29 @@ class PluginService:
                 mcps=mcps[plugin.id],
                 reqs=reqs[plugin.id],
                 org_enabled=plugin.id in enabled_ids,
+                editable=self.can_edit(plugin, user_id=user_id, admin=admin),
+                org_id=org_id,
             )
             for plugin in plugins
         ]
+
+    @staticmethod
+    def _credential_view(requirement, org_id: uuid.UUID) -> dict:
+        """The plugin's own credential of a requirement, if usable here."""
+        credential = requirement.credential
+        if credential is None or credential.organization_id not in {None, org_id}:
+            return {
+                "credential_id": None,
+                "credential_name": "",
+                "credential_scope": "",
+            }
+        return {
+            "credential_id": credential.id,
+            "credential_name": credential.name,
+            "credential_scope": (
+                "personal" if credential.user_id is not None else "organization"
+            ),
+        }
 
     @staticmethod
     def _serialize_plugin(
@@ -886,23 +1144,31 @@ class PluginService:
         mcps: list[PluginMcpServer],
         reqs: list[PluginCredentialRequirement],
         org_enabled: bool,
+        editable: bool = False,
+        org_id: uuid.UUID | None = None,
     ) -> dict:
         """Serialize a fully loaded definition without further repository reads."""
+        scope = plugin.scope
         return {
             "id": plugin.id,
             "name": plugin.name,
             "slug": plugin.slug,
             "description": plugin.description,
+            "scope": scope,
             "enabled": plugin.enabled,
             "published": plugin.published,
             "organization_id": plugin.organization_id,
-            "is_global": plugin.organization_id is None,
+            "is_global": scope == SCOPE_BUILTIN,
             "org_enabled": org_enabled,
+            "available": scope == SCOPE_PERSONAL
+            or (org_enabled and plugin.enabled and plugin.published),
+            "editable": editable,
             "skills": [
                 {
                     "id": s.id,
                     "name": s.name,
                     "slug": s.slug,
+                    "description": s.description,
                     "body": s.body,
                     "position": s.position,
                 }
@@ -927,8 +1193,6 @@ class PluginService:
                     "headers": dict(m.headers or {}),
                     "auth_type": m.auth_type,
                     "oauth_requirement_key": m.oauth_requirement_key,
-                    "startup_timeout_seconds": m.startup_timeout_seconds,
-                    "request_timeout_seconds": m.request_timeout_seconds,
                 }
                 for m in mcps
             ],
@@ -942,6 +1206,7 @@ class PluginService:
                     "service_name": r.credential_service.name,
                     "service_slug": r.credential_service.slug,
                     "credential_type": r.credential_service.credential_type,
+                    **PluginService._credential_view(r, org_id),
                 }
                 for r in reqs
             ],
@@ -1034,8 +1299,19 @@ class PluginService:
         raw_requirements: list[dict],
         *,
         org_id: uuid.UUID,
+        user: Any = None,
+        scope: str = SCOPE_ORGANIZATION,
     ) -> list[dict]:
-        """Validate dependencies and resolve only existing visible services."""
+        """Validate the credential links of a plugin before anything is written.
+
+        Each entry names a visible credential service (``service_id``) or a
+        new secret service to create (``new_service``: name, env var), and
+        optionally the credential the plugin always uses (``credential_id``)
+        and/or a ``value`` to store as that credential. New services are
+        created here (inside the caller's transaction) so the remaining
+        validation sees real services; values are stored on persist.
+        """
+        credential_svc = CredentialSvc()
         prepared, seen_keys, seen_services = [], set(), set()
         for raw in raw_requirements:
             item = dict(raw) if isinstance(raw, dict) else {}
@@ -1043,33 +1319,142 @@ class PluginService:
             if key in seen_keys:
                 raise ConflictError(f"Duplicate credential requirement key '{key}'")
             seen_keys.add(key)
-            service_id = item.get("service_id")
-            try:
-                service_id = uuid.UUID(str(service_id or ""))
-            except ValueError:
-                raise ValueError("service_id must be a UUID") from None
-            service = CredentialServiceSvc().get_service(service_id, org_id=org_id)
-            if service.id in seen_services:
-                raise ConflictError("Duplicate credential service in requirements")
-            seen_services.add(service.id)
             description = (item.get("description") or "").strip()
             if len(description) > 2000:
                 raise ValueError("Credential requirement description is too long")
+            value = item.get("value")
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"Credential '{key}' needs a non-empty value")
+            if isinstance(value, str) and len(value) > 64 * 1024:
+                raise ValueError(f"Credential '{key}' value is too long")
+            new_service = item.get("new_service")
+            if new_service:
+                service = CredentialServiceSvc().create_secret_service(
+                    name=str(new_service.get("name") or key),
+                    env_var_name=str(new_service.get("env_var_name") or key),
+                    description=description,
+                    owner=user if scope == SCOPE_PERSONAL else None,
+                    organization_id=None if scope == SCOPE_PERSONAL else org_id,
+                )
+            else:
+                try:
+                    service_id = uuid.UUID(str(item.get("service_id") or ""))
+                except ValueError:
+                    raise ValueError(
+                        f"Credential '{key}' needs service_id or new_service"
+                    ) from None
+                service = CredentialServiceSvc().get_service(
+                    service_id, org_id=org_id, user=user
+                )
+            if scope == SCOPE_ORGANIZATION and service.owner_id is not None:
+                raise ValueError(
+                    "Organization plugins cannot use personal credential services"
+                )
+            if service.id in seen_services:
+                raise ConflictError("Duplicate credential service in requirements")
+            seen_services.add(service.id)
+            credential = None
+            if item.get("credential_id"):
+                try:
+                    credential_id = uuid.UUID(str(item["credential_id"]))
+                except ValueError:
+                    raise ValueError("credential_id must be a UUID") from None
+                credential = credential_svc.get_visible_credential(
+                    credential_id, user=user, org_id=org_id
+                )
+                if credential.service_id != service.id:
+                    raise ValueError(
+                        f"Credential '{credential.name}' does not belong to the "
+                        f"credential service '{service.name}'"
+                    )
+                self._assert_credential_scope(credential, scope=scope, org_id=org_id)
+            if value is not None and service.credential_type in {
+                "mcp_oauth",
+                "ssh_key",
+            }:
+                raise ValueError(
+                    f"Credential '{key}' of type {service.credential_type} cannot "
+                    "take a value here; connect or create it under Credentials"
+                )
             prepared.append(
                 {
                     "key": key,
                     "description": description,
                     "required": bool(item.get("required", True)),
                     "service": service,
+                    "credential": credential,
+                    "value": value,
                 }
             )
         return prepared
 
+    @staticmethod
+    def _assert_credential_scope(credential, *, scope: str, org_id: uuid.UUID) -> None:
+        """Organization plugins share organization credentials only."""
+        if scope == SCOPE_ORGANIZATION and credential.organization_id != org_id:
+            raise ValueError(
+                "Organization plugins can only use organization credentials; "
+                "personal credentials stay with their owner"
+            )
+
+    def _store_values(
+        self,
+        plugin: Plugin,
+        prepared: list[dict],
+        *,
+        org_id: uuid.UUID,
+        user: Any,
+        admin: bool,
+    ) -> None:
+        """Store entered values as credentials and link them to the plugin.
+
+        A value updates the linked credential when the caller may edit it,
+        otherwise it becomes a new credential: personal for personal
+        plugins, an organization credential for organization plugins.
+        """
+        credential_svc = CredentialSvc()
+        personal = plugin.owner_id is not None
+        for item in prepared:
+            value = item.get("value")
+            if value is None:
+                continue
+            linked = item.get("credential")
+            if linked is not None and credential_svc.can_edit(
+                linked, user=user, org_id=org_id, is_admin=admin
+            ):
+                item["credential"] = credential_svc.update_credential(
+                    credential_id=linked.id,
+                    org_id=org_id,
+                    user=user,
+                    is_admin=admin,
+                    value=value,
+                )
+                continue
+            label = item["service"].env_var_name or item["key"]
+            name = f"{plugin.name}: {label}"[:255]
+            item["credential"] = (
+                credential_svc.create_personal_credential(
+                    service_id=item["service"].id,
+                    name=name,
+                    value=value,
+                    user=user,
+                    org_id=org_id,
+                )
+                if personal
+                else credential_svc.create_org_credential(
+                    organization_id=org_id,
+                    service_id=item["service"].id,
+                    name=name,
+                    value=value,
+                    user=user,
+                )
+            )
+
     def _create_requirements(self, plugin, prepared: list[dict]) -> None:
-        """Persist plugin dependencies without activating services."""
+        """Persist the plugin's credential links."""
         self.requirements.bulk_create_for_plugin(plugin, prepared)
 
     def _replace_requirements(self, plugin, prepared: list[dict]) -> None:
-        """Replace requirement-to-service mappings without owning services."""
+        """Replace the plugin's credential links (services stay)."""
         self.requirements.delete_for_plugin(plugin.id)
         self._create_requirements(plugin, prepared)

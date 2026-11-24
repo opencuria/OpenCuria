@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any
 from uuid import uuid4
@@ -57,6 +57,28 @@ def _record_skip(
     )
 
 
+@dataclass
+class RuntimeChange:
+    """What a mid-run :meth:`McpRuntime.refresh` changed."""
+
+    added_tools: list[str] = field(default_factory=list)
+    removed_tools: list[str] = field(default_factory=list)
+    failed: list[dict[str, str]] = field(default_factory=list)
+    #: Servers that only change with the next message (managed desktop).
+    deferred: list[str] = field(default_factory=list)
+    #: Tools of edited servers that were reopened under the same names.
+    restarted_tools: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(
+            self.added_tools
+            or self.removed_tools
+            or self.failed
+            or self.deferred
+            or self.restarted_tools
+        )
+
+
 class McpRuntime:
     """Owns one harness run's MCP connections (no cross-workspace pool)."""
 
@@ -67,6 +89,12 @@ class McpRuntime:
         self.desktop: AgentDesktop | None = None
         self.agent_scopes: DesktopAgentScopes | None = None
         self._scope_enabled = scope_enabled
+        #: server ID -> version of every server this run attempted to open.
+        self._known: dict[Any, str] = {}
+        #: Live servers added mid-run, one child runtime each, by server ID.
+        self._children: dict[Any, McpRuntime] = {}
+        #: Every child in creation order (live and retired); closed in reverse.
+        self._child_order: list[McpRuntime] = []
 
     async def execution_accessor(self, accessor: Any) -> Any:
         """Give all three engines the binding before their processes start."""
@@ -101,6 +129,13 @@ class McpRuntime:
         """
         snapshot = prepared.snapshot
         guest = guest_of(accessor)
+        self._known.update(
+            {
+                server.id: server.updated_at
+                for plugin in snapshot.plugins
+                for server in plugin.mcp_servers
+            }
+        )
         computer_use_declared = any(
             server.tool_policy.get("desktop_kind") == "computeruse"
             or (plugin.slug == "computer-use" and server.slug == "cua_repl")
@@ -315,6 +350,109 @@ class McpRuntime:
             self.connections = []
             raise
 
+    def _connection_for(self, server_id: Any) -> McpServerConnection | None:
+        """The live (not retired) connection of *server_id*, if any."""
+        for connection in self.connections:
+            if connection.server_id == server_id and connection.healthy:
+                return connection
+        child = self._children.get(server_id)
+        return child.connections[0] if child and child.connections else None
+
+    async def refresh(
+        self,
+        *,
+        prepared: PreparedPluginRuntime,
+        accessor: Any,
+        registry: ToolRegistry,
+        session_id: str = "",
+        turn_id: str = "",
+        runtime_options: dict[str, Any] | None = None,
+    ) -> RuntimeChange:
+        """Apply plugin changes made while the run is going.
+
+        Servers that are new or changed (by ``updated_at``) are opened and
+        their tools registered in *registry*; servers that disappeared are
+        retired: their tools are unregistered at once, their connections
+        close with the run. Connections nest anyio cancel scopes in the run's
+        task and must close in reverse opening order, so none is closed out
+        of order mid-run. Each server is attempted once per version, so a
+        broken server is not retried every step. Managed desktop servers keep
+        their state until the next message.
+        """
+        change = RuntimeChange()
+        desired = {
+            server.id: (plugin, server)
+            for plugin in prepared.snapshot.plugins
+            for server in plugin.mcp_servers
+        }
+        for server_id, version in list(self._known.items()):
+            entry = desired.get(server_id)
+            if entry is not None and entry[1].updated_at == version:
+                continue
+            connection = self._connection_for(server_id)
+            if connection is not None and connection.agent_desktop is not None:
+                change.deferred.append(connection.server_name)
+                continue
+            if connection is not None:
+                for tool in connection.harness_tools:
+                    if registry.unregister(tool.name) is not None:
+                        change.removed_tools.append(tool.name)
+                # Retired: never registered again, closed with the run.
+                connection.healthy = False
+            self._children.pop(server_id, None)
+            del self._known[server_id]
+        for server_id, (plugin, server) in desired.items():
+            if server_id in self._known:
+                continue
+            if server.resources.desktop is not None:
+                change.deferred.append(server.name)
+                continue
+            self._known[server_id] = server.updated_at
+            child = McpRuntime(scope_enabled=False)
+            delta = replace(
+                prepared,
+                snapshot=replace(
+                    prepared.snapshot,
+                    plugins=(replace(plugin, mcp_servers=(server,)),),
+                ),
+            )
+            try:
+                await child.setup(
+                    prepared=delta,
+                    accessor=accessor,
+                    core_tool_names=registry.names(),
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    runtime_options=runtime_options,
+                )
+            except Exception as exc:
+                _record_skip(
+                    change.failed, plugin=plugin.slug, server=server.slug, error=exc
+                )
+                await child.aclose()
+                continue
+            change.failed.extend(child.skipped)
+            if not child.connections:
+                await child.aclose()
+                continue
+            self._children[server_id] = child
+            self._child_order.append(child)
+            change.added_tools.extend(child.register_tools(registry))
+        # A restarted server keeps its tool names: report neither side.
+        restarted = set(change.added_tools) & set(change.removed_tools)
+        change.restarted_tools = [n for n in change.added_tools if n in restarted]
+        change.added_tools = [n for n in change.added_tools if n not in restarted]
+        change.removed_tools = [n for n in change.removed_tools if n not in restarted]
+        if change:
+            log.info(
+                "mcp_runtime_refreshed",
+                added=len(change.added_tools),
+                removed=len(change.removed_tools),
+                failed=change.failed,
+                deferred=change.deferred,
+            )
+        return change
+
     @staticmethod
     def _tools_for_connection(connection: McpServerConnection) -> list[McpTool]:
         """Wrap discovered tools of one connection as harness tools."""
@@ -374,6 +512,8 @@ class McpRuntime:
             await self.agent_scopes.aclose()
         for connection in self.connections:
             await connection.finish()
+        for child in self._child_order:
+            await child.finish()
         paths = [
             connection.recording_path
             for connection in self.connections
@@ -395,6 +535,14 @@ class McpRuntime:
                 "in this workspace and check its runtime health."
             )
 
+    async def close_children(self) -> None:
+        """Close servers added mid-run, newest first (in the task that opened
+        them; see :class:`apps.harness.mcp_client.reload.PluginReloader`)."""
+        children, self._child_order = self._child_order, []
+        self._children = {}
+        for child in reversed(children):
+            await child.aclose()
+
     async def aclose(self) -> None:
         """Close all connections (idempotent, never raises).
 
@@ -408,6 +556,7 @@ class McpRuntime:
                 if self.agent_scopes is not None:
                     await self.agent_scopes.aclose()
             finally:
+                await self.close_children()
                 await self._stack.aclose()
         except Exception:  # pragma: no cover - best effort
             log.warning("mcp_runtime_close_failed")

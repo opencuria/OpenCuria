@@ -8,15 +8,18 @@ import {
   within,
 } from "@testing-library/react-native";
 import {
+  emptyMcpForm,
   emptyPluginForm,
-  formToCreateIn,
+  pluginToForm,
 } from "@opencuria/chat-core/pluginForms";
 import type {
   ApiKey,
   ApiKeyPermission,
   Credential,
   CredentialService,
+  OpenCuriaClient,
   Plugin,
+  PluginUpdateIn,
 } from "@opencuria/client";
 import { ResourceStore } from "../../resources";
 import type { SettingsChoice } from "../../SettingsContext";
@@ -31,8 +34,15 @@ import { NewApiKeyPage } from "./NewApiKeyPage";
 import { NewCredentialPage } from "./NewCredentialPage";
 import { NewCredentialServicePage } from "./NewCredentialServicePage";
 import { PluginEditorPage } from "./PluginEditorPage";
-import { PluginSkillPage } from "./PluginEntryPages";
+import {
+  PluginMcpImportPage,
+  PluginMcpPage,
+  PluginRequirementPage,
+  PluginRequirementsPage,
+  PluginSkillPage,
+} from "./PluginEntryPages";
 import { PluginPage } from "./PluginPage";
+import { PluginSkillViewPage } from "./PluginSkillViewPage";
 import { PluginsPage } from "./PluginsPage";
 import type { PluginDraft } from "./pluginDraft";
 
@@ -370,24 +380,43 @@ describe("credential services", () => {
 describe("plugins", () => {
   const plugin = (overrides: Partial<Plugin> = {}): Plugin => ({
     id: "p1",
-    name: "Playwright",
-    slug: "playwright",
+    name: "Browser",
+    slug: "browser",
     description: "Browser automation",
+    scope: "organization",
     enabled: true,
     published: true,
     organization_id: "org-1",
     is_global: false,
     org_enabled: false,
+    available: false,
+    editable: true,
     skills: [
       {
         id: "k1",
         name: "Basics",
         slug: "basics",
+        description: "Opens and reads web pages.",
         body: "Use the browser.",
         position: 0,
       },
     ],
-    mcp_servers: [],
+    mcp_servers: [
+      {
+        id: "m1",
+        name: "Browser",
+        slug: "browser",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "browser-mcp"],
+        cwd: "/workspace",
+        env: { API_TOKEN: "{{credential.api_token}}" },
+        url: "",
+        headers: {},
+        auth_type: "none",
+        oauth_requirement_key: "",
+      },
+    ],
     credential_requirements: [
       {
         id: "r1",
@@ -398,68 +427,218 @@ describe("plugins", () => {
         service_name: "GitHub",
         service_slug: "github",
         credential_type: "env",
+        credential_id: null,
+        credential_name: "",
+        credential_scope: "",
+      },
+      {
+        id: "r2",
+        key: "api_token",
+        description: "",
+        required: true,
+        service_id: "svc-api",
+        service_name: "API_TOKEN (Browser)",
+        service_slug: "api-token-browser",
+        credential_type: "env",
+        credential_id: "cred-api",
+        credential_name: "Browser: API_TOKEN",
+        credential_scope: "organization",
       },
     ],
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
     ...overrides,
   });
+  const catalog = [
+    plugin(),
+    plugin({
+      id: "p2",
+      name: "Notes",
+      scope: "personal",
+      organization_id: null,
+      available: true,
+      skills: [],
+      mcp_servers: [],
+    }),
+    plugin({
+      id: "p3",
+      name: "OpenCuria",
+      scope: "builtin",
+      organization_id: null,
+      is_global: true,
+      org_enabled: true,
+      available: true,
+      editable: false,
+      mcp_servers: [],
+    }),
+  ];
 
-  it("offers New plugin to admins only", async () => {
-    renderSettingsPage(<PluginsPage />, {
+  /** A draft as the editor pages share it. */
+  function draftStore(form: PluginDraft["form"], pluginId: string | null) {
+    const resources = new ResourceStore();
+    resources.set<PluginDraft>("plugin-draft:d1", { pluginId, form });
+    return resources;
+  }
+  const editorClient = (plugins: Partial<OpenCuriaClient["plugins"]> = {}) =>
+    mockClient({
+      credentials: {
+        listServices: jest.fn(async () => [service({})]),
+        list: jest.fn(async () => [
+          credential({}),
+          credential({
+            id: "cred-team",
+            name: "Team key",
+            scope: "organization",
+            service_id: "svc-team",
+            service_name: "Team key",
+          }),
+        ]),
+      },
+      plugins: { list: jest.fn(async () => []), ...plugins },
+    });
+
+  it("groups plugins by owner and lets members create their own", async () => {
+    const { navigation } = renderSettingsPage(<PluginsPage />, {
       admin: false,
       client: mockClient({
-        plugins: { list: jest.fn(async () => [plugin()]) },
+        plugins: { list: jest.fn(async () => catalog) },
       }),
     });
-    // Activation is an admin setting; members never see a plugin's status.
+    expect(await screen.findByText("Your plugins")).toBeTruthy();
+    const titles = screen
+      .getAllByTestId(/^form-section-/)
+      .map((section) => section.props.testID);
+    expect(titles).toEqual([
+      "form-section-personal",
+      "form-section-organization",
+      "form-section-builtin",
+    ]);
+    // Release for the organization is an admin setting.
     expect(
-      await screen.findByRole("button", {
-        name: "Playwright, Organization · 1 skill · 1 service",
+      screen.getByRole("button", {
+        name: "Browser, 1 skill · 1 MCP server",
       }),
     ).toBeTruthy();
-    expect(screen.queryByText(/Inactive/)).toBeNull();
-    expect(screen.queryByText(/Activate a plugin/)).toBeNull();
-    expect(screen.queryByTestId("new-plugin")).toBeNull();
+    expect(screen.queryByText(/Available|Not released/)).toBeNull();
+    fireEvent.press(screen.getByTestId("new-plugin"));
+    expect(navigation.push).toHaveBeenCalledWith(
+      expect.stringMatching(/^plugin-editor:/),
+    );
   });
 
-  it("activates a plugin, opens a requirement's credential and deletes it", async () => {
-    const setActive = jest.fn(async () => plugin({ org_enabled: true }));
-    const remove = jest.fn(async () => undefined);
-    const { navigation } = renderSettingsPage(<PluginPage pluginId="p1" />, {
+  it("shows admins whether shared plugins are available", async () => {
+    renderSettingsPage(<PluginsPage />, {
       client: mockClient({
-        plugins: {
-          list: jest.fn(async () => [plugin()]),
-          setActive,
-          delete: remove,
-        },
+        plugins: { list: jest.fn(async () => catalog) },
       }),
     });
+    expect(
+      await screen.findByRole("button", {
+        name: "Browser, 1 skill · 1 MCP server · Not released",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "OpenCuria, 1 skill · Available" }),
+    ).toBeTruthy();
+    // Personal plugins need no release.
+    expect(screen.getByRole("button", { name: "Notes" })).toBeTruthy();
+  });
+
+  it("offers New plugin in the empty state", async () => {
+    renderSettingsPage(<PluginsPage />, {
+      admin: false,
+      client: mockClient({ plugins: { list: jest.fn(async () => []) } }),
+    });
+    expect(await screen.findByText("No plugins yet")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Plugins add skills and tools to your agents. Create one, or ask an agent to build one for you.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByTestId("empty-new-plugin")).toBeTruthy();
+  });
+
+  it("releases a plugin, shows its contents, opens a credential and deletes it", async () => {
+    const setActive = jest.fn(async () =>
+      plugin({ org_enabled: true, available: true }),
+    );
+    const remove = jest.fn(async () => undefined);
+    const { navigation, environment } = renderSettingsPage(
+      <PluginPage pluginId="p1" />,
+      {
+        client: mockClient({
+          plugins: {
+            list: jest.fn(async () => [plugin()]),
+            setActive,
+            delete: remove,
+          },
+        }),
+      },
+    );
     fireEvent.press(
       await screen.findByRole("switch", {
-        name: "Enabled for this organization",
+        name: "Available in this organization",
       }),
     );
     await waitFor(() => expect(setActive).toHaveBeenCalledWith("p1", true));
+    await waitFor(() =>
+      expect(environment.refreshWorkspaces).toHaveBeenCalled(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("edit-plugin")).toBeEnabled(),
+    );
+    expect(screen.getByText("Browser automation")).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "Basics, Opens and reads web pages." }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", {
+        name: "Browser, Command · npx -y browser-mcp · 1 secret",
+      }),
+    ).toBeTruthy();
     fireEvent.press(
-      screen.getByRole("button", { name: "GitHub, Required · ENV" }),
+      screen.getByRole("button", {
+        name: "GitHub, Required · ENV · Each workspace adds its own",
+      }),
     );
     expect(navigation.push).toHaveBeenCalledWith("credential-new:svc-env");
-    // Deleting sits in its own last section, not in the overflow menu.
-    fireEvent.press(
-      screen.getByRole("button", { name: "More for Playwright" }),
+    // The plugin brings this credential itself: nothing to add.
+    expect(screen.getByText("API_TOKEN (Browser)")).toBeTruthy();
+    expect(screen.getByText("Uses “Browser: API_TOKEN”")).toBeTruthy();
+    fireEvent.press(screen.getByTestId("edit-plugin"));
+    expect(navigation.push).toHaveBeenCalledWith(
+      expect.stringMatching(/^plugin-editor:/),
     );
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
     const alert = confirmAlert("Delete");
     fireEvent.press(screen.getByRole("button", { name: "Delete plugin" }));
     await alert.press();
     expect(remove).toHaveBeenCalledWith("p1");
   });
 
-  it("explains credential services that cannot load and retries", async () => {
-    const resources = new ResourceStore();
-    resources.set<PluginDraft>("plugin-draft:d1", {
-      pluginId: null,
-      form: { ...emptyPluginForm(), name: "Tools" },
+  it("shows members a built-in plugin without release or editing", async () => {
+    renderSettingsPage(<PluginPage pluginId="p3" />, {
+      admin: false,
+      client: mockClient({
+        plugins: { list: jest.fn(async () => catalog) },
+      }),
     });
+    expect(await screen.findByText("Skills")).toBeTruthy();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByTestId("edit-plugin")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete plugin" })).toBeNull();
+  });
+
+  it("shows a skill's description and instructions", async () => {
+    renderSettingsPage(<PluginSkillViewPage pluginId="p1" skillId="k1" />, {
+      client: mockClient({
+        plugins: { list: jest.fn(async () => [plugin()]) },
+      }),
+    });
+    expect(await screen.findByText("Opens and reads web pages.")).toBeTruthy();
+    expect(screen.getByText("Instructions: Use the browser.")).toBeTruthy();
+  });
+
+  it("explains credential services that cannot load and retries", async () => {
     const listServices = jest
       .fn()
       .mockRejectedValueOnce(new Error("Server unavailable"))
@@ -469,7 +648,9 @@ describe("plugins", () => {
         credentials: { listServices },
         plugins: { list: jest.fn(async () => []) },
       }),
-      environment: { resources },
+      environment: {
+        resources: draftStore({ ...emptyPluginForm(), name: "Tools" }, null),
+      },
     });
     expect(
       await screen.findByText(
@@ -479,59 +660,353 @@ describe("plugins", () => {
     expect(screen.getByTestId("save-plugin")).toBeDisabled();
     fireEvent.press(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
-      expect(
-        screen.queryByText(/Couldn’t load credential services/),
-      ).toBeNull(),
-    );
-    expect(listServices).toHaveBeenCalledTimes(2);
-    await waitFor(() =>
       expect(screen.getByTestId("save-plugin")).toBeEnabled(),
     );
+    expect(listServices).toHaveBeenCalledTimes(2);
   });
 
-  it("creates a plugin from the shared draft", async () => {
-    const resources = new ResourceStore();
-    const form = {
-      ...emptyPluginForm(),
-      name: "Tools",
-      skills: [{ uid: "s1", name: "Basics", body: "" }],
-    };
-    resources.set<PluginDraft>("plugin-draft:d1", { pluginId: null, form });
+  it("creates a personal plugin as a member, without the sharing choice", async () => {
     const create = jest.fn(async () => plugin({ id: "p9" }));
-    const client = mockClient({
-      credentials: { listServices: jest.fn(async () => []) },
-      plugins: { list: jest.fn(async () => []), create },
+    const resources = draftStore(emptyPluginForm(), null);
+    const client = editorClient({ create });
+    const first = renderSettingsPage(<PluginEditorPage draftKey="d1" />, {
+      admin: false,
+      client,
+      environment: { resources },
     });
+    expect(screen.queryByText("Available to")).toBeNull();
+    expect(screen.getByText("Enter a plugin name.")).toBeTruthy();
+    fireEvent.changeText(screen.getByLabelText("Name"), "Notes");
+    fireEvent.press(screen.getByRole("button", { name: "Add skill" }));
+    const uid =
+      resources.get<PluginDraft>("plugin-draft:d1").data!.form.skills[0]!.uid;
+    expect(first.navigation.push).toHaveBeenCalledWith(
+      `plugin-skill:d1:${uid}`,
+    );
+    first.unmount();
+
     const skill = renderSettingsPage(
-      <PluginSkillPage draftKey="d1" uid="s1" />,
+      <PluginSkillPage draftKey="d1" uid={uid} />,
       {
+        admin: false,
         client,
         environment: { resources },
       },
     );
-    expect(screen.getByText("Body (Markdown) is required.")).toBeTruthy();
-    fireEvent.changeText(screen.getByLabelText("Body"), "Use the tools.");
+    expect(
+      screen.getByText("Enter a name. Write its instructions."),
+    ).toBeTruthy();
+    // A pasted SKILL.md fills in the name and description.
+    fireEvent.changeText(
+      screen.getByLabelText("Instructions"),
+      "---\nname: meeting-notes\ndescription: Summarizes meetings.\n---\nWrite short notes.",
+    );
+    expect(screen.getByDisplayValue("Meeting notes")).toBeTruthy();
+    expect(screen.getByDisplayValue("Summarizes meetings.")).toBeTruthy();
+    expect(screen.getByDisplayValue("Write short notes.")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Agents see the description and load the instructions when a task matches it.",
+      ),
+    ).toBeTruthy();
     skill.unmount();
 
-    const { navigation } = renderSettingsPage(
-      <PluginEditorPage draftKey="d1" />,
-      {
-        client,
-        environment: { resources },
-      },
+    const editor = renderSettingsPage(<PluginEditorPage draftKey="d1" />, {
+      admin: false,
+      client,
+      environment: { resources },
+    });
+    expect(
+      screen.getByRole("link", {
+        name: "Meeting notes, Summarizes meetings.",
+      }),
+    ).toBeTruthy();
+    const save = screen.getByTestId("save-plugin");
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.press(save);
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Notes",
+        scope: "personal",
+        skills: [
+          expect.objectContaining({
+            name: "Meeting notes",
+            description: "Summarizes meetings.",
+            body: "Write short notes.",
+          }),
+        ],
+      }),
     );
-    const save = await screen.findByTestId("save-plugin");
-    await waitFor(() => expect(save).not.toBeDisabled());
+    await waitFor(() =>
+      expect(editor.navigation.replace).toHaveBeenCalledWith("plugin:p9"),
+    );
+    expect(editor.environment.refreshWorkspaces).toHaveBeenCalled();
+  });
+
+  it("lets admins share a new plugin with the organization", async () => {
+    const create = jest.fn(async () => plugin({ id: "p9" }));
+    renderSettingsPage(<PluginEditorPage draftKey="d1" />, {
+      client: editorClient({ create }),
+      environment: {
+        resources: draftStore({ ...emptyPluginForm(), name: "Team" }, null),
+      },
+    });
+    fireEvent.press(
+      screen.getByRole("button", { name: "Everyone in the organization" }),
+    );
+    expect(
+      screen.getByText("Members can use it once you make it available."),
+    ).toBeTruthy();
+    const save = screen.getByTestId("save-plugin");
+    await waitFor(() => expect(save).toBeEnabled());
     fireEvent.press(save);
     await waitFor(() =>
       expect(create).toHaveBeenCalledWith(
-        formToCreateIn({
-          ...form,
-          skills: [{ uid: "s1", name: "Basics", body: "Use the tools." }],
-        }),
+        expect.objectContaining({ name: "Team", scope: "organization" }),
       ),
     );
-    expect(navigation.replace).toHaveBeenCalledWith("plugin:p9");
+  });
+
+  it("saves an edited plugin and keeps saved secrets", async () => {
+    const update = jest.fn(async () => plugin());
+    const resources = draftStore(pluginToForm(plugin()), "p1");
+    const client = editorClient({ update });
+    const uid =
+      resources.get<PluginDraft>("plugin-draft:d1").data!.form.mcps[0]!.uid;
+    const server = renderSettingsPage(
+      <PluginMcpPage draftKey="d1" uid={uid} />,
+      { client, environment: { resources } },
+    );
+    // One command line; no timeouts, working directory or desktop.
+    expect(screen.getByLabelText("Command line").props.value).toBe(
+      "npx -y browser-mcp",
+    );
+    expect(screen.queryByText(/timeout/i)).toBeNull();
+    expect(screen.queryByLabelText("Working directory")).toBeNull();
+    expect(screen.queryByPlaceholderText(/Playwright/)).toBeNull();
+    expect(
+      screen.getByText("Runs inside the workspace, e.g. npx -y <package>."),
+    ).toBeTruthy();
+    expect(screen.getByText("Environment variables")).toBeTruthy();
+    expect(
+      screen.getByPlaceholderText("Saved · Browser: API_TOKEN"),
+    ).toBeTruthy();
+    fireEvent.changeText(
+      screen.getByLabelText("Command line"),
+      "npx -y browser-mcp --headless",
+    );
+    server.unmount();
+
+    const { navigation } = renderSettingsPage(
+      <PluginEditorPage draftKey="d1" />,
+      { client, environment: { resources } },
+    );
+    expect(screen.queryByText("Available to")).toBeNull();
+    const save = screen.getByTestId("save-plugin");
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.press(save);
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    const payload = (update.mock.calls[0] as unknown[])[1] as PluginUpdateIn;
+    expect(payload.mcp_servers?.[0]).toMatchObject({
+      id: "m1",
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "browser-mcp", "--headless"],
+      env: { API_TOKEN: "{{credential.api_token}}" },
+    });
+    // The saved secret keeps its credential; no value is sent again.
+    expect(payload.credential_requirements).toEqual([
+      {
+        key: "api_token",
+        required: true,
+        service_id: "svc-api",
+        credential_id: "cred-api",
+      },
+      {
+        key: "token",
+        description: "",
+        required: true,
+        service_id: "svc-env",
+        credential_id: null,
+      },
+    ]);
+    await waitFor(() => expect(navigation.pop).toHaveBeenCalled());
+  });
+
+  it("edits a URL server's headers and marks secret names", async () => {
+    const mcp = emptyMcpForm();
+    const resources = draftStore(
+      { ...emptyPluginForm(), name: "Docs", mcps: [mcp] },
+      null,
+    );
+    const { navigation } = renderSettingsPage(
+      <PluginMcpPage draftKey="d1" uid={mcp.uid} />,
+      {
+        client: editorClient(),
+        environment: { resources },
+      },
+    );
+    fireEvent.press(screen.getByRole("radio", { name: "URL" }));
+    expect(screen.queryByLabelText("Command line")).toBeNull();
+    fireEvent.changeText(
+      screen.getByLabelText("Server URL"),
+      "https://docs.example/sse",
+    );
+    fireEvent.press(screen.getByRole("button", { name: "SSE" }));
+    // Sign-in needs an OAuth credential requirement.
+    expect(screen.queryByText("Sign-in")).toBeNull();
+    expect(screen.getByText("Headers")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Add header" }));
+    fireEvent.changeText(screen.getByLabelText("Header 1 name"), "X-Api-Key");
+    expect(screen.getByRole("switch", { name: "Secret" })).toBeChecked();
+    fireEvent.changeText(screen.getByLabelText("Header 1 value"), "s3cret");
+    let saved =
+      resources.get<PluginDraft>("plugin-draft:d1").data!.form.mcps[0]!;
+    expect(saved).toMatchObject({
+      kind: "url",
+      url: "https://docs.example/sse",
+      transport: "sse",
+      variables: [
+        expect.objectContaining({
+          key: "X-Api-Key",
+          value: "s3cret",
+          secret: true,
+        }),
+      ],
+    });
+
+    // A secret can use an existing credential instead of a value.
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Comes from, Entered value" }),
+    );
+    const choice = navigation.choose.mock.calls[0]![0] as SettingsChoice;
+    expect(
+      choice.groups.flatMap((group) => group.options).map((o) => o.label),
+    ).toEqual([
+      "Enter a value",
+      "Each workspace adds its own",
+      "GitHub token",
+      "Team key",
+    ]);
+    act(() => choice.onSelect("cred-team"));
+    saved = resources.get<PluginDraft>("plugin-draft:d1").data!.form.mcps[0]!;
+    expect(saved.variables[0]).toMatchObject({
+      source: "credential",
+      value: "",
+      credentialId: "cred-team",
+      serviceId: "svc-team",
+    });
+    expect(screen.queryByLabelText("Header 1 value")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Comes from, Team key" }),
+    ).toBeTruthy();
+  });
+
+  it("adds servers from a pasted configuration", async () => {
+    const resources = draftStore({ ...emptyPluginForm(), name: "Tools" }, null);
+    const { navigation } = renderSettingsPage(
+      <PluginMcpImportPage draftKey="d1" />,
+      { client: editorClient(), environment: { resources } },
+    );
+    expect(screen.getByTestId("add-pasted-servers")).toBeDisabled();
+    fireEvent.changeText(screen.getByLabelText("Configuration"), "{ nope");
+    expect(screen.getByText("This is not valid JSON.")).toBeTruthy();
+    expect(screen.getByTestId("add-pasted-servers")).toBeDisabled();
+    fireEvent.changeText(
+      screen.getByLabelText("Configuration"),
+      JSON.stringify({
+        mcpServers: {
+          github: {
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-github"],
+            env: { GITHUB_TOKEN: "<token>" },
+          },
+          linear: { url: "https://mcp.linear.app/sse" },
+        },
+      }),
+    );
+    expect(screen.getByText("Adds Github, Linear.")).toBeTruthy();
+    fireEvent.press(screen.getByTestId("add-pasted-servers"));
+    expect(navigation.pop).toHaveBeenCalled();
+    const { mcps } = resources.get<PluginDraft>("plugin-draft:d1").data!.form;
+    expect(mcps).toEqual([
+      expect.objectContaining({
+        name: "Github",
+        kind: "command",
+        commandLine: "npx -y @modelcontextprotocol/server-github",
+      }),
+      expect.objectContaining({
+        name: "Linear",
+        kind: "url",
+        transport: "sse",
+      }),
+    ]);
+  });
+
+  it("adds a credential requirement under Advanced", async () => {
+    const resources = draftStore({ ...emptyPluginForm(), name: "Tools" }, null);
+    const client = editorClient();
+    const editor = renderSettingsPage(<PluginEditorPage draftKey="d1" />, {
+      admin: false,
+      client,
+      environment: { resources },
+    });
+    expect(screen.getByRole("link", { name: "More credentials" })).toBeTruthy();
+    // Wait for the credential services the requirement page offers.
+    await waitFor(() =>
+      expect(screen.getByTestId("save-plugin")).toBeEnabled(),
+    );
+    editor.unmount();
+
+    const list = renderSettingsPage(<PluginRequirementsPage draftKey="d1" />, {
+      admin: false,
+      client,
+      environment: { resources },
+    });
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Add credential" }),
+    );
+    const uid =
+      resources.get<PluginDraft>("plugin-draft:d1").data!.form.requirements[0]!
+        .uid;
+    expect(list.navigation.push).toHaveBeenCalledWith(
+      `plugin-requirement:d1:${uid}`,
+    );
+    list.unmount();
+
+    const page = renderSettingsPage(
+      <PluginRequirementPage draftKey="d1" uid={uid} />,
+      { admin: false, client, environment: { resources } },
+    );
+    // Members get no hints at admin-only settings.
+    expect(screen.queryByText(/Credential services/)).toBeNull();
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Credential service, Choose" }),
+    );
+    const choice = page.navigation.choose.mock.calls[0]![0] as SettingsChoice;
+    act(() => choice.onSelect("svc-env"));
+    expect(
+      await screen.findByText("Use it in values as {{credential.github}}."),
+    ).toBeTruthy();
+
+    // Optionally the plugin always uses one credential of the service.
+    fireEvent.press(
+      await screen.findByRole("button", {
+        name: "Credential, Each workspace adds its own",
+      }),
+    );
+    const credentialChoice = page.navigation.choose.mock
+      .calls[1]![0] as SettingsChoice;
+    expect(
+      credentialChoice.groups
+        .flatMap((group) => group.options)
+        .map((o) => o.label),
+    ).toEqual(["Each workspace adds its own", "GitHub token"]);
+    act(() => credentialChoice.onSelect("cred-1"));
+    expect(
+      resources.get<PluginDraft>("plugin-draft:d1").data!.form.requirements[0],
+    ).toMatchObject({ serviceId: "svc-env", credentialId: "cred-1" });
   });
 });
 

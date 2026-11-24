@@ -393,9 +393,11 @@ export type {
   PluginMcpToolPolicy,
   PluginMcpTransport,
   PluginResources,
+  PluginScope,
   PluginSkill,
   PluginSkillIn,
   PluginUpdateIn,
+  SelectableSkill,
 } from "@opencuria/chat-core/plugins";
 
 /** Credential metadata only; secrets never leave the server. */
@@ -825,26 +827,8 @@ export interface CapturedImageWorkspaceInput {
   plugin_ids?: string[];
 }
 
-export interface Skill {
-  id: string;
-  name: string;
-  body: string;
-  scope: "personal" | "organization";
-  created_by_email: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SkillCreateInput {
-  name: string;
-  body: string;
-  organization_skill?: boolean;
-}
-
-export interface SkillUpdateInput {
-  name?: string;
-  body?: string;
-}
+/** A skill of a usable plugin, selectable for chats and scheduled tasks. */
+export type { SelectableSkill as Skill } from "@opencuria/chat-core/plugins";
 
 export type { HarnessEngine } from "@opencuria/chat-core/harnessModels";
 export type {

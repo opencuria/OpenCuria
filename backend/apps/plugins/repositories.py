@@ -24,29 +24,86 @@ from .models import (
 # ---------------------------------------------------------------------------
 
 
+def _replace_components(
+    model: type[PluginSkill] | type[PluginMcpServer],
+    plugin: Plugin,
+    items: list[dict],
+    *,
+    fields: tuple[str, ...],
+) -> list:
+    """Replace a plugin's component rows, updating matched rows in place.
+
+    An entry matches a stored row by its ``id`` first, then by ``slug``;
+    unmatched rows are deleted and unmatched entries created.
+    """
+    existing = list(model.objects.filter(plugin_id=plugin.id))
+    by_id = {str(row.id): row for row in existing}
+    by_slug = {row.slug: row for row in existing}
+    used: set[uuid.UUID] = set()
+    matched = []
+    for item in items:
+        row = by_id.get(str(item.get("id") or ""))
+        if row is None or row.id in used:
+            row = by_slug.get(item["slug"])
+        if row is not None and row.id in used:
+            row = None
+        if row is not None:
+            used.add(row.id)
+        matched.append((item, row))
+    stale = [row.id for row in existing if row.id not in used]
+    if stale:
+        model.objects.filter(id__in=stale).delete()
+    for item, row in matched:
+        values = {key: item[key] for key in fields if key in item}
+        if row is None:
+            model.objects.create(plugin=plugin, **values)
+            continue
+        changed = [key for key, value in values.items() if getattr(row, key) != value]
+        for key in changed:
+            setattr(row, key, values[key])
+        if changed:
+            row.save(update_fields=[*changed, "updated_at"])
+    return list(model.objects.filter(plugin_id=plugin.id))
+
+
+def _visible(org_id: uuid.UUID, user_id: int | None) -> Q:
+    """Built-in and organization plugins, plus *user_id*'s personal plugins."""
+    shared = Q(owner__isnull=True) & (
+        Q(organization__isnull=True) | Q(organization_id=org_id)
+    )
+    return shared | Q(owner_id=user_id) if user_id is not None else shared
+
+
 class PluginRepository:
     """Data access for Plugin records."""
 
     @staticmethod
-    def list_visible_to_org(org_id: uuid.UUID) -> QuerySet[Plugin]:
-        """Return global + org-owned plugins visible in the org."""
+    def list_visible(org_id: uuid.UUID, user_id: int | None) -> QuerySet[Plugin]:
+        """Return the plugins *user_id* sees in *org_id*, ordered by name.
+
+        Without a user only built-in and organization plugins are returned.
+        """
         return (
-            Plugin.objects.filter(
-                Q(organization__isnull=True) | Q(organization_id=org_id)
-            )
+            Plugin.objects.filter(_visible(org_id, user_id))
             .select_related("organization", "created_by")
             .order_by("name")
         )
 
     @staticmethod
-    def get_visible_by_id(plugin_id: uuid.UUID, org_id: uuid.UUID) -> Plugin | None:
-        """Fetch a plugin visible in the org (global or org-owned)."""
+    def get_visible_by_id(
+        plugin_id: uuid.UUID, org_id: uuid.UUID, user_id: int | None
+    ) -> Plugin | None:
+        """Fetch a plugin *user_id* sees in *org_id*."""
         return (
-            Plugin.objects.filter(id=plugin_id)
-            .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+            Plugin.objects.filter(_visible(org_id, user_id), id=plugin_id)
             .select_related("organization", "created_by")
             .first()
         )
+
+    @staticmethod
+    def get_personal_by_slug(slug: str, owner_id: int) -> Plugin | None:
+        """Fetch one of *owner_id*'s personal plugins by slug."""
+        return Plugin.objects.filter(slug=slug, owner_id=owner_id).first()
 
     @staticmethod
     def get_by_id(plugin_id: uuid.UUID) -> Plugin | None:
@@ -58,19 +115,9 @@ class PluginRepository:
         )
 
     @staticmethod
-    def get_global_by_slug(slug: str) -> Plugin | None:
-        """Fetch a global plugin by slug."""
-        return Plugin.objects.filter(slug=slug, organization__isnull=True).first()
-
-    @staticmethod
     def get_org_by_slug(slug: str, org_id: uuid.UUID) -> Plugin | None:
         """Fetch an org-owned plugin of this org by slug."""
         return Plugin.objects.filter(slug=slug, organization_id=org_id).first()
-
-    @staticmethod
-    def list_org_owned(org_id: uuid.UUID) -> QuerySet[Plugin]:
-        """Return org-owned plugins of the given org."""
-        return Plugin.objects.filter(organization_id=org_id)
 
     @staticmethod
     def create(
@@ -80,15 +127,17 @@ class PluginRepository:
         description: str,
         organization_id: uuid.UUID | None,
         created_by,
+        owner=None,
         enabled: bool = True,
         published: bool = True,
     ) -> Plugin:
-        """Create a plugin record."""
+        """Create a plugin record (personal when *owner* is given)."""
         return Plugin.objects.create(
             name=name,
             slug=slug,
             description=description,
             organization_id=organization_id,
+            owner=owner,
             created_by=created_by,
             enabled=enabled,
             published=published,
@@ -134,22 +183,36 @@ class PluginSkillRepository:
         )
 
     @staticmethod
+    def list_usable(
+        org_id: uuid.UUID, user_id: int, *, activated_ids: set[uuid.UUID]
+    ) -> QuerySet[PluginSkill]:
+        """Skills of the user's personal plugins and of released shared plugins."""
+        shared = Q(
+            plugin__owner__isnull=True,
+            plugin_id__in=activated_ids,
+            plugin__enabled=True,
+            plugin__published=True,
+        ) & (Q(plugin__organization__isnull=True) | Q(plugin__organization_id=org_id))
+        return (
+            PluginSkill.objects.filter(Q(plugin__owner_id=user_id) | shared)
+            .select_related("plugin")
+            .order_by("plugin__name", "position", "name")
+        )
+
+    @staticmethod
     def replace_for_plugin(plugin, skills: list[dict]) -> list[PluginSkill]:
-        """Atomically replace the skill list of a plugin."""
-        PluginSkill.objects.filter(plugin=plugin).delete()
-        instances = [
-            PluginSkill(
-                plugin=plugin,
-                name=item["name"],
-                slug=item["slug"],
-                body=item["body"],
-                position=item.get("position", index),
-            )
-            for index, item in enumerate(skills)
-        ]
-        if instances:
-            PluginSkill.objects.bulk_create(instances)
-        return list(PluginSkillRepository.list_for_plugin(plugin.id))
+        """Replace the skill list of a plugin, keeping the IDs of kept skills.
+
+        Entries match a stored skill by ``id`` (survives renames), then by
+        slug. Stable IDs keep the skill selections of chats and scheduled
+        tasks valid across edits.
+        """
+        return _replace_components(
+            PluginSkill,
+            plugin,
+            skills,
+            fields=("name", "slug", "description", "body", "position"),
+        )
 
 
 class PluginMcpServerRepository:
@@ -179,54 +242,36 @@ class PluginMcpServerRepository:
         )
 
     @staticmethod
+    def list_existing(plugin_id: uuid.UUID) -> list[PluginMcpServer]:
+        """Stored servers of one plugin, for matching replacement entries."""
+        return list(PluginMcpServer.objects.filter(plugin_id=plugin_id))
+
+    @staticmethod
     def replace_for_plugin(plugin, servers: list[dict]) -> list[PluginMcpServer]:
-        """Replace MCP servers while retaining IDs for unchanged slugs."""
-        existing = {
-            server.slug: server
-            for server in PluginMcpServer.objects.filter(plugin_id=plugin.id)
-        }
-        retained_slugs = {item["slug"] for item in servers}
-        stale_ids = [
-            server.id for slug, server in existing.items() if slug not in retained_slugs
-        ]
-        if stale_ids:
-            PluginMcpServer.objects.filter(id__in=stale_ids).delete()
-
-        mutable_fields = {
-            "tool_policy",
-            "runtime_artifact",
-            "name",
-            "transport",
-            "command",
-            "args",
-            "cwd",
-            "env",
-            "resources",
-            "url",
-            "headers",
-            "auth_type",
-            "oauth_requirement_key",
-            "startup_timeout_seconds",
-            "request_timeout_seconds",
-        }
-        for item in servers:
-            values = {
-                key: value for key, value in item.items() if key in mutable_fields
-            }
-            server = existing.get(item["slug"])
-            if server is None:
-                PluginMcpServer.objects.create(plugin=plugin, **item)
-                continue
-
-            changed_fields = []
-            for field, value in values.items():
-                if getattr(server, field) != value:
-                    setattr(server, field, value)
-                    changed_fields.append(field)
-            if changed_fields:
-                server.save(update_fields=[*changed_fields, "updated_at"])
-
-        return list(PluginMcpServerRepository.list_for_plugin(plugin.id))
+        """Replace MCP servers, retaining IDs (by ``id``, then slug)."""
+        return _replace_components(
+            PluginMcpServer,
+            plugin,
+            servers,
+            fields=(
+                "tool_policy",
+                "runtime_artifact",
+                "name",
+                "slug",
+                "transport",
+                "command",
+                "args",
+                "cwd",
+                "env",
+                "resources",
+                "url",
+                "headers",
+                "auth_type",
+                "oauth_requirement_key",
+                "startup_timeout_seconds",
+                "request_timeout_seconds",
+            ),
+        )
 
 
 class PluginCredentialRequirementRepository:
@@ -238,7 +283,7 @@ class PluginCredentialRequirementRepository:
     ) -> QuerySet[PluginCredentialRequirement]:
         return PluginCredentialRequirement.objects.filter(
             plugin_id=plugin_id
-        ).select_related("credential_service")
+        ).select_related("credential_service", "credential", "credential__service")
 
     @staticmethod
     def list_for_plugins(
@@ -246,7 +291,7 @@ class PluginCredentialRequirementRepository:
     ) -> QuerySet[PluginCredentialRequirement]:
         return PluginCredentialRequirement.objects.filter(
             plugin_id__in=plugin_ids
-        ).select_related("credential_service")
+        ).select_related("credential_service", "credential", "credential__service")
 
     @staticmethod
     def delete_for_plugin(plugin_id: uuid.UUID) -> int:
@@ -263,6 +308,7 @@ class PluginCredentialRequirementRepository:
                 plugin=plugin,
                 key=item["key"],
                 credential_service=item["service"],
+                credential=item.get("credential"),
                 required=item["required"],
                 description=item["description"],
             )
@@ -338,6 +384,26 @@ class WorkspacePluginActivationRepository:
     @staticmethod
     def enabled_plugin_ids(workspace_id: uuid.UUID) -> set[uuid.UUID]:
         return set(WorkspacePluginActivationRepository.list_plugin_ids(workspace_id))
+
+    @staticmethod
+    def selection_fingerprint(workspace_id: uuid.UUID) -> str:
+        """Selected plugin IDs with their last change, as one string.
+
+        Plugin edits touch ``Plugin.updated_at``; enabling, disabling and
+        organization releases change the selection or its activation rows.
+        """
+        rows = (
+            WorkspacePluginActivation.objects.filter(workspace_id=workspace_id)
+            .order_by("plugin_id")
+            .values_list("plugin_id", "plugin__updated_at")
+        )
+        released = OrgPluginActivation.objects.filter(
+            plugin__workspace_activations__workspace_id=workspace_id
+        ).values_list("organization_id", "plugin_id")
+        return "|".join(
+            [f"{pid}@{changed.isoformat() if changed else ''}" for pid, changed in rows]
+            + sorted(f"{org}:{pid}" for org, pid in released)
+        )
 
     @staticmethod
     def replace_for_workspace(

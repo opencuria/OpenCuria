@@ -602,7 +602,8 @@ async def chat_read(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
                 default="build",
             ),
             "skills": string_list(
-                "Skill IDs or names whose instructions the agent should follow."
+                "Skill IDs or names (skills of the user's plugins, see "
+                "plugin_get) whose instructions the agent should follow."
             ),
             "wait_seconds": WAIT_SECONDS,
         },

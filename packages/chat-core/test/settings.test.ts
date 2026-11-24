@@ -44,20 +44,26 @@ describe("workspace policy durations", () => {
 describe("plugin availability", () => {
   const plugin = { enabled: true, published: true, org_enabled: false };
 
-  it("labels unpublished, active and inactive plugins", () => {
-    expect(pluginAvailability(plugin)).toBe("Inactive");
-    expect(pluginAvailability({ ...plugin, org_enabled: true })).toBe("Active");
+  it("labels unpublished, released and unreleased plugins", () => {
+    expect(pluginAvailability(plugin)).toBe("Not released");
+    expect(pluginAvailability({ ...plugin, org_enabled: true })).toBe(
+      "Available",
+    );
     expect(pluginAvailability({ ...plugin, published: false })).toBe(
       "Unpublished",
     );
+    expect(pluginAvailability({ ...plugin, scope: "personal" })).toBe(
+      "Available",
+    );
   });
 
-  it("only activates published, enabled plugins but always allows turning off", () => {
+  it("only releases published, enabled shared plugins but always allows withdrawing", () => {
     expect(canTogglePlugin(plugin)).toBe(true);
     expect(canTogglePlugin({ ...plugin, enabled: false })).toBe(false);
     expect(
       canTogglePlugin({ ...plugin, enabled: false, org_enabled: true }),
     ).toBe(true);
+    expect(canTogglePlugin({ ...plugin, scope: "personal" })).toBe(false);
   });
 });
 

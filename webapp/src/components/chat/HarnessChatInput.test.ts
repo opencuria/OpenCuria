@@ -1033,11 +1033,10 @@ describe('HarnessChatInput', () => {
       {
         id: 'skill-hidden',
         name: 'Hidden later',
-        body: 'Keep this selection',
+        description: 'Keep this selection',
+        plugin_id: 'plugin-1',
+        plugin_name: 'Team tools',
         scope: 'personal' as const,
-        created_by_email: null,
-        created_at: '2026-03-29T10:00:00.000Z',
-        updated_at: '2026-03-29T10:00:00.000Z',
       },
     ]
     const wrapper = mountInput({
@@ -1067,11 +1066,10 @@ describe('HarnessChatInput', () => {
       {
         id: 'skill-1',
         name: 'Lint rules',
-        body: 'Always lint',
+        description: 'Always lint',
+        plugin_id: 'plugin-1',
+        plugin_name: 'Team tools',
         scope: 'personal' as const,
-        created_by_email: null,
-        created_at: '2026-03-29T10:00:00.000Z',
-        updated_at: '2026-03-29T10:00:00.000Z',
       },
     ]
     const wrapper = mountInput(
@@ -1093,6 +1091,8 @@ describe('HarnessChatInput', () => {
     )
     const skillSheet = wrapper.findComponent(HarnessMentionSheet)
     expect(skillSheet.exists()).toBe(true)
+    // Skills live in plugins; the suggestion names the plugin.
+    expect(skillSheet.get('[data-testid="composer-skill-option"]').text()).toContain('Team tools')
     await skillSheet.get('[data-testid="composer-skill-option"]').trigger('mousedown')
     expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([['skill-1']])
     expect(wrapper.find('[data-testid="composer-skill-remove-skill-1"]').exists()).toBe(true)
@@ -1149,11 +1149,10 @@ describe('HarnessChatInput', () => {
           {
             id: 'skill-1',
             name: 'Lint rules',
-            body: 'Always lint',
+            description: 'Always lint',
+            plugin_id: 'plugin-1',
+            plugin_name: 'Team tools',
             scope: 'personal',
-            created_by_email: null,
-            created_at: '2026-03-29T10:00:00.000Z',
-            updated_at: '2026-03-29T10:00:00.000Z',
           },
         ],
         filesAvailable: false,
@@ -1210,11 +1209,10 @@ describe('HarnessChatInput', () => {
     const skill = {
       id: 'viewport-skill',
       name: 'Viewport skill',
-      body: 'Skill body',
+      description: 'Skill body',
+      plugin_id: 'plugin-1',
+      plugin_name: 'Team tools',
       scope: 'personal' as const,
-      created_by_email: null,
-      created_at: '2026-03-29T10:00:00.000Z',
-      updated_at: '2026-03-29T10:00:00.000Z',
     }
     const wrapper = mountInput(
       { variant: 'scheduled-task', skillOptions: [skill], filesAvailable: false },
@@ -1247,11 +1245,10 @@ describe('HarnessChatInput', () => {
     const skill = {
       id: 'skill-1',
       name: 'Lint rules',
-      body: 'Always lint',
+      description: 'Always lint',
+      plugin_id: 'plugin-1',
+      plugin_name: 'Team tools',
       scope: 'personal' as const,
-      created_by_email: null,
-      created_at: '2026-03-29T10:00:00.000Z',
-      updated_at: '2026-03-29T10:00:00.000Z',
     }
 
     for (const variant of ['chat', 'scheduled-task'] as const) {
@@ -1297,11 +1294,10 @@ describe('HarnessChatInput', () => {
         {
           id: 'skill-1',
           name: 'Lint rules',
-          body: 'Always lint',
+          description: 'Always lint',
+          plugin_id: 'plugin-1',
+          plugin_name: 'Team tools',
           scope: 'personal',
-          created_by_email: null,
-          created_at: '2026-03-29T10:00:00.000Z',
-          updated_at: '2026-03-29T10:00:00.000Z',
         },
       ],
     })
@@ -1686,11 +1682,10 @@ describe('HarnessChatInput', () => {
           {
             id: 'skill-1',
             name: 'Linear',
-            body: '',
+            description: '',
+            plugin_id: 'plugin-1',
+            plugin_name: 'Team tools',
             scope: 'personal',
-            created_by_email: null,
-            created_at: '',
-            updated_at: '',
           },
         ],
       })
@@ -1751,11 +1746,10 @@ describe('HarnessChatInput', () => {
     const linear = {
       id: 'skill-1',
       name: 'Linear',
-      body: '',
+      description: '',
+      plugin_id: 'plugin-1',
+      plugin_name: 'Team tools',
       scope: 'personal' as const,
-      created_by_email: null,
-      created_at: '',
-      updated_at: '',
     }
 
     it('joins send and send later in one pill that is disabled without text', async () => {

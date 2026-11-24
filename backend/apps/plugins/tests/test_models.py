@@ -23,7 +23,6 @@ from apps.plugins.models import (
 from apps.plugins.services import (
     PLAYWRIGHT_MCP_ARGS,
     PLAYWRIGHT_MCP_ENV,
-    PluginService,
     normalize_mcp_payload,
 )
 from apps.runners.models import Runner, Workspace
@@ -50,6 +49,34 @@ def test_global_slug_unique_and_org_slug_scoped():
     # Same slug in another org is fine; global slug independent of org slugs.
     Plugin.objects.create(name="P3", slug="same", organization=org_b)
     Plugin.objects.create(name="G3", slug="same")
+
+
+@pytest.mark.django_db
+def test_personal_slug_scoped_to_owner_and_scopes_exclusive():
+    user_model = get_user_model()
+    alice = user_model.objects.create_user(
+        email=f"a-{uuid.uuid4().hex[:8]}@t.local", password="secret"
+    )
+    bob = user_model.objects.create_user(
+        email=f"b-{uuid.uuid4().hex[:8]}@t.local", password="secret"
+    )
+    mine = Plugin.objects.create(name="Mine", slug="mine", owner=alice)
+    assert mine.scope == "personal"
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            Plugin.objects.create(name="Mine 2", slug="mine", owner=alice)
+    # Other owners, organizations and built-ins may reuse the slug.
+    Plugin.objects.create(name="Mine", slug="mine", owner=bob)
+    org = _org("Scope")
+    assert Plugin.objects.create(name="O", slug="mine", organization=org).scope == (
+        "organization"
+    )
+    assert Plugin.objects.create(name="G", slug="mine").scope == "builtin"
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            Plugin.objects.create(
+                name="Both", slug="both", owner=alice, organization=org
+            )
 
 
 @pytest.mark.django_db
@@ -171,8 +198,16 @@ def test_mcp_validation_stdio_requires_command_and_no_url():
             {"name": "M", "transport": "stdio", "command": "npx", "url": "http://x"}
         )
     with pytest.raises(ValueError, match="single executable"):
+        normalize_mcp_payload({"name": "M", "transport": "stdio", "command": "npx;rm"})
+    # A command line is split into arguments without a shell, so shell
+    # syntax stays literal argument text.
+    split = normalize_mcp_payload(
+        {"name": "M", "transport": "stdio", "command": "npx foo; rm -rf /"}
+    )
+    assert (split["command"], split["args"]) == ("npx", ["foo;", "rm", "-rf", "/"])
+    with pytest.raises(ValueError, match="whole command line"):
         normalize_mcp_payload(
-            {"name": "M", "transport": "stdio", "command": "npx foo; rm -rf /"}
+            {"name": "M", "transport": "stdio", "command": "npx -y", "args": ["x"]}
         )
 
 
@@ -219,7 +254,9 @@ def test_playwright_seed_shape():
     assert PluginSkill.objects.filter(plugin=plugin).exists()
     # Explicit opt-in: no org activations created by the seed.
     assert not OrgPluginActivation.objects.filter(plugin=plugin).exists()
-    assert PluginService().plugins.get_global_by_slug("playwright") is not None
+    assert Plugin.objects.filter(
+        slug="playwright", organization__isnull=True, owner__isnull=True
+    ).exists()
 
 
 @pytest.mark.django_db

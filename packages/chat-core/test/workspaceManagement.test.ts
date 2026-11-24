@@ -6,6 +6,7 @@ import {
   workspaceStatusTone,
 } from "../src/workspaceLifecycle";
 import {
+  autoAttachCredentials,
   evaluateWorkspacePluginSelection,
   toggleWorkspaceCredentialSelection,
 } from "../src/workspaceConfiguration";
@@ -117,9 +118,7 @@ describe("workspace lifecycle", () => {
 describe("workspace plugin and credential selection", () => {
   const plugin = {
     id: "plugin-1",
-    enabled: true,
-    published: true,
-    org_enabled: true,
+    available: true,
     organization_id: null,
     credential_requirements: [
       { id: "req", key: "GITHUB_TOKEN", required: true, service_id: "github" },
@@ -165,6 +164,70 @@ describe("workspace plugin and credential selection", () => {
     expect(result.unavailableCredentialIds).toEqual(["gone"]);
     expect(result.duplicateServiceIds).toEqual(["github"]);
     expect(result.valid).toBe(false);
+  });
+
+  it("needs nothing for credentials the plugin brings itself", () => {
+    const own = {
+      ...plugin,
+      credential_requirements: [
+        {
+          ...plugin.credential_requirements[0]!,
+          credential_id: "plugin-token",
+        },
+      ],
+    };
+    const result = evaluateWorkspacePluginSelection({
+      plugins: [own],
+      credentials: [],
+      organizationId: "org",
+      pluginIds: ["plugin-1"],
+      credentialIds: [],
+    });
+    expect(result.missingRequired).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+
+  it("attaches the only matching credential when a plugin is enabled", () => {
+    const oauth = {
+      id: "oauth",
+      service_id: "linear",
+      credential_type: "mcp_oauth",
+      oauth_connected: false,
+    };
+    const withOAuth = {
+      ...plugin,
+      credential_requirements: [
+        ...plugin.credential_requirements,
+        { id: "req-2", key: "linear", required: true, service_id: "linear" },
+      ],
+    };
+    // Disconnected OAuth credentials are left for the user to reconnect.
+    expect(autoAttachCredentials(withOAuth, [], [token, oauth])).toEqual([
+      "token",
+    ]);
+    // Two candidates: the user chooses.
+    const ids: string[] = [];
+    expect(
+      autoAttachCredentials(plugin, ids, [token, { ...token, id: "token-2" }]),
+    ).toBe(ids);
+    // An existing selection of the service stays.
+    expect(
+      autoAttachCredentials(
+        plugin,
+        ["token-2"],
+        [token, { ...token, id: "token-2" }],
+      ),
+    ).toEqual(["token-2"]);
+    // A credential the plugin brings itself needs nothing.
+    const own = {
+      credential_requirements: [
+        {
+          ...plugin.credential_requirements[0]!,
+          credential_id: "plugin-token",
+        },
+      ],
+    };
+    expect(autoAttachCredentials(own, [], [token])).toEqual([]);
   });
 
   it("keeps one credential per service when toggling", () => {

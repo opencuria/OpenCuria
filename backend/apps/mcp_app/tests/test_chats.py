@@ -290,7 +290,14 @@ async def test_chat_start_creates_a_chat_with_skills(world, monkeypatch):
 
     monkeypatch.setattr(HarnessService, "start_run", start_run)
     ctx = world.ctx()
-    skill = await ok(ctx, "skill_create", name="Conventions", body="Be terse.")
+    plugin = await ok(
+        ctx,
+        "plugin_create",
+        name="Team rules",
+        skills=[{"name": "Conventions", "body": "Be terse."}],
+        enable=False,
+    )
+    skill_id = plugin["skills"][0]["skill_id"]
 
     result = await ok(
         ctx,
@@ -304,7 +311,7 @@ async def test_chat_start_creates_a_chat_with_skills(world, monkeypatch):
     assert result["chat"]["title"] == "Health check"
     assert result["chat"]["skills"] == ["Conventions"]
     assert result["chat"]["engine"] == "native"
-    assert runs == [("Add a health check", [skill["skill_id"]])]
+    assert runs == [("Add a health check", [skill_id])]
 
 
 async def test_codex_effort_is_discoverable_and_applied_to_start_and_followups(

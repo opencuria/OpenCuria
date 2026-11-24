@@ -19,9 +19,12 @@ dashboard, a mobile app and runners that execute agents in QEMU/KVM virtual mach
 - `packages/`: shared chat rules, API client and the Computer Use runtime
 
 Agents run on the built-in harness, the pinned Claude Code CLI or the pinned Codex
-app-server. Workspaces provide a desktop, terminal, Git and files; plugins add
-skills, MCP servers and credentials. A built-in OpenCuria MCP server lets agents
-manage workspaces, chats, scheduled tasks and publish Expo apps to the mobile app.
+app-server. Workspaces provide a desktop, terminal, Git and files; plugins
+(personal, shared with the organization or built in) add skills, MCP servers and
+credentials. A built-in OpenCuria MCP server lets agents manage workspaces, chats,
+plugins and scheduled tasks and publish Expo apps to the mobile app; a plugin an agent
+creates for its workspace reaches it within the same turn (native and Claude Agent
+engines; Codex picks it up with the next chat).
 
 ## Install
 

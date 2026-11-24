@@ -2,15 +2,13 @@ import React from "react";
 import { Alert, Linking, type AlertButton } from "react-native";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react-native";
 import type { ProviderModel } from "@opencuria/chat-core/harnessModels";
-import type { AgentConfig, ProviderAccount, Skill } from "@opencuria/client";
+import type { AgentConfig, ProviderAccount } from "@opencuria/client";
 import type { SettingsChoice } from "../../SettingsContext";
 import { mockClient, renderSettingsPage } from "../../testUtils";
 import { AgentsPage } from "./AgentsPage";
 import { ProviderAccountPage } from "./ProviderAccountPage";
 import { ProviderAccountsPage } from "./ProviderAccountsPage";
 import { ProvidersPage } from "./ProvidersPage";
-import { SkillPage } from "./SkillPage";
-import { SkillsPage } from "./SkillsPage";
 import { providerAccountInfo } from "@opencuria/chat-core/providerAccounts";
 
 jest.mock(
@@ -522,96 +520,5 @@ describe("agents", () => {
         enable_recording: true,
       }),
     );
-  });
-});
-
-describe("skills", () => {
-  const skills: Skill[] = [
-    {
-      id: "s1",
-      name: "TypeScript",
-      body: "# TypeScript\nUse strict types.",
-      scope: "organization",
-      created_by_email: "admin@example.com",
-      created_at: "",
-      updated_at: "",
-    },
-    {
-      id: "s2",
-      name: "Reviews",
-      body: "Review carefully.",
-      scope: "personal",
-      created_by_email: "ada@example.com",
-      created_at: "",
-      updated_at: "",
-    },
-  ];
-
-  it("groups skills by scope and opens one", async () => {
-    const { navigation } = renderSettingsPage(<SkillsPage />, {
-      client: mockClient({ skills: { list: jest.fn(async () => skills) } }),
-    });
-    fireEvent.press(
-      await screen.findByRole("button", { name: "TypeScript, TypeScript" }),
-    );
-    expect(navigation.push).toHaveBeenCalledWith("skill:s1");
-    expect(screen.getByText("Organization")).toBeTruthy();
-    expect(screen.getByText("Personal")).toBeTruthy();
-  });
-
-  it("creates a shared skill as admin and refreshes the composer", async () => {
-    const create = jest.fn(async () => skills[0]!);
-    const { environment, navigation } = renderSettingsPage(
-      <SkillPage skillId={null} />,
-      {
-        client: mockClient({
-          skills: { list: jest.fn(async () => skills), create },
-        }),
-      },
-    );
-    fireEvent.changeText(screen.getByLabelText("Name"), " Go ");
-    fireEvent.changeText(screen.getByLabelText("Body"), "Write idiomatic Go.");
-    fireEvent.press(
-      screen.getByRole("switch", { name: "Share with entire organization" }),
-    );
-    fireEvent.press(screen.getByTestId("save-skill"));
-    await waitFor(() =>
-      expect(create).toHaveBeenCalledWith({
-        name: "Go",
-        body: "Write idiomatic Go.",
-        organization_skill: true,
-      }),
-    );
-    expect(environment.refreshWorkspaces).toHaveBeenCalled();
-    expect(navigation.pop).toHaveBeenCalled();
-  });
-
-  it("shows members organization skills as text without admin controls", async () => {
-    renderSettingsPage(<SkillPage skillId="s1" />, {
-      admin: false,
-      client: mockClient({ skills: { list: jest.fn(async () => skills) } }),
-    });
-    expect(await screen.findByText(/Use strict types\./)).toBeTruthy();
-    expect(screen.queryByText(/Only organization admins/)).toBeNull();
-    expect(screen.queryByTestId("save-skill")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Delete skill" })).toBeNull();
-  });
-
-  it("deletes a personal skill after confirmation", async () => {
-    const remove = jest.fn(async () => {
-      throw new Error("Skill in use");
-    });
-    renderSettingsPage(<SkillPage skillId="s2" />, {
-      admin: false,
-      client: mockClient({
-        skills: { list: jest.fn(async () => skills), delete: remove },
-      }),
-    });
-    const alert = confirmAlert("Delete");
-    fireEvent.press(
-      await screen.findByRole("button", { name: "Delete skill" }),
-    );
-    await alert.press();
-    expect(remove).toHaveBeenCalledWith("s2");
   });
 });

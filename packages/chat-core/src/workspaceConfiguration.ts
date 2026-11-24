@@ -15,13 +15,14 @@ export interface PluginCredentialRequirementInput {
   key: string;
   required: boolean;
   service_id: string;
+  /** The plugin brings this credential itself; nothing to attach. */
+  credential_id?: string | null;
 }
 
 export interface WorkspacePluginInput {
   id: string;
-  enabled: boolean;
-  published: boolean;
-  org_enabled: boolean;
+  /** Personal plugins, and shared ones released for the organization. */
+  available: boolean;
   organization_id: string | null;
   credential_requirements: PluginCredentialRequirementInput[];
 }
@@ -81,6 +82,29 @@ export function toggleWorkspaceCredentialSelection(
   return [...withoutSameService, nextCredential.id];
 }
 
+/**
+ * Credential selection after enabling a plugin: every requirement the plugin
+ * does not bring itself and the selection does not cover yet gets the only
+ * connected credential of its service, when there is exactly one.
+ */
+export function autoAttachCredentials(
+  plugin: Pick<WorkspacePluginInput, "credential_requirements">,
+  credentialIds: string[],
+  credentials: WorkspaceCredentialInput[],
+): string[] {
+  let next = credentialIds;
+  for (const requirement of plugin.credential_requirements) {
+    if (requirement.credential_id) continue;
+    const ofService = credentials.filter(
+      (credential) => credential.service_id === requirement.service_id,
+    );
+    if (ofService.some((credential) => next.includes(credential.id))) continue;
+    const connected = ofService.filter(isCredentialConnected);
+    if (connected.length === 1) next = [...next, connected[0]!.id];
+  }
+  return next;
+}
+
 /** Plugins offered for workspaces of the given organization. */
 export function workspacePluginCatalog<P extends WorkspacePluginInput>(
   plugins: P[],
@@ -88,9 +112,7 @@ export function workspacePluginCatalog<P extends WorkspacePluginInput>(
 ): P[] {
   return plugins.filter(
     (plugin) =>
-      plugin.enabled &&
-      plugin.published &&
-      plugin.org_enabled &&
+      plugin.available &&
       (plugin.organization_id === null ||
         plugin.organization_id === organizationId),
   );
@@ -138,6 +160,7 @@ export function evaluateWorkspacePluginSelection<
     .filter(
       ({ requirement }) =>
         requirement.required &&
+        !requirement.credential_id &&
         !selectedCredentials.some(
           (credential) =>
             credential.service_id === requirement.service_id &&

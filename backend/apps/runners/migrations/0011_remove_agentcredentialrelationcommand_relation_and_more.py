@@ -8,7 +8,6 @@ class Migration(migrations.Migration):
     dependencies = [
         ('credentials', '0003_credentialservice_target_path_and_more'),
         ('runners', '0010_imagedefinition_delete_attempt_count_and_more'),
-        ('skills', '0002_delete_sessionskill'),
     ]
 
     operations = [

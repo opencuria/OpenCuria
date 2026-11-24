@@ -4,7 +4,7 @@ import { useSettings } from "../../SettingsContext";
 import { TextPage } from "../TextPage";
 import { PLUGINS } from "./resources";
 
-/** A skill of an installed plugin, read-only. */
+/** A skill of a plugin, read-only: its description and instructions. */
 export function PluginSkillViewPage({
   pluginId,
   skillId,
@@ -20,8 +20,10 @@ export function PluginSkillViewPage({
   return (
     <TextPage
       title={skill?.name ?? "Skill"}
-      label="Markdown"
+      label="Instructions"
       text={plugins.data ? (skill?.body ?? "") : undefined}
+      notice={skill?.description || undefined}
+      noticeTone="default"
       monospace={false}
       loading={!plugins.data && !plugins.error}
       error={plugins.error}

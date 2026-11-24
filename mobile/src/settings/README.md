@@ -11,8 +11,8 @@ stack that covers every setting of the webapp.
   search, loading and empty states. Pages never draw their own chrome.
 - `pages/RootPage.tsx` is the first page: profile, organization card,
   grouped links, the account and, last, Sign out. Page groups:
-  `pages/models` (Provider & Models, Agents, Skills), `pages/access`
-  (Credentials, Credential services, Plugins, API keys) and
+  `pages/models` (Provider & Models, Agents), `pages/access`
+  (Credentials, Credential services, Plugins with their skills, API keys) and
   `pages/infrastructure` (Captured images, Image definitions, Runners).
 
 ## Writing a page

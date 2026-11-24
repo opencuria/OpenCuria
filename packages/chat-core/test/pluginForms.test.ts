@@ -1,21 +1,41 @@
 import { describe, expect, it } from "vitest";
-import type { CredentialService } from "../src/plugins";
+import type { CredentialService, Plugin } from "../src/plugins";
 import {
+  boundCredentialKey,
+  credentialSourceLabel,
+  mcpEndpoint,
+  pluginAvailability,
+  pluginContents,
+  serverVariableList,
+} from "../src/plugins";
+import {
+  applySkillMarkdown,
   emptyMcpForm,
   emptyPluginForm,
   emptyRequirementForm,
   emptySkillForm,
+  emptyVariableRow,
   entryErrors,
+  isSavedSecret,
+  formToCreateIn,
+  formToUpdateIn,
   generalErrors,
+  joinCommandLine,
+  keepUsableCredentials,
   mcpLabel,
+  parseMcpConfig,
+  parseSkillMarkdown,
+  pluginToForm,
   removeEntry,
   requirementKeyFor,
   requirementLabel,
+  serverNameFrom,
   setMcpAuthentication,
+  setMcpKind,
   setMcpOAuthRequirement,
-  setMcpTransport,
   setRequirementService,
   skillLabel,
+  splitCommandLine,
   updateEntry,
   validatePluginForm,
   type PluginFormModel,
@@ -38,230 +58,627 @@ function service(overrides: Partial<CredentialService>): CredentialService {
   };
 }
 
-const NOTION = service({
-  id: "notion",
-  name: "Notion OAuth",
-  credential_type: "mcp_oauth",
-  oauth_server_url: "https://mcp.notion.com/mcp",
-});
-
-function formWith(changes: Partial<PluginFormModel>): PluginFormModel {
-  return { ...emptyPluginForm(), ...changes };
+function plugin(overrides: Partial<Plugin> = {}): Plugin {
+  return {
+    id: "p1",
+    name: "GitHub tools",
+    slug: "github-tools",
+    description: "Issues and PRs",
+    scope: "personal",
+    enabled: true,
+    published: true,
+    organization_id: null,
+    is_global: false,
+    org_enabled: false,
+    available: true,
+    editable: true,
+    skills: [
+      {
+        id: "s2",
+        name: "Second",
+        slug: "second",
+        description: "",
+        body: "B",
+        position: 1,
+      },
+      {
+        id: "s1",
+        name: "Review",
+        slug: "review",
+        description: "Review PRs",
+        body: "Look closely.",
+        position: 0,
+      },
+    ],
+    mcp_servers: [
+      {
+        id: "m1",
+        name: "GitHub",
+        slug: "github",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-github", "a b"],
+        cwd: "/workspace",
+        env: { LOG_LEVEL: "info", GITHUB_TOKEN: "{{credential.github_token}}" },
+        url: "",
+        headers: {},
+        auth_type: "none",
+        oauth_requirement_key: "",
+        resources: { desktop: { activation: "first_tool" } },
+      },
+    ],
+    credential_requirements: [
+      {
+        id: "r1",
+        key: "github_token",
+        description: "",
+        required: true,
+        service_id: "svc-gh",
+        service_name: "GITHUB_TOKEN (GitHub tools)",
+        service_slug: "github-token-github-tools",
+        credential_type: "env",
+        credential_id: "c1",
+        credential_name: "GitHub tools: GITHUB_TOKEN",
+        credential_scope: "personal",
+      },
+    ],
+    created_at: "",
+    updated_at: "",
+    ...overrides,
+  };
 }
 
-describe("plugin form entries", () => {
-  it("replaces and removes one entry by uid without touching the input", () => {
-    const first = emptySkillForm();
-    const second = emptySkillForm();
-    const form = formWith({ skills: [first, second] });
+function form(overrides: Partial<PluginFormModel> = {}): PluginFormModel {
+  return { ...emptyPluginForm(), name: "Tools", ...overrides };
+}
 
-    const renamed = updateEntry(form, "skills", second.uid, (skill) => ({
-      ...skill,
-      name: "Basics",
-    }));
-    expect(renamed.skills.map((skill) => skill.name)).toEqual(["", "Basics"]);
-    expect(renamed.skills[0]).toBe(first);
-    expect(form.skills[1]!.name).toBe("");
-
-    expect(removeEntry(renamed, "skills", first.uid).skills).toEqual([
-      renamed.skills[1],
+describe("command lines", () => {
+  it("splits like a shell without expansion and joins back", () => {
+    const argv = splitCommandLine(
+      `npx -y @acme/mcp --root "/my dir" --name='x y' a\\ b`,
+    );
+    expect(argv).toEqual([
+      "npx",
+      "-y",
+      "@acme/mcp",
+      "--root",
+      "/my dir",
+      "--name=x y",
+      "a b",
     ]);
+    expect(splitCommandLine(joinCommandLine(argv))).toEqual(argv);
+    expect(() => splitCommandLine(`npx "oops`)).toThrow(/Unterminated/);
+    expect(splitCommandLine("$HOME;rm")).toEqual(["$HOME;rm"]);
+  });
+
+  it("shows stdio servers as one copyable line", () => {
+    expect(
+      mcpEndpoint({
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "pkg", "a b"],
+        url: "",
+      }),
+    ).toBe("npx -y pkg 'a b'");
   });
 });
 
-describe("plugin MCP server edits", () => {
-  it("clears what the new transport forbids", () => {
-    const stdio = {
-      ...emptyMcpForm(),
-      command: "npx",
-      argsText: "-y",
-      desktop: "first_tool" as const,
-      env: [{ uid: "e", key: "TOKEN", value: "x" }],
-    };
-    const form = formWith({ mcps: [stdio] });
-
-    const http = setMcpTransport(form, stdio.uid, "streamable_http");
-    expect(http.mcps[0]).toMatchObject({
-      transport: "streamable_http",
-      desktop: "none",
-      command: "",
-      argsText: "",
-      env: [],
-    });
-    expect(form.mcps[0]).toBe(stdio);
-    expect(setMcpTransport(form, stdio.uid, "stdio").mcps[0]).toBe(stdio);
-
-    const oauth = {
-      ...http.mcps[0]!,
-      url: "https://mcp.example.com/mcp",
-      headers: [{ uid: "h", key: "X-Team", value: "a" }],
-      authType: "oauth" as const,
-      oauthRequirementKey: "notion",
-    };
+describe("plugin <-> form", () => {
+  it("round-trips skills, servers and saved secrets", () => {
+    const model = pluginToForm(plugin());
+    expect(model.scope).toBe("personal");
+    expect(model.skills.map((skill) => skill.id)).toEqual(["s1", "s2"]);
+    const server = model.mcps[0]!;
+    expect(server.kind).toBe("command");
+    expect(server.commandLine).toBe(
+      "npx -y @modelcontextprotocol/server-github 'a b'",
+    );
     expect(
-      setMcpTransport(formWith({ mcps: [oauth] }), oauth.uid, "stdio").mcps[0],
-    ).toMatchObject({
+      server.variables.map((row) => [
+        row.key,
+        row.secret,
+        row.source,
+        row.credentialName,
+      ]),
+    ).toEqual([
+      ["LOG_LEVEL", false, "value", ""],
+      ["GITHUB_TOKEN", true, "value", "GitHub tools: GITHUB_TOKEN"],
+    ]);
+    expect(isSavedSecret(server.variables[1]!)).toBe(true);
+    // The secret's requirement belongs to its variable, not the advanced list.
+    expect(model.requirements).toEqual([]);
+    const payload = formToUpdateIn(model);
+    expect(payload.skills?.[0]).toMatchObject({
+      id: "s1",
+      name: "Review",
+      description: "Review PRs",
+      position: 0,
+      slug: "",
+    });
+    expect(payload.mcp_servers?.[0]).toMatchObject({
+      id: "m1",
       transport: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github", "a b"],
+      env: { LOG_LEVEL: "info", GITHUB_TOKEN: "{{credential.github_token}}" },
+      resources: { desktop: { activation: "first_tool" } },
       url: "",
-      headers: [],
-      authType: "none",
-      oauthRequirementKey: "",
+      headers: {},
     });
-  });
-
-  it("forgets the OAuth requirement only when authentication is turned off", () => {
-    const mcp = {
-      ...emptyMcpForm(),
-      transport: "streamable_http" as const,
-      authType: "oauth" as const,
-      oauthRequirementKey: "notion",
-    };
-    const form = formWith({ mcps: [mcp] });
-
-    expect(setMcpAuthentication(form, mcp.uid, "oauth").mcps[0]).toMatchObject({
-      authType: "oauth",
-      oauthRequirementKey: "notion",
-    });
-    expect(setMcpAuthentication(form, mcp.uid, "none").mcps[0]).toMatchObject({
-      authType: "none",
-      oauthRequirementKey: "",
-    });
-  });
-
-  it("adopts the endpoint of a linked MCP OAuth service only", () => {
-    const mcp = { ...emptyMcpForm(), url: "https://stale.example/mcp" };
-    const oauthRequirement = {
-      ...emptyRequirementForm(),
-      reqKey: "notion",
-      serviceId: NOTION.id,
-    };
-    const envRequirement = {
-      ...emptyRequirementForm(),
-      reqKey: "token",
-      serviceId: "svc",
-    };
-    const form = formWith({
-      mcps: [mcp],
-      requirements: [oauthRequirement, envRequirement],
-    });
-    const services = [NOTION, service({})];
-
-    expect(
-      setMcpOAuthRequirement(form, mcp.uid, "notion", services).mcps[0],
-    ).toMatchObject({
-      oauthRequirementKey: "notion",
-      url: NOTION.oauth_server_url,
-    });
-    expect(
-      setMcpOAuthRequirement(form, mcp.uid, "token", services).mcps[0],
-    ).toMatchObject({ oauthRequirementKey: "token", url: mcp.url });
-  });
-});
-
-describe("plugin requirement service edits", () => {
-  it("takes over the service type and derives an empty key from its name", () => {
-    const requirement = emptyRequirementForm();
-    const form = formWith({ requirements: [requirement] });
-
-    expect(requirementKeyFor("API Key")).toBe("api_key");
-    expect(
-      setRequirementService(
-        form,
-        requirement.uid,
-        service({ credential_type: "file" }),
-      ).requirements[0],
-    ).toMatchObject({
-      serviceId: "svc",
-      credentialType: "file",
-      reqKey: "api_key",
-    });
-
-    const typed = formWith({
-      requirements: [{ ...requirement, reqKey: "token" }],
-    });
-    expect(
-      setRequirementService(typed, requirement.uid, service({}))
-        .requirements[0]!.reqKey,
-    ).toBe("token");
-    expect(setRequirementService(form, "missing", service({}))).toBe(form);
-  });
-
-  it("links the only OAuth server, or the servers already using the key", () => {
-    const requirement = emptyRequirementForm();
-    const server = {
-      ...emptyMcpForm(),
-      transport: "streamable_http" as const,
-      authType: "oauth" as const,
-    };
-    const plain = { ...emptyMcpForm(), url: "https://other.example/mcp" };
-    const form = formWith({
-      mcps: [server, plain],
-      requirements: [requirement],
-    });
-
-    const linked = setRequirementService(form, requirement.uid, NOTION);
-    expect(linked.requirements[0]).toMatchObject({
-      credentialType: "mcp_oauth",
-      reqKey: "notion_oauth",
-    });
-    expect(linked.mcps[0]).toMatchObject({
-      oauthRequirementKey: "notion_oauth",
-      url: NOTION.oauth_server_url,
-    });
-    expect(linked.mcps[1]).toBe(plain);
-
-    const second = { ...server, uid: "second" };
-    const ambiguous = formWith({
-      mcps: [server, second],
-      requirements: [requirement],
-    });
-    expect(
-      setRequirementService(ambiguous, requirement.uid, NOTION).mcps,
-    ).toEqual(ambiguous.mcps);
-
-    const keyed = formWith({
-      mcps: [server, { ...second, oauthRequirementKey: "notion" }],
-      requirements: [{ ...requirement, reqKey: "notion" }],
-    });
-    expect(setRequirementService(keyed, requirement.uid, NOTION).mcps).toEqual([
-      server,
+    // An empty saved secret keeps its credential: no value is sent.
+    expect(payload.credential_requirements).toEqual([
       {
-        ...second,
-        oauthRequirementKey: "notion",
-        url: NOTION.oauth_server_url,
+        key: "github_token",
+        required: true,
+        service_id: "svc-gh",
+        credential_id: "c1",
+      },
+    ]);
+    expect(payload).not.toHaveProperty("scope");
+    expect(JSON.stringify(payload)).not.toMatch(/timeout/);
+  });
+
+  it("sends new secret values and the chosen scope on create", () => {
+    const server = {
+      ...emptyMcpForm("url"),
+      name: "Docs",
+      url: "https://mcp.example.com/mcp",
+      variables: [
+        { ...emptyVariableRow("Authorization", "Bearer t"), secret: true },
+        emptyVariableRow("X-Team", "core"),
+      ],
+    };
+    const payload = formToCreateIn(
+      form({ scope: "organization", mcps: [server] }),
+    );
+    expect(payload.scope).toBe("organization");
+    expect(payload.mcp_servers?.[0]).toMatchObject({
+      transport: "streamable_http",
+      url: "https://mcp.example.com/mcp",
+      headers: {
+        Authorization: "{{credential.authorization}}",
+        "X-Team": "core",
+      },
+      command: "",
+      args: [],
+      env: {},
+    });
+    // A new secret becomes a credential service of the plugin with its value.
+    expect(payload.credential_requirements).toEqual([
+      {
+        key: "authorization",
+        required: true,
+        new_service: {
+          name: "Authorization (Tools)",
+          env_var_name: "Authorization",
+        },
+        credential_id: null,
+        value: "Bearer t",
       },
     ]);
   });
+
+  it("links a chosen credential or leaves the secret to each workspace", () => {
+    const server = {
+      ...emptyMcpForm("command"),
+      name: "Cmd",
+      commandLine: "npx -y pkg",
+      variables: [
+        {
+          ...emptyVariableRow("API_KEY"),
+          source: "credential" as const,
+          credentialId: "c9",
+          credentialName: "Team key",
+          serviceId: "svc-key",
+        },
+        { ...emptyVariableRow("OTHER_TOKEN"), source: "per_user" as const },
+      ],
+    };
+    const payload = formToCreateIn(form({ mcps: [server] }));
+    expect(payload.mcp_servers?.[0]?.env).toEqual({
+      API_KEY: "{{credential.api_key}}",
+      OTHER_TOKEN: "{{credential.other_token}}",
+    });
+    expect(payload.credential_requirements).toEqual([
+      {
+        key: "api_key",
+        required: true,
+        service_id: "svc-key",
+        credential_id: "c9",
+      },
+      {
+        key: "other_token",
+        required: true,
+        new_service: {
+          name: "OTHER_TOKEN (Tools)",
+          env_var_name: "OTHER_TOKEN",
+        },
+        credential_id: null,
+      },
+    ]);
+  });
+
+  it("switching kind clears what the other kind uses", () => {
+    const start = form({
+      mcps: [
+        {
+          ...emptyMcpForm("command"),
+          name: "A",
+          commandLine: "npx a",
+          variables: [emptyVariableRow("TOKEN", "x")],
+          desktop: "first_tool",
+        },
+      ],
+    });
+    const uid = start.mcps[0]!.uid;
+    const url = setMcpKind(start, uid, "url").mcps[0]!;
+    expect(url).toMatchObject({
+      kind: "url",
+      commandLine: "",
+      desktop: "none",
+    });
+    expect(url.variables).toEqual([]);
+    const back = setMcpKind(
+      {
+        ...start,
+        mcps: [{ ...url, authType: "oauth", oauthRequirementKey: "k" }],
+      },
+      uid,
+      "command",
+    ).mcps[0]!;
+    expect(back).toMatchObject({ authType: "none", oauthRequirementKey: "" });
+    expect(start.mcps[0]!.kind).toBe("command");
+  });
+
+  it("marks variables with secret-looking names as secret", () => {
+    expect(emptyVariableRow("GITHUB_TOKEN").secret).toBe(true);
+    expect(emptyVariableRow("API_KEY").secret).toBe(true);
+    expect(emptyVariableRow("LOG_LEVEL").secret).toBe(false);
+  });
 });
 
-describe("plugin validation labels", () => {
-  it("names entries exactly as validation errors do", () => {
-    const skill = emptySkillForm();
-    const unnamedMcp = emptyMcpForm();
-    const namedMcp = { ...emptyMcpForm(), name: " Browser " };
-    const unnamedRequirement = emptyRequirementForm();
-    const keyedRequirement = { ...emptyRequirementForm(), reqKey: "token" };
-    const errors = validatePluginForm(
-      formWith({
-        skills: [skill],
-        mcps: [unnamedMcp, namedMcp],
-        requirements: [unnamedRequirement, keyedRequirement],
+describe("imports", () => {
+  it("reads the mcpServers JSON of Claude and Cursor", () => {
+    const result = parseMcpConfig(
+      JSON.stringify({
+        mcpServers: {
+          github: {
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-github"],
+            env: { GITHUB_PERSONAL_ACCESS_TOKEN: "<YOUR_TOKEN>", MODE: "full" },
+          },
+          docs: { url: "https://mcp.example.com/sse" },
+          remote: {
+            type: "http",
+            url: "https://api.example.com/mcp",
+            headers: { Authorization: "Bearer ${TOKEN}" },
+          },
+        },
       }),
     );
+    expect(result.error).toBeUndefined();
+    const [github, docs, remote] = result.servers;
+    expect(github).toMatchObject({
+      name: "Github",
+      kind: "command",
+      commandLine: "npx -y @modelcontextprotocol/server-github",
+    });
+    expect(
+      github!.variables.map((row) => [row.key, row.value, row.secret]),
+    ).toEqual([
+      ["GITHUB_PERSONAL_ACCESS_TOKEN", "", true],
+      ["MODE", "full", false],
+    ]);
+    expect(docs).toMatchObject({ kind: "url", transport: "sse" });
+    expect(remote).toMatchObject({ transport: "streamable_http" });
+    expect(remote!.variables[0]).toMatchObject({
+      key: "Authorization",
+      value: "",
+      secret: true,
+    });
+  });
 
-    expect(skillLabel(0)).toBe("Skill #1");
-    expect(mcpLabel(namedMcp, 1)).toBe('MCP server "Browser"');
-    expect(requirementLabel(keyedRequirement, 1)).toBe('Requirement "token"');
-    for (const label of [
-      skillLabel(0),
-      mcpLabel(unnamedMcp, 0),
-      mcpLabel(namedMcp, 1),
-      requirementLabel(unnamedRequirement, 0),
-      requirementLabel(keyedRequirement, 1),
-    ]) {
-      expect(entryErrors(errors, label).length, label).toBeGreaterThan(0);
-    }
-    expect(entryErrors(errors, skillLabel(0))).toContain("Name is required.");
-    expect(generalErrors(errors)).toEqual(["Plugin name is required."]);
+  it("reads VS Code servers, single objects, URLs and command lines", () => {
+    expect(
+      parseMcpConfig(
+        JSON.stringify({
+          servers: { fs: { command: "uvx", args: ["mcp-fs"] } },
+        }),
+      ).servers[0],
+    ).toMatchObject({ name: "Fs", commandLine: "uvx mcp-fs" });
+    expect(
+      parseMcpConfig(JSON.stringify({ command: "node", args: ["server.js"] }))
+        .servers[0],
+    ).toMatchObject({ commandLine: "node server.js" });
+    expect(
+      parseMcpConfig("https://mcp.notion.com/mcp").servers[0],
+    ).toMatchObject({ kind: "url", name: "Notion" });
+    expect(
+      parseMcpConfig("claude mcp add pw -- npx -y @playwright/mcp@latest")
+        .servers[0],
+    ).toMatchObject({
+      commandLine: "npx -y @playwright/mcp@latest",
+      name: "Playwright",
+    });
+    expect(parseMcpConfig("{nope").error).toMatch(/not valid JSON/);
+    expect(parseMcpConfig(JSON.stringify({ a: 1 })).error).toMatch(
+      /No MCP server/,
+    );
+    expect(parseMcpConfig("  ").error).toBeTruthy();
+  });
+
+  it("derives readable server names", () => {
+    expect(
+      serverNameFrom("npx -y @modelcontextprotocol/server-filesystem /"),
+    ).toBe("Filesystem");
+    expect(serverNameFrom("uvx mcp-server-fetch")).toBe("Fetch");
+    expect(serverNameFrom("https://mcp.deepwiki.com/mcp")).toBe("Deepwiki");
+  });
+
+  it("parses SKILL.md frontmatter and fills only empty fields", () => {
+    const text = [
+      "---",
+      "name: release-checklist",
+      "description: >",
+      "  Ship a release",
+      "  safely.",
+      "metadata:",
+      "  version: 1",
+      "---",
+      "",
+      "# Steps",
+    ].join("\n");
+    expect(parseSkillMarkdown(text)).toEqual({
+      name: "release-checklist",
+      description: "Ship a release safely.",
+      body: "# Steps",
+    });
+    const applied = applySkillMarkdown(emptySkillForm(), text);
+    expect(applied).toMatchObject({
+      name: "Release checklist",
+      description: "Ship a release safely.",
+      body: "# Steps",
+    });
+    const kept = applySkillMarkdown(
+      { ...emptySkillForm(), name: "Mine", description: "Keep" },
+      text,
+    );
+    expect(kept).toMatchObject({ name: "Mine", description: "Keep" });
+    expect(applySkillMarkdown(emptySkillForm(), "plain").body).toBe("plain");
+  });
+});
+
+describe("validation", () => {
+  it("requires names, instructions, a command or URL and secret values", () => {
+    const errors = validatePluginForm(
+      form({
+        name: "",
+        skills: [emptySkillForm()],
+        mcps: [
+          { ...emptyMcpForm("command"), name: "Cmd" },
+          { ...emptyMcpForm("url"), name: "Web", url: "ftp://x" },
+          {
+            ...emptyMcpForm("command"),
+            name: "Secret",
+            commandLine: "npx a",
+            variables: [{ ...emptyVariableRow("TOKEN"), secret: true }],
+          },
+        ],
+      }),
+    );
+    expect(generalErrors(errors)).toEqual(["Enter a plugin name."]);
+    expect(entryErrors(errors, skillLabel(0))).toEqual([
+      "Enter a name.",
+      "Write its instructions.",
+    ]);
+    expect(entryErrors(errors, 'MCP server "Cmd"')).toEqual([
+      "Enter the command that starts the server.",
+    ]);
+    expect(entryErrors(errors, 'MCP server "Web"')).toEqual([
+      "Enter an http(s) URL.",
+    ]);
+    expect(entryErrors(errors, 'MCP server "Secret"')).toEqual([
+      'Enter the secret value of "TOKEN".',
+    ]);
+  });
+
+  it("accepts a saved secret without a new value and a SKILL.md body", () => {
+    const errors = validatePluginForm(
+      form({
+        skills: [
+          {
+            ...emptySkillForm(),
+            body: "---\nname: from-file\n---\nDo it.",
+          },
+        ],
+        mcps: [
+          {
+            ...emptyMcpForm("command"),
+            name: "Cmd",
+            commandLine: "npx -y pkg",
+            variables: [
+              {
+                ...emptyVariableRow("TOKEN"),
+                secret: true,
+                credentialId: "c1",
+                credentialName: "Saved token",
+                serviceId: "svc",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(errors).toEqual([]);
+  });
+
+  it("rejects shell syntax, bad names, duplicates and unknown credentials", () => {
+    const errors = validatePluginForm(
+      form({
+        mcps: [
+          { ...emptyMcpForm("command"), name: "A", commandLine: "$(evil) x" },
+          {
+            ...emptyMcpForm("command"),
+            name: "a",
+            commandLine: "npx b",
+            variables: [
+              emptyVariableRow("BAD-NAME", "x"),
+              emptyVariableRow("REF", "{{credential.missing}}"),
+              emptyVariableRow("TPL", "{{other}}"),
+            ],
+          },
+        ],
+      }),
+    );
+    expect(entryErrors(errors, 'MCP server "A"')[0]).toMatch(/shell syntax/);
+    const second = entryErrors(errors, 'MCP server "a"');
+    expect(second).toContain("Another MCP server has the same name.");
+    expect(second).toContain('"BAD-NAME" is not a valid variable name.');
+    expect(
+      second.some((error) => error.includes('unknown credential "missing"')),
+    ).toBe(true);
+    expect(
+      second.some((error) => error.includes("unsupported placeholder")),
+    ).toBe(true);
+  });
+
+  it("checks OAuth servers against their required MCP OAuth service", () => {
+    const oauth = service({
+      id: "oauth",
+      name: "Notion OAuth",
+      credential_type: "mcp_oauth",
+      oauth_server_url: "https://mcp.notion.com/mcp",
+    });
+    let model = form({
+      requirements: [emptyRequirementForm()],
+      mcps: [{ ...emptyMcpForm("url"), name: "Notion" }],
+    });
+    model = setRequirementService(model, model.requirements[0]!.uid, oauth);
+    expect(model.requirements[0]).toMatchObject({
+      reqKey: "notion_oauth",
+      credentialType: "mcp_oauth",
+    });
+    model = setMcpAuthentication(model, model.mcps[0]!.uid, "oauth");
+    model = setMcpOAuthRequirement(model, model.mcps[0]!.uid, "notion_oauth", [
+      oauth,
+    ]);
+    expect(model.mcps[0]!.url).toBe("https://mcp.notion.com/mcp");
+    expect(
+      validatePluginForm({ ...model, availableServices: [oauth] }),
+    ).toEqual([]);
+    const drifted = updateEntry(model, "mcps", model.mcps[0]!.uid, (mcp) => ({
+      ...mcp,
+      url: "https://elsewhere.example/mcp",
+    }));
+    expect(
+      validatePluginForm({ ...drifted, availableServices: [oauth] }).join(" "),
+    ).toMatch(/must be https:\/\/mcp.notion.com\/mcp/);
+    const off = setMcpAuthentication(model, model.mcps[0]!.uid, "none");
+    expect(off.mcps[0]!.oauthRequirementKey).toBe("");
+  });
+
+  it("names entries exactly as validation errors do", () => {
+    const req = { ...emptyRequirementForm(), reqKey: "api_key" };
+    expect(requirementLabel(req, 0)).toBe('Requirement "api_key"');
+    expect(mcpLabel({ ...emptyMcpForm(), name: " " }, 2)).toBe("MCP server #3");
+    expect(requirementKeyFor("API Key")).toBe("api_key");
+    const model = form({ skills: [emptySkillForm(), emptySkillForm()] });
+    const removed = removeEntry(model, "skills", model.skills[0]!.uid);
+    expect(removed.skills).toHaveLength(1);
+    expect(model.skills).toHaveLength(2);
+  });
+});
+
+describe("plugin credentials", () => {
+  it("keeps optional secrets and their descriptions", () => {
+    const [stored] = plugin().credential_requirements;
+    const model = pluginToForm(
+      plugin({
+        credential_requirements: [
+          { ...stored!, required: false, description: "Raises rate limits" },
+        ],
+      }),
+    );
+    expect(formToUpdateIn(model).credential_requirements).toEqual([
+      {
+        key: "github_token",
+        required: false,
+        description: "Raises rate limits",
+        service_id: "svc-gh",
+        credential_id: "c1",
+      },
+    ]);
+  });
+
+  it("drops credentials an organization plugin cannot use", () => {
+    const start = form({
+      scope: "organization",
+      mcps: [
+        {
+          ...emptyMcpForm("command"),
+          name: "Cmd",
+          commandLine: "npx pkg",
+          variables: [
+            {
+              ...emptyVariableRow("API_KEY"),
+              source: "credential",
+              credentialId: "mine",
+              credentialName: "Mine",
+              serviceId: "svc-personal",
+            },
+            {
+              ...emptyVariableRow("TEAM_KEY"),
+              source: "credential",
+              credentialId: "team",
+              credentialName: "Team",
+              serviceId: "svc-team",
+            },
+          ],
+        },
+      ],
+      requirements: [{ ...emptyRequirementForm(), credentialId: "mine" }],
+    });
+    const next = keepUsableCredentials(start, (id) => id === "team");
+    expect(
+      next.mcps[0]!.variables.map((row) => [
+        row.source,
+        row.credentialId,
+        row.serviceId,
+      ]),
+    ).toEqual([
+      ["value", "", ""],
+      ["credential", "team", "svc-team"],
+    ]);
+    expect(next.requirements[0]!.credentialId).toBe("");
+  });
+
+  it("tells secret variables and where their credential comes from", () => {
+    expect(boundCredentialKey("{{credential.api_key}}")).toBe("api_key");
+    expect(boundCredentialKey("Bearer {{credential.api_key}}")).toBeNull();
+    expect(serverVariableList(plugin().mcp_servers[0]!)).toEqual([
+      { name: "LOG_LEVEL", secret: false },
+      { name: "GITHUB_TOKEN", secret: true },
+    ]);
+    const [requirement] = plugin().credential_requirements;
+    expect(credentialSourceLabel(requirement!)).toBe(
+      "Uses “GitHub tools: GITHUB_TOKEN”",
+    );
+    expect(
+      credentialSourceLabel({ credential_id: null, credential_name: "" }),
+    ).toBe("Each workspace adds its own");
+  });
+});
+
+describe("plugin presentation", () => {
+  it("summarizes contents and availability", () => {
+    expect(pluginContents(plugin())).toBe("2 skills · 1 MCP server");
+    expect(pluginContents({ skills: [], mcp_servers: [] })).toBe("");
+    expect(pluginAvailability(plugin())).toBe("Available");
+    expect(
+      pluginAvailability(plugin({ scope: "organization", org_enabled: false })),
+    ).toBe("Not released");
+    expect(
+      pluginAvailability(plugin({ scope: "builtin", published: false })),
+    ).toBe("Unpublished");
   });
 });

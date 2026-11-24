@@ -18,12 +18,12 @@ import anyio
 import structlog
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
 
+from apps.plugins.skills import PluginSkillService
 from apps.runners.services import get_runner_service
 from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from apps.runners.services.workspace_plugin_runtime import (
     WorkspacePluginRuntimeService,
 )
-from apps.skills.services import SkillService
 from common import realtime
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
@@ -93,7 +93,7 @@ class HarnessService:
         parts: type[HarnessPartRepository] | None = None,
         todos: type[TodoRepository] | None = None,
         permissions: PermissionService | None = None,
-        skills: SkillService | None = None,
+        skills: PluginSkillService | None = None,
         workspace_admission: WorkspaceAdmissionService | None = None,
         plugin_runtime: WorkspacePluginRuntimeService | None = None,
         emit: EmitFn | None = None,
@@ -118,7 +118,7 @@ class HarnessService:
         self.history = ProviderHistoryService(messages=self.messages, parts=self.parts)
         self.todos = todos or TodoRepository
         self.permissions = permissions or PermissionService()
-        self.skills = skills or SkillService()
+        self.skills = skills or PluginSkillService()
         self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
         self.plugin_runtime = plugin_runtime or WorkspacePluginRuntimeService()
         self._emit = emit
@@ -426,7 +426,7 @@ class HarnessService:
         get_agent(resolved_agent)  # raises KeyError for unknown agents
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
-        normalized_skills = SkillService.normalize_ids(skill_ids)
+        normalized_skills = PluginSkillService.normalize_ids(skill_ids)
         if normalized_skills and user_id is not None:
             self.skills.resolve_bodies(
                 normalized_skills,
@@ -549,7 +549,7 @@ class HarnessService:
         Runs inherit the selection, so skills deleted since must not wedge
         every later prompt of the chat.
         """
-        stored = SkillService.normalize_ids(list(session.skill_ids or []))
+        stored = PluginSkillService.normalize_ids(list(session.skill_ids or []))
         if not stored or user_id is None:
             return stored
         return self.skills.filter_available_ids(
@@ -684,7 +684,7 @@ class HarnessService:
                 None,
             )
         effective_skill_ids = (
-            SkillService.normalize_ids(skill_ids)
+            PluginSkillService.normalize_ids(skill_ids)
             if skill_ids is not None
             else await sync_to_async(self._available_session_skill_ids)(
                 session,

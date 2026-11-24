@@ -16,6 +16,7 @@ import logging
 import re
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import replace
 
 from apps.credentials.services import CredentialSvc
@@ -24,6 +25,7 @@ from common.guest_os import WINDOWS
 from common.utils import decrypt_value
 
 from .bundled import computer_use
+from .credential_links import usable_credential
 from .models import (
     Plugin,
     PluginCredentialRequirement,
@@ -107,17 +109,11 @@ def _verify_workspace_org(workspace, org_id: uuid.UUID) -> uuid.UUID:
     return runner_org_id
 
 
-def _service_visible_to_org(service, org_id: uuid.UUID) -> bool:
-    """Return True when *service* is global or owned by *org_id*."""
-    service_org = getattr(service, "organization_id", None)
-    return service_org is None or str(service_org) == str(org_id)
-
-
 def _guest_overrides(
     plugin: Plugin, server: PluginMcpServer
 ) -> dict[str, McpServerGuestOverride]:
-    """Return the guest OS deviations of a seeded global MCP server."""
-    if plugin.organization_id is not None:
+    """Return the guest OS deviations of a seeded built-in MCP server."""
+    if plugin.scope != "builtin":
         return {}
     return dict(GLOBAL_SERVER_GUEST_OVERRIDES.get((plugin.slug, server.slug), {}))
 
@@ -134,16 +130,18 @@ def build_workspace_plugin_snapshot(
 ) -> WorkspacePluginSnapshot:
     """Return the immutable snapshot of effective plugins for *workspace*.
 
-    Effective = visible to *org_id* (global or org-owned) AND
-    ``enabled`` + ``published`` AND org-activated AND workspace-activated.
-    Skills/servers/requirements are ordered deterministically (by name /
-    position / key). Components are loaded once per kind, not per plugin.
+    Effective = workspace-activated AND either a personal plugin of the
+    workspace owner, or a built-in/organization plugin of *org_id* that is
+    ``enabled`` + ``published`` AND org-activated. Skills/servers/
+    requirements are ordered deterministically (by name / position / key).
+    Components are loaded once per kind, not per plugin.
     """
     workspace_org_id = _verify_workspace_org(workspace, org_id)
+    owner_id = getattr(workspace, "created_by_id", None)
     visible = [
         plugin
-        for plugin in PluginRepository.list_visible_to_org(workspace_org_id)
-        if plugin.enabled and plugin.published
+        for plugin in PluginRepository.list_visible(workspace_org_id, owner_id)
+        if plugin.owner_id is not None or (plugin.enabled and plugin.published)
     ]
     if not visible:
         return WorkspacePluginSnapshot(
@@ -151,7 +149,12 @@ def build_workspace_plugin_snapshot(
         )
     org_enabled = OrgPluginActivationRepository.enabled_plugin_ids(org_id)
     ws_enabled = WorkspacePluginActivationRepository.enabled_plugin_ids(workspace.id)
-    effective = [p for p in visible if p.id in org_enabled and p.id in ws_enabled]
+    effective = [
+        p
+        for p in visible
+        if p.id in ws_enabled
+        and (p.id in org_enabled or (owner_id and p.owner_id == owner_id))
+    ]
     plugin_ids = [plugin.id for plugin in effective]
     skills_by_plugin: dict[uuid.UUID, list[PluginSkill]] = defaultdict(list)
     servers_by_plugin: dict[uuid.UUID, list[PluginMcpServer]] = defaultdict(list)
@@ -176,6 +179,7 @@ def build_workspace_plugin_snapshot(
                 slug=skill.slug,
                 body=skill.body,
                 position=skill.position,
+                description=skill.description,
             )
             for skill in skills_by_plugin.pop(plugin.id, [])
         )
@@ -183,6 +187,24 @@ def build_workspace_plugin_snapshot(
         service_by_key = {
             req.key: req.credential_service_id for req in plugin_requirements
         }
+        linked = {
+            req.id: req.credential
+            for req in plugin_requirements
+            if usable_credential(
+                req.credential,
+                service_id=req.credential_service_id,
+                owner_id=owner_id,
+                org_id=workspace_org_id,
+            )
+        }
+        # Servers restart mid-run when the credentials they render change.
+        credentials_marker = ",".join(
+            sorted(
+                f"{req.key}:{linked[req.id].id}:{linked[req.id].updated_at}"
+                for req in plugin_requirements
+                if req.id in linked
+            )
+        )
         servers = tuple(
             PluginMcpServerSnapshot(
                 id=server.id,
@@ -214,6 +236,10 @@ def build_workspace_plugin_snapshot(
                 tool_policy=dict(server.tool_policy or {}),
                 runtime_artifact=dict(server.runtime_artifact or {}),
                 guest_overrides=_guest_overrides(plugin, server),
+                updated_at=(
+                    f"{server.updated_at.isoformat() if server.updated_at else ''}"
+                    f"|{credentials_marker}"
+                ),
             )
             for server in servers_by_plugin.pop(plugin.id, [])
         )
@@ -227,6 +253,7 @@ def build_workspace_plugin_snapshot(
                 service_slug=req.credential_service.slug,
                 service_name=req.credential_service.name,
                 credential_type=req.credential_service.credential_type,
+                credential_id=linked[req.id].id if req.id in linked else None,
             )
             for req in plugin_requirements
         )
@@ -237,10 +264,12 @@ def build_workspace_plugin_snapshot(
                 slug=plugin.slug,
                 description=plugin.description or "",
                 organization_id=plugin.organization_id,
-                is_global=plugin.organization_id is None,
+                is_global=plugin.scope == "builtin",
                 skills=skills,
                 mcp_servers=servers,
                 requirements=requirements,
+                scope=plugin.scope,
+                updated_at=plugin.updated_at.isoformat() if plugin.updated_at else "",
             )
         )
     return WorkspacePluginSnapshot(
@@ -266,42 +295,77 @@ def _workspace_credentials_by_service(
     by_service: dict[uuid.UUID, object] = {}
     owner_id = getattr(workspace, "created_by_id", None)
     for credential in attached:
-        service = getattr(credential, "service", None)
-        if service is None or not _service_visible_to_org(service, org_id):
-            continue
-        personal = getattr(credential, "user_id", None) is not None
-        owned_org = getattr(credential, "organization_id", None)
-        if personal:
-            if owner_id is None or str(credential.user_id) != str(owner_id):
-                continue
-        elif owned_org is None or str(owned_org) != str(org_id):
-            continue
-        else:
-            pass
-        by_service.setdefault(credential.service_id, credential)
+        if usable_credential(
+            credential,
+            service_id=credential.service_id,
+            owner_id=owner_id,
+            org_id=org_id,
+        ):
+            by_service.setdefault(credential.service_id, credential)
     return by_service
+
+
+CredentialFor = Callable[[PluginRequirementSnapshot], object | None]
+
+
+def credential_resolver(
+    snapshot: WorkspacePluginSnapshot, *, workspace
+) -> CredentialFor:
+    """Return the lookup of the credential each requirement runs on.
+
+    The credential the plugin names itself wins; otherwise the credential
+    of the service attached to the workspace. Both are re-checked here
+    with the same ownership rule (fail closed).
+    """
+    org_id = _verify_workspace_org(workspace, snapshot.organization_id)
+    owner_id = getattr(workspace, "created_by_id", None)
+    attached = _workspace_credentials_by_service(workspace, org_id=org_id)
+    linked_ids = [
+        requirement.credential_id
+        for plugin in snapshot.plugins
+        for requirement in plugin.requirements
+        if requirement.credential_id is not None
+    ]
+    linked = (
+        {cred.id: cred for cred in CredentialSvc().list_by_ids(linked_ids)}
+        if linked_ids
+        else {}
+    )
+
+    def credential_for(requirement: PluginRequirementSnapshot) -> object | None:
+        own = linked.get(requirement.credential_id)
+        for candidate in (own, attached.get(requirement.service_id)):
+            if usable_credential(
+                candidate,
+                service_id=requirement.service_id,
+                owner_id=owner_id,
+                org_id=org_id,
+            ):
+                return candidate
+        return None
+
+    return credential_for
 
 
 def resolve_plugin_plaintexts(
     plugin: EffectivePluginSnapshot,
-    credentials_by_service: dict[uuid.UUID, object],
+    credential_for: CredentialFor,
 ) -> dict[str, str]:
     """Decrypt requirement key -> plaintext for one effective plugin.
 
-    Only ``workspace.credentials`` rows are consulted (personal or org).
     Raises :class:`PluginCredentialConfigError` when a *required*
-    requirement has no attached credential.
+    requirement has neither its own nor an attached credential.
     """
     by_key: dict[str, str] = {}
     req_by_key = {req.key: req for req in plugin.requirements}
     for key, req in req_by_key.items():
-        credential = credentials_by_service.get(req.service_id)
+        credential = credential_for(req)
         if credential is None or credential.service.credential_type == "mcp_oauth":
             if req.required:
                 raise PluginCredentialConfigError(
                     f"Plugin '{plugin.slug}' is missing required credential "
-                    f"'{key}' (service '{req.service_slug}'); "
-                    "attach it to the workspace before running."
+                    f"'{key}' (service '{req.service_slug}'); set it in the plugin "
+                    "or attach one to the workspace before running."
                 )
             continue
         try:
@@ -394,11 +458,15 @@ def render_server_config(
 
 
 def resolve_runtime_oauth_credentials(
-    snapshot: WorkspacePluginSnapshot, *, workspace
+    snapshot: WorkspacePluginSnapshot,
+    *,
+    workspace,
+    credential_for: CredentialFor | None = None,
 ) -> dict[uuid.UUID, uuid.UUID]:
     """Resolve only matching OAuth credential row IDs; no token refresh here."""
-    org_id = _verify_workspace_org(workspace, snapshot.organization_id)
-    attached = _workspace_credentials_by_service(workspace, org_id=org_id)
+    credential_for = credential_for or credential_resolver(
+        snapshot, workspace=workspace
+    )
     resolved: dict[uuid.UUID, uuid.UUID] = {}
     for plugin in snapshot.plugins:
         plugin_oauth_requirements = {
@@ -418,7 +486,7 @@ def resolve_runtime_oauth_credentials(
                 ),
                 None,
             )
-            credential = attached.get(requirement.service_id) if requirement else None
+            credential = credential_for(requirement) if requirement else None
             if (
                 credential is not None
                 and credential.service.credential_type == "mcp_oauth"
@@ -443,7 +511,10 @@ def resolve_runtime_oauth_credentials(
 
 
 def resolve_runtime_credentials(
-    snapshot: WorkspacePluginSnapshot, *, workspace
+    snapshot: WorkspacePluginSnapshot,
+    *,
+    workspace,
+    credential_for: CredentialFor | None = None,
 ) -> dict[uuid.UUID, dict[str, str]]:
     """Decrypt credentials for all effective plugins.
 
@@ -452,8 +523,16 @@ def resolve_runtime_credentials(
     fails before any provider call. Credentials for non-effective or
     foreign services are ignored.
     """
-    org_id = _verify_workspace_org(workspace, snapshot.organization_id)
-    credentials_by_service = _workspace_credentials_by_service(workspace, org_id=org_id)
+    credential_for = credential_for or credential_resolver(
+        snapshot, workspace=workspace
+    )
+
+    def ordinary(requirement: PluginRequirementSnapshot) -> object | None:
+        credential = credential_for(requirement)
+        if credential is None or credential.service.credential_type == "mcp_oauth":
+            return None
+        return credential
+
     resolved: dict[uuid.UUID, dict[str, str]] = {}
     for plugin in snapshot.plugins:
         # OAuth tokens are scoped and injected by the MCP transport only;
@@ -468,13 +547,8 @@ def resolve_runtime_credentials(
             for req in plugin.requirements
             if req.key not in oauth_keys and req.credential_type != "mcp_oauth"
         )
-        safe_credentials = {
-            sid: cred
-            for sid, cred in credentials_by_service.items()
-            if cred.service.credential_type != "mcp_oauth"
-        }
         resolved[plugin.id] = resolve_plugin_plaintexts(
-            replace(plugin, requirements=ordinary_requirements), safe_credentials
+            replace(plugin, requirements=ordinary_requirements), ordinary
         )
     logger.info(
         "plugin runtime credentials resolved for workspace %s (%d plugins)",
@@ -495,10 +569,22 @@ def prepare_workspace_runtime(*, workspace, org_id: uuid.UUID) -> PreparedPlugin
     snapshot = build_workspace_plugin_snapshot(workspace=workspace, org_id=org_id)
     if not snapshot.plugins:
         return PreparedPluginRuntime(snapshot=snapshot)
+    credential_for = credential_resolver(snapshot, workspace=workspace)
     return PreparedPluginRuntime(
         snapshot=snapshot,
-        plaintexts=resolve_runtime_credentials(snapshot, workspace=workspace),
+        plaintexts=resolve_runtime_credentials(
+            snapshot, workspace=workspace, credential_for=credential_for
+        ),
         oauth_credentials=resolve_runtime_oauth_credentials(
-            snapshot, workspace=workspace
+            snapshot, workspace=workspace, credential_for=credential_for
         ),
     )
+
+
+def workspace_plugin_fingerprint(*, workspace_id: uuid.UUID) -> str:
+    """Cheap change marker for a workspace's selected plugins and their content.
+
+    Running agents compare it between steps to pick up plugins that were
+    enabled, disabled or edited mid-run without rebuilding the snapshot.
+    """
+    return WorkspacePluginActivationRepository.selection_fingerprint(workspace_id)

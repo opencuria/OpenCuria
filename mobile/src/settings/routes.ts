@@ -1,6 +1,6 @@
 /**
  * Settings routes. A route is "<page>" or "<page>:<argument>", e.g.
- * "skill:new" or "provider-account:openrouter:<id>"; arguments may contain
+ * "plugin:<id>" or "provider-account:openrouter:<id>"; arguments may contain
  * further colons.
  */
 export function route(page: string, ...args: string[]): string {
@@ -35,8 +35,4 @@ export const ADMIN_PAGES: ReadonlySet<string> = new Set([
   "runner-operation",
   "credential-services",
   "credential-service-new",
-  "plugin-editor",
-  "plugin-skill",
-  "plugin-mcp",
-  "plugin-requirement",
 ]);

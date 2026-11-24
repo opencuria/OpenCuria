@@ -281,8 +281,7 @@ def list_api_key_permissions(request: HttpRequest):
         APIKeyPermission.IMAGE_DEFINITIONS_READ: "List image definitions",
         APIKeyPermission.IMAGE_DEFINITIONS_WRITE: "Create, update and delete image definitions",
         APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS: "Assign, activate, deactivate and rebuild image definitions on runners",
-        APIKeyPermission.SKILLS_READ: "List and view skills",
-        APIKeyPermission.SKILLS_WRITE: "Create, update, delete skills",
+        APIKeyPermission.SKILLS_READ: "List the skills of usable plugins",
         APIKeyPermission.PLUGINS_READ: "List and view plugins",
         APIKeyPermission.PLUGINS_WRITE: (
             "Create, update, delete plugins and manage activations"

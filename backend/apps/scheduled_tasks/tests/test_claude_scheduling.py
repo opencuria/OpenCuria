@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from apps.plugins.skills import PluginSkillService
 from apps.scheduled_tasks.models import ScheduledTaskRun
 from apps.scheduled_tasks.services import ScheduledTaskService
-from apps.skills.services import SkillService
 
 
 class Repository:
@@ -111,7 +111,7 @@ def test_create_claude_schedule_validates_skills_and_rejects_foreign_ids(
             raise ValueError(f"Skill not found or not accessible: {foreign_skill_id}")
         return ["## Owner skill\\nSelected prompt context"]
 
-    monkeypatch.setattr(SkillService, "resolve_bodies", resolve_skills)
+    monkeypatch.setattr(PluginSkillService, "resolve_bodies", resolve_skills)
 
     for field, value, message in (
         ("harness_id", "unsupported", "harness_id"),
@@ -145,7 +145,7 @@ def test_switch_to_claude_keeps_skills_and_resets_engine_defaults(
     skill_id = str(uuid.uuid4())
     resolved_skills = []
     monkeypatch.setattr(
-        SkillService,
+        PluginSkillService,
         "resolve_bodies",
         lambda _service, skill_ids, *, user_id, organization_id: (
             resolved_skills.append((skill_ids, user_id, organization_id))

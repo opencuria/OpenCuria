@@ -1,17 +1,36 @@
+<!--
+  WorkspacePluginCredentialSelection — plugins and credentials of a workspace
+  (create and edit). A selected plugin lists the credentials it needs: those
+  the plugin brings itself need nothing, the others pick one of the
+  workspace's credentials right there. Enabling a plugin attaches the only
+  matching credential automatically.
+-->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Check, Key, Puzzle } from '@lucide/vue'
+import { Check, Key, KeyRound, Plus, Puzzle } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { useAuthStore } from '@/stores/auth'
 import { useCredentialStore } from '@/stores/credentials'
 import { usePluginStore } from '@/stores/plugins'
 import {
+  autoAttachCredentials,
   evaluateWorkspacePluginSelection,
   isCredentialConnected,
   toggleWorkspaceCredentialSelection,
 } from '@opencuria/chat-core/workspaceConfiguration'
 import type { Credential } from '@/types'
-import type { Plugin } from '@opencuria/chat-core/plugins'
+import {
+  credentialSourceLabel,
+  type Plugin,
+  type PluginCredentialRequirement,
+} from '@opencuria/chat-core/plugins'
 
 const props = withDefaults(
   defineProps<{
@@ -35,6 +54,7 @@ const credentials = useCredentialStore()
 const plugins = usePluginStore()
 const catalogReady = ref(false)
 const catalogError = ref<string | null>(null)
+const NONE = '__none__'
 
 const selection = computed(() =>
   evaluateWorkspacePluginSelection({
@@ -56,11 +76,14 @@ const selectablePlugins = computed(() => [
         name: `Unavailable plugin (${id.slice(0, 8)})`,
         slug: '',
         description: '',
+        scope: 'personal',
         enabled: false,
         published: false,
         organization_id: null,
         is_global: false,
         org_enabled: false,
+        available: false,
+        editable: false,
         skills: [],
         mcp_servers: [],
         credential_requirements: [],
@@ -69,9 +92,12 @@ const selectablePlugins = computed(() => [
       }) as Plugin,
   ),
 ])
-const selectedCredentialRecords = computed(() => selection.value.selectedCredentials)
 const unavailableCredentialIds = computed(() => selection.value.unavailableCredentialIds)
-const duplicateSelectedServices = computed(() => selection.value.duplicateServiceIds)
+const duplicateSelectedServices = computed(() =>
+  selection.value.duplicateServiceIds.map(
+    (id) => credentials.credentials.find((entry) => entry.service_id === id)?.service_name ?? id,
+  ),
+)
 const missingRequired = computed(() => selection.value.missingRequired)
 const readyToSave = computed(
   () => (!props.active || catalogReady.value) && !catalogError.value && selection.value.valid,
@@ -114,11 +140,20 @@ onMounted(() => {
   if (!credentials.servicesLoaded) void credentials.fetchServices()
 })
 
-function togglePlugin(pluginId: string): void {
-  const next = props.pluginIds.includes(pluginId)
-    ? props.pluginIds.filter((id) => id !== pluginId)
-    : [...props.pluginIds, pluginId]
-  emit('update:pluginIds', next)
+function isAvailable(plugin: Plugin): boolean {
+  return activeCatalog.value.some((entry) => entry.id === plugin.id)
+}
+function togglePlugin(plugin: Plugin): void {
+  if (props.pluginIds.includes(plugin.id)) {
+    emit(
+      'update:pluginIds',
+      props.pluginIds.filter((id) => id !== plugin.id),
+    )
+    return
+  }
+  emit('update:pluginIds', [...props.pluginIds, plugin.id])
+  const attached = autoAttachCredentials(plugin, props.credentialIds, credentials.credentials)
+  if (attached !== props.credentialIds) emit('update:credentialIds', attached)
 }
 function removeUnavailableCredential(id: string): void {
   emit(
@@ -127,7 +162,7 @@ function removeUnavailableCredential(id: string): void {
   )
 }
 function toggleCredential(credential: Credential): void {
-  if (!credentialConnected(credential) && !props.credentialIds.includes(credential.id)) {
+  if (!isCredentialConnected(credential) && !props.credentialIds.includes(credential.id)) {
     emit('reconnectCredential', credential.id)
     return
   }
@@ -136,54 +171,84 @@ function toggleCredential(credential: Credential): void {
     toggleWorkspaceCredentialSelection(props.credentialIds, credential, credentials.credentials),
   )
 }
-function credentialConnected(credential: Credential): boolean {
-  return isCredentialConnected(credential)
-}
 function canManageOAuth(credential: Credential): boolean {
   return credential.scope === 'personal'
     ? authStore.user?.id === credential.created_by_id
     : authStore.isAdmin
 }
+
+/** Connected credentials of the requirement's service. */
+function choicesFor(requirement: PluginCredentialRequirement): Credential[] {
+  return credentials.credentials.filter(
+    (credential) =>
+      credential.service_id === requirement.service_id && isCredentialConnected(credential),
+  )
+}
+/** OAuth credentials of the service that must be reconnected first. */
+function disconnectedFor(requirement: PluginCredentialRequirement): Credential[] {
+  return credentials.credentials.filter(
+    (credential) =>
+      credential.service_id === requirement.service_id && !isCredentialConnected(credential),
+  )
+}
+function attachedFor(requirement: PluginCredentialRequirement): Credential | undefined {
+  return choicesFor(requirement).find((credential) => props.credentialIds.includes(credential.id))
+}
+function isMissing(requirement: PluginCredentialRequirement): boolean {
+  return requirement.required && !requirement.credential_id && !attachedFor(requirement)
+}
+function chooseFor(requirement: PluginCredentialRequirement, value: unknown): void {
+  const withoutService = props.credentialIds.filter(
+    (id) =>
+      credentials.credentials.find((credential) => credential.id === id)?.service_id !==
+      requirement.service_id,
+  )
+  emit(
+    'update:credentialIds',
+    value && value !== NONE ? [...withoutService, String(value)] : withoutService,
+  )
+}
 </script>
 
 <template>
-  <div class="space-y-4" data-testid="workspace-plugin-credential-selection">
+  <div class="space-y-5" data-testid="workspace-plugin-credential-selection">
     <section v-if="pluginsEnabled" class="space-y-2">
       <div>
         <h3 class="text-sm font-medium">
           Plugins <span class="font-normal text-muted-foreground">(optional)</span>
         </h3>
-        <p class="text-xs text-muted-foreground">
-          Choose published plugins enabled for this organization.
-        </p>
+        <p class="text-xs text-muted-foreground">Skills and tools for agents in this workspace.</p>
       </div>
       <p v-if="!catalogReady && !catalogError" class="text-xs text-muted-foreground" role="status">
-        Loading plugin catalog…
+        Loading plugins…
       </p>
-      <Button
+      <div
         v-if="catalogError"
-        size="sm"
-        variant="outline"
-        type="button"
-        :disabled="disabled"
-        @click="loadCatalog"
-        >Retry catalog and credential loading</Button
-      >
-      <p
-        v-if="catalogError"
-        class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+        class="space-y-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2"
         role="alert"
       >
-        Could not load the plugin catalog or credentials. Retry before saving: {{ catalogError }}
-      </p>
-      <div v-if="selectablePlugins.length" class="space-y-2">
-        <div v-for="plugin in selectablePlugins" :key="plugin.id" class="rounded-md border p-3">
+        <p class="text-xs text-destructive">
+          Could not load plugins or credentials: {{ catalogError }}
+        </p>
+        <Button size="sm" variant="outline" type="button" :disabled="disabled" @click="loadCatalog"
+          >Retry</Button
+        >
+      </div>
+      <div
+        v-if="selectablePlugins.length"
+        class="divide-y divide-border overflow-hidden rounded-lg border border-border"
+      >
+        <div
+          v-for="plugin in selectablePlugins"
+          :key="plugin.id"
+          :data-testid="`workspace-plugin-${plugin.id}`"
+        >
           <button
             type="button"
-            class="flex w-full items-center gap-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-sm hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             :disabled="disabled"
             :aria-pressed="pluginIds.includes(plugin.id)"
-            @click="togglePlugin(plugin.id)"
+            @click="togglePlugin(plugin)"
           >
             <span
               class="flex size-4 shrink-0 items-center justify-center rounded-sm border"
@@ -195,195 +260,125 @@ function canManageOAuth(credential: Credential): boolean {
               ><Check v-if="pluginIds.includes(plugin.id)" :size="10"
             /></span>
             <Puzzle :size="14" class="shrink-0 text-muted-foreground" />
-            <span class="flex-1">{{ plugin.name }}</span>
-            <span
-              v-if="!activeCatalog.some((entry) => entry.id === plugin.id)"
-              class="text-xs text-destructive"
+            <span class="min-w-0 flex-1 truncate">{{ plugin.name }}</span>
+            <span v-if="!isAvailable(plugin)" class="text-xs text-destructive"
               >Unavailable · remove to save</span
             >
-            <span v-else class="text-xs text-muted-foreground"
-              >{{ plugin.credential_requirements.length }} credential requirement{{
-                plugin.credential_requirements.length === 1 ? '' : 's'
-              }}</span
+            <span
+              v-else-if="
+                pluginIds.includes(plugin.id) &&
+                plugin.credential_requirements.some((requirement) => isMissing(requirement))
+              "
+              class="text-xs text-destructive"
+              >Needs a credential</span
             >
           </button>
-          <div
+          <ul
             v-if="
-              pluginIds.includes(plugin.id) && activeCatalog.some((entry) => entry.id === plugin.id)
+              pluginIds.includes(plugin.id) &&
+              isAvailable(plugin) &&
+              plugin.credential_requirements.length
             "
-            class="mt-3 space-y-2 border-t pt-2"
+            class="space-y-1 px-3 pb-3 pl-[2.6rem]"
           >
-            <p v-if="plugin.description" class="text-xs text-muted-foreground">
-              {{ plugin.description }}
-            </p>
-            <div
+            <li
               v-for="requirement in plugin.credential_requirements"
               :key="requirement.id"
-              class="rounded-sm bg-muted/40 p-2"
+              class="flex flex-wrap items-center gap-2 text-xs"
+              :data-testid="`workspace-plugin-requirement-${requirement.key}`"
             >
-              <div class="flex flex-wrap items-center gap-2 text-xs">
-                <span class="font-medium">{{ requirement.service_name }}</span>
-                <span class="rounded border px-1.5 py-0.5">{{
-                  requirement.required ? 'Required' : 'Optional'
-                }}</span>
-                <span>{{ requirement.credential_type }}</span>
-              </div>
-              <p v-if="requirement.description" class="mt-1 text-xs text-muted-foreground">
-                {{ requirement.description }}
-              </p>
-              <div
-                v-if="
-                  requirement.required &&
-                  !selectedCredentialRecords.some(
-                    (c) => c.service_id === requirement.service_id && credentialConnected(c),
-                  )
-                "
-                class="mt-2 space-y-2"
-                role="status"
-              >
-                <p class="text-xs text-destructive">
-                  Required credential missing for {{ requirement.key }}.
-                </p>
-                <div
-                  v-if="
-                    credentials.credentials.some((c) => c.service_id === requirement.service_id)
-                  "
-                  class="flex flex-wrap gap-2"
+              <KeyRound :size="13" class="shrink-0 text-muted-foreground" />
+              <span class="min-w-0 flex-1 truncate">
+                {{ requirement.service_name
+                }}<span v-if="!requirement.required" class="text-muted-foreground">
+                  · optional</span
                 >
-                  <template
-                    v-for="credential in credentials.credentials.filter(
-                      (c) => c.service_id === requirement.service_id,
-                    )"
-                    :key="credential.id"
-                  >
-                    <Button
-                      v-if="credentialConnected(credential)"
-                      size="sm"
-                      variant="outline"
-                      type="button"
-                      :disabled="disabled"
-                      @click="toggleCredential(credential)"
-                      >{{ credential.name }}</Button
-                    >
-                    <Button
-                      v-else-if="canManageOAuth(credential)"
-                      size="sm"
-                      variant="outline"
-                      type="button"
-                      :disabled="disabled"
-                      @click="emit('reconnectCredential', credential.id)"
-                      >{{ credential.name }} · Reconnect</Button
-                    >
-                    <span v-else class="text-xs text-muted-foreground"
-                      >{{ credential.name }} · Owner/admin must reconnect</span
-                    >
-                  </template>
-                </div>
-                <p v-else class="text-xs text-muted-foreground">
-                  No matching credential is available.
-                </p>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  type="button"
+              </span>
+              <span v-if="requirement.credential_id" class="text-muted-foreground">{{
+                credentialSourceLabel(requirement)
+              }}</span>
+              <template v-else>
+                <Select
+                  v-if="choicesFor(requirement).length"
+                  :model-value="attachedFor(requirement)?.id"
                   :disabled="disabled"
-                  @click="emit('addCredential', requirement.service_id)"
-                  >Add {{ requirement.service_name }} credential</Button
+                  @update:model-value="chooseFor(requirement, $event)"
                 >
-              </div>
-              <div v-else-if="!requirement.required" class="mt-2 space-y-2">
-                <p
-                  v-if="
-                    selectedCredentialRecords.some(
-                      (credential) =>
-                        credential.service_id === requirement.service_id &&
-                        credentialConnected(credential),
-                    )
-                  "
-                  class="text-xs text-muted-foreground"
-                >
-                  Selected:
-                  {{
-                    selectedCredentialRecords.find(
-                      (credential) =>
-                        credential.service_id === requirement.service_id &&
-                        credentialConnected(credential),
-                    )?.name
-                  }}
-                </p>
-                <template
-                  v-for="credential in credentials.credentials.filter(
-                    (entry) =>
-                      entry.service_id === requirement.service_id && !credentialConnected(entry),
-                  )"
-                  :key="credential.id"
-                >
+                  <SelectTrigger
+                    size="sm"
+                    class="h-7! w-44 text-xs"
+                    :aria-invalid="isMissing(requirement) || undefined"
+                    :aria-label="`Credential for ${requirement.service_name}`"
+                    ><SelectValue placeholder="Choose credential"
+                  /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-if="!requirement.required" :value="NONE">None</SelectItem>
+                    <SelectItem
+                      v-for="credential in choicesFor(requirement)"
+                      :key="credential.id"
+                      :value="credential.id"
+                      >{{ credential.name }}</SelectItem
+                    >
+                  </SelectContent>
+                </Select>
+                <template v-for="credential in disconnectedFor(requirement)" :key="credential.id">
                   <Button
                     v-if="canManageOAuth(credential)"
-                    size="sm"
+                    size="xs"
                     variant="outline"
                     type="button"
                     :disabled="disabled"
                     @click="emit('reconnectCredential', credential.id)"
-                    >{{ credential.name }} · Reconnect</Button
+                    >Reconnect {{ credential.name }}</Button
                   >
-                  <span v-else class="text-xs text-muted-foreground">
-                    {{ credential.name }} · Owner/admin must reconnect
-                  </span>
+                  <span v-else class="text-muted-foreground"
+                    >{{ credential.name }} needs its owner to reconnect</span
+                  >
                 </template>
                 <Button
-                  size="sm"
-                  variant="outline"
+                  size="xs"
+                  :variant="
+                    isMissing(requirement) && !choicesFor(requirement).length ? 'default' : 'ghost'
+                  "
                   type="button"
                   :disabled="disabled"
+                  :aria-label="`Add ${requirement.service_name} credential`"
                   @click="emit('addCredential', requirement.service_id)"
-                  >Add optional credential</Button
+                  ><Plus />{{ choicesFor(requirement).length ? '' : 'Add credential' }}</Button
                 >
-              </div>
-              <p v-else class="mt-2 text-xs text-muted-foreground">
-                Selected:
-                {{
-                  selectedCredentialRecords.find(
-                    (credential) =>
-                      credential.service_id === requirement.service_id &&
-                      credentialConnected(credential),
-                  )?.name
-                }}
-              </p>
-            </div>
-          </div>
+              </template>
+            </li>
+          </ul>
         </div>
       </div>
       <p v-else-if="catalogReady" class="text-xs text-muted-foreground">
-        No enabled and published plugins are available in this organization.
+        No plugins are available yet.
       </p>
       <p
         v-if="missingRequired.length"
         class="text-xs text-destructive"
         data-testid="workspace-plugins-blocked"
       >
-        Add or select all required credentials before saving.
+        Choose or add the credentials the selected plugins need before saving.
       </p>
     </section>
 
     <section class="space-y-2">
       <div>
         <h3 class="text-sm font-medium">
-          Workspace credentials <span class="font-normal text-muted-foreground">(optional)</span>
+          Credentials <span class="font-normal text-muted-foreground">(optional)</span>
         </h3>
         <p class="text-xs text-muted-foreground">
-          Credentials are private server-side references; one credential per service is attached.
+          Available to agents in this workspace, e.g. as environment variables or SSH keys. One per
+          service.
         </p>
       </div>
       <div
         v-if="duplicateSelectedServices.length"
-        class="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 p-2"
+        class="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive"
         role="alert"
       >
-        <p class="text-xs text-destructive">Choose only one attached credential per service.</p>
-        <p v-for="serviceId in duplicateSelectedServices" :key="serviceId" class="text-xs">
-          Service {{ serviceId.slice(0, 8) }} has duplicate selections.
-        </p>
+        Choose only one credential per service: {{ duplicateSelectedServices.join(', ') }}.
       </div>
       <div
         v-if="unavailableCredentialIds.length"
@@ -391,7 +386,7 @@ function canManageOAuth(credential: Credential): boolean {
         role="alert"
       >
         <p class="text-xs text-destructive">
-          Some attached credentials are unavailable. Remove them before saving.
+          Some attached credentials no longer exist. Remove them before saving.
         </p>
         <div
           v-for="id in unavailableCredentialIds"
@@ -416,18 +411,18 @@ function canManageOAuth(credential: Credential): boolean {
       >
         Loading credentials…
       </p>
-      <div v-if="credentials.credentials.length" class="max-h-48 space-y-1.5 overflow-y-auto">
+      <div
+        v-if="credentials.credentials.length"
+        class="max-h-48 divide-y divide-border overflow-y-auto rounded-lg border border-border"
+      >
         <button
           v-for="credential in credentials.credentials"
           :key="credential.id"
           type="button"
-          class="flex w-full items-center gap-2 rounded-sm border px-3 py-2 text-left text-sm"
-          :class="
-            credentialIds.includes(credential.id)
-              ? 'border-primary bg-primary/5'
-              : 'border-border hover:bg-muted'
+          class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm hover:bg-muted/40 disabled:opacity-60"
+          :disabled="
+            disabled || (!isCredentialConnected(credential) && !canManageOAuth(credential))
           "
-          :disabled="disabled || (!credentialConnected(credential) && !canManageOAuth(credential))"
           :aria-pressed="credentialIds.includes(credential.id)"
           @click="toggleCredential(credential)"
         >
@@ -441,24 +436,22 @@ function canManageOAuth(credential: Credential): boolean {
             ><Check v-if="credentialIds.includes(credential.id)" :size="10"
           /></span>
           <span class="min-w-0 flex-1 truncate">{{ credential.name }}</span>
-          <span class="text-xs text-muted-foreground"
-            >{{ credential.service_name }} · {{ credential.scope }}</span
-          >
+          <span class="truncate text-xs text-muted-foreground">{{ credential.service_name }}</span>
           <span
-            v-if="credential.credential_type === 'mcp_oauth'"
-            class="text-xs"
-            :class="credential.oauth_connected ? 'text-muted-foreground' : 'text-destructive'"
-            >{{ credential.oauth_connected ? 'OAuth connected' : 'Reconnect required' }}</span
+            v-if="credential.credential_type === 'mcp_oauth' && !credential.oauth_connected"
+            class="text-xs text-destructive"
+            >Reconnect</span
           >
-          <span
+          <Key
             v-else-if="credential.credential_type === 'ssh_key'"
-            class="inline-flex items-center gap-1 text-xs text-muted-foreground"
-            ><Key :size="10" /> SSH key</span
-          >
+            :size="12"
+            class="shrink-0 text-muted-foreground"
+            aria-label="SSH key"
+          />
         </button>
       </div>
       <p v-else-if="!credentials.loading" class="text-xs text-muted-foreground">
-        No credentials available.
+        No credentials yet.
       </p>
     </section>
     <span class="sr-only" :data-ready="readyToSave" />

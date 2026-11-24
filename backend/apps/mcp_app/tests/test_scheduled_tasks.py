@@ -30,7 +30,13 @@ def _provider_ready(monkeypatch):
 
 async def test_weekly_task_lifecycle(world):
     ctx = world.ctx()
-    await ok(ctx, "skill_create", name="Deps", body="Check dependencies.")
+    await ok(
+        ctx,
+        "plugin_create",
+        name="Maintenance",
+        skills=[{"name": "Deps", "body": "Check dependencies."}],
+        enable=False,
+    )
 
     created = await ok(
         ctx,

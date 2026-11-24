@@ -18,9 +18,9 @@ from django.utils import timezone
 from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService, get_harness_service
 from apps.harness.run_settings_service import RunSettingsService
+from apps.plugins.skills import PluginSkillService
 from apps.runners.enums import WorkspaceOperation, WorkspaceStatus
 from apps.runners.services import get_runner_service
-from apps.skills.services import SkillService
 from common.exceptions import ConflictError, NotFoundError
 
 from .models import ScheduledTask, ScheduledTaskRun
@@ -50,14 +50,14 @@ class ScheduledTaskService:
         repository: type[ScheduledTaskRepository] | None = None,
         harness: HarnessService | None = None,
         runner: Any | None = None,
-        skills: SkillService | None = None,
+        skills: PluginSkillService | None = None,
         conversations: ConversationService | None = None,
         run_settings: RunSettingsService | None = None,
     ) -> None:
         self.repository = repository or ScheduledTaskRepository
         self.harness = harness
         self.runner = runner
-        self.skills = skills or SkillService()
+        self.skills = skills or PluginSkillService()
         self.conversations = conversations or ConversationService()
         self.run_settings = run_settings or RunSettingsService(harness=self._harness)
 

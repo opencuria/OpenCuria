@@ -8,6 +8,7 @@ from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
+from apps.plugins.models import Plugin, PluginSkill
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
 from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
@@ -380,10 +381,22 @@ def test_once_schedule_round_trips_and_rejects_past_or_missing_date(
     assert (daily.json()["recurrence"], daily.json()["run_date"]) == ("daily", None)
 
 
+def _personal_skill(user, *, name: str, body: str) -> PluginSkill:
+    """Create a skill inside a personal plugin of *user*."""
+    plugin = Plugin.objects.create(
+        name=f"{name} plugin",
+        slug=f"plugin-{uuid.uuid4().hex[:8]}",
+        owner=user,
+        created_by=user,
+    )
+    return PluginSkill.objects.create(
+        plugin=plugin, name=name, slug=f"skill-{uuid.uuid4().hex[:8]}", body=body
+    )
+
+
 def test_claude_harness_id_round_trips_through_api(schedule_api_setup, monkeypatch):
     from apps.harness.engines.connections import EngineConnectionService
     from apps.harness.harness_service import HarnessService
-    from apps.skills.models import Skill
 
     monkeypatch.setattr(
         HarnessService,
@@ -396,11 +409,8 @@ def test_claude_harness_id_round_trips_through_api(schedule_api_setup, monkeypat
         lambda self, organization_id, user_id, connection_id=None: object(),
     )
     org, owner, stranger, workspace = schedule_api_setup
-    skill = Skill.objects.create(
-        name="Scheduled Claude skill",
-        body="Use owner-specific context",
-        user=owner,
-        created_by=owner,
+    skill = _personal_skill(
+        owner, name="Scheduled Claude skill", body="Use owner-specific context"
     )
     client = schedule_client(
         owner,
@@ -432,11 +442,8 @@ def test_claude_harness_id_round_trips_through_api(schedule_api_setup, monkeypat
     )
     assert with_skill.status_code == 200, with_skill.content
     assert with_skill.json()["skill_ids"] == [str(skill.id)]
-    foreign = Skill.objects.create(
-        name="Another user's skill",
-        body="Private context",
-        user=stranger,
-        created_by=stranger,
+    foreign = _personal_skill(
+        stranger, name="Another user's skill", body="Private context"
     )
     rejected = client.patch(
         f"/api/v1/scheduled-tasks/{response.json()['id']}/",

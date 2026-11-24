@@ -33,12 +33,11 @@ FOUNDATION_DEPENDENCIES = {
     "apps.accounts": set(),
     "apps.organizations": {"apps.accounts"},
     "apps.credentials": {"apps.accounts", "apps.organizations"},
-    "apps.skills": {"apps.accounts", "apps.organizations"},
     "apps.plugins": {"apps.accounts", "apps.organizations", "apps.credentials"},
 }
 
-#: Bounded contexts that other apps may reach only through their ``services``.
-SERVICE_ONLY_CONTEXTS = {"apps.skills"}
+#: Skills only exist inside plugins; consumers select and resolve them here.
+PLUGIN_SKILL_SERVICE = "apps.plugins.skills"
 
 #: Bounded contexts whose repositories are private, with the service to use.
 PRIVATE_REPOSITORY_CONTEXTS = {
@@ -52,7 +51,8 @@ PRIVATE_REPOSITORY_CONTEXTS = {
     ),
     "apps.plugins": (
         "read and replace workspace plugin selections through "
-        "apps.plugins.services.PluginService"
+        "apps.plugins.services.PluginService and select skills through "
+        "apps.plugins.skills.PluginSkillService"
     ),
 }
 
@@ -67,7 +67,6 @@ REPOSITORY_ONLY_APPS = {
     "apps.organizations",
     "apps.plugins",
     "apps.scheduled_tasks",
-    "apps.skills",
     "apps.workspace_files",
 }
 
@@ -1155,21 +1154,25 @@ def test_foundational_apps_never_import_the_apps_built_on_them(trees, dependenci
     assert not violations, "\n".join(sorted(violations))
 
 
-def test_service_only_contexts_are_reached_through_their_services(dependencies):
-    """Consumers call e.g. ``SkillService``; its repositories stay private."""
-    assert "apps.skills.services" in dependencies["apps.harness.harness_service"]
+def test_skills_are_reached_through_the_plugin_skill_service(dependencies):
+    """Skill consumers call ``PluginSkillService``; no standalone skill app."""
+    consumers = (
+        "apps.harness.harness_service",
+        "apps.harness.run_preparation",
+        "apps.harness.session_settings_service",
+        "apps.scheduled_tasks.services",
+        "apps.mcp_app.resolve",
+    )
+    for module in consumers:
+        assert PLUGIN_SKILL_SERVICE in dependencies[module], module
 
     violations = sorted(
         f"{module} -> {imported}"
         for module, imported_modules in dependencies.items()
-        for context in SERVICE_ONLY_CONTEXTS
-        if module != context and not module.startswith(f"{context}.")
         for imported in imported_modules
-        if imported.startswith(f"{context}.")
-        and imported != f"{context}.services"
-        and not imported.startswith(f"{context}.services.")
+        if imported == "apps.skills" or imported.startswith("apps.skills.")
     )
-    assert not violations, "\n".join(sorted(violations))
+    assert not violations, "\n".join(violations)
 
 
 def _registry_lookups(tree: ast.AST) -> list[int]:

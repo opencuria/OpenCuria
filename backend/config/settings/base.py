@@ -61,7 +61,6 @@ INSTALLED_APPS = [
     "apps.scheduled_tasks",
     "apps.notifications",
     "apps.plugins",
-    "apps.skills",
     "apps.mcp_app",
     "apps.mobile_apps",
     "apps.workspace_files",

@@ -21,9 +21,9 @@ from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import HarnessSessionRepository
 from apps.harness.tests.helpers import attach_run_context
 from apps.organizations.models import Membership, MembershipRole, Organization
+from apps.plugins.models import OrgPluginActivation, Plugin, PluginSkill
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
-from apps.skills.models import Skill
 from common.utils import generate_api_token, hash_token
 
 
@@ -63,6 +63,21 @@ READ = [APIKeyPermission.HARNESS_READ.value]
 RUN = [APIKeyPermission.HARNESS_RUN.value]
 
 
+def _plugin_skill(*, name: str, body: str, owner=None, organization=None):
+    """Create a skill in a personal plugin or a released organization plugin."""
+    plugin = Plugin.objects.create(
+        name=f"{name} plugin",
+        slug=f"plugin-{uuid.uuid4().hex[:8]}",
+        owner=owner,
+        organization=organization,
+    )
+    if organization is not None:
+        OrgPluginActivation.objects.create(organization=organization, plugin=plugin)
+    return PluginSkill.objects.create(
+        plugin=plugin, name=name, slug=f"skill-{uuid.uuid4().hex[:8]}", body=body
+    )
+
+
 @pytest.fixture
 def session_setup(db):
     """Org, users, workspace, and skills for session tests."""
@@ -100,24 +115,11 @@ def session_setup(db):
         status=WorkspaceStatus.RUNNING,
         created_by=stranger,
     )
-    org_skill = Skill.objects.create(
-        name="Org Skill",
-        body="Always use type hints.",
-        organization=org,
-        created_by=owner,
+    org_skill = _plugin_skill(
+        name="Org Skill", body="Always use type hints.", organization=org
     )
-    personal_skill = Skill.objects.create(
-        name="Personal",
-        body="Prefer pytest.",
-        user=owner,
-        created_by=owner,
-    )
-    foreign_skill = Skill.objects.create(
-        name="Foreign",
-        body="secret",
-        user=stranger,
-        created_by=stranger,
-    )
+    personal_skill = _plugin_skill(name="Personal", body="Prefer pytest.", owner=owner)
+    foreign_skill = _plugin_skill(name="Foreign", body="secret", owner=stranger)
     return {
         "org": org,
         "owner": owner,

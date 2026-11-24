@@ -158,6 +158,13 @@ class ToolRegistry:
         log.debug("tool_registered", tool=tool.name)
         return tool
 
+    def unregister(self, name: str) -> Tool | None:
+        """Remove and return the tool registered as *name*, if any."""
+        tool = self._tools.pop(name.strip().lower(), None)
+        if tool is not None:
+            log.debug("tool_unregistered", tool=tool.name)
+        return tool
+
     def get(self, name: str) -> Tool:
         """Return the tool registered as *name*."""
         try:

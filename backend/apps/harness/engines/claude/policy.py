@@ -15,6 +15,7 @@ from ...permissions.evaluator import (
     combine_decisions,
 )
 from ...tools.base import ToolRegistry
+from .servers import managed_wire_name
 
 # Claude Code native tools mapped to OpenCuria registry/policy keys.
 NATIVE_TOOL_KEYS: dict[str, str] = {
@@ -76,10 +77,10 @@ def tool_identity(
 ) -> tuple[str, str, str]:
     """Return (event tool, permission key, action) for Claude tool calls."""
     raw_name = str(source_name or "")
-    if raw_name.startswith("mcp__opencuria__"):
+    wire_name = managed_wire_name(raw_name)
+    if wire_name is not None:
         # A configured MCP tool is always resolved by the exact registry wire
         # name; never reinterpret source names as Claude-native tool names.
-        wire_name = raw_name.removeprefix("mcp__opencuria__")
         try:
             registered = tools.get(wire_name)
         except KeyError:
@@ -271,7 +272,7 @@ def decide_tool(
     raw_source = str(source_name or "")
     # Explicit hook routing prevents native names such as Write being treated
     # as similarly named registry tools, and MCP wire identities stay exact.
-    if raw_source.startswith("mcp__opencuria__"):
+    if managed_wire_name(raw_source) is not None:
         event_tool, key, action = tool_identity(
             source_name, arguments, tools, cwd=cwd, guest=guest
         )

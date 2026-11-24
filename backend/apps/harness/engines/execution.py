@@ -7,14 +7,16 @@ import math
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from asgiref.sync import sync_to_async
 
-from apps.skills.services import SkillService
+from apps.plugins.skills import PluginSkillService
 from common.exceptions import ConflictError
 
+from ..mcp_client.reload import PluginReloader
 from ..models import HarnessRunStatus, HarnessSessionStatus
 from ..providers.base import LLMMessage
 from ..run_timeline import tail_remainder
@@ -95,6 +97,7 @@ async def execute_external_run(
     key = str(session.id)
     ownership = context.get("ownership")
     mcp_runtime = None
+    plugin_reloader: PluginReloader | None = None
     accessor = None
     engine = None
     runtime = None
@@ -168,6 +171,25 @@ async def execute_external_run(
                     session_id=key,
                     skipped=mcp_runtime.skipped,
                 )
+            if engine_id == "claude":
+                # Codex threads keep the dynamic tools they started with.
+                plugin_reloader = PluginReloader(
+                    fingerprint=partial(
+                        ports.plugin_runtime.fingerprint, session.workspace_id
+                    ),
+                    prepare=partial(
+                        ports.plugin_runtime.prepare,
+                        session.workspace_id,
+                        organization_id,
+                    ),
+                    runtime=mcp_runtime,
+                    registry=tools,
+                    accessor=accessor,
+                    session_id=key,
+                    turn_id=str(assistant.id),
+                    runtime_options=computer_options,
+                )
+                await plugin_reloader.prime()
         runtime = await prepare_external_runtime(
             register_provider_use=ports.register_provider_use,
             resolve_engine_auth=ports.resolve_engine_auth,
@@ -189,7 +211,7 @@ async def execute_external_run(
             workspace_id=str(session.workspace_id),
             organization_id=str(organization_id),
             current_user_message_id=str(context.get("user_message_id", "")),
-            skills=SkillService.merge_bodies(
+            skills=PluginSkillService.merge_bodies(
                 context.get("skill_bodies", []),
                 mcp_snapshot.snapshot.plugin_skills if mcp_snapshot else [],
             ),
@@ -200,6 +222,9 @@ async def execute_external_run(
                 session, assistant, **kw
             ),
             steering=context.get("steering"),
+            refresh_plugins=(
+                plugin_reloader.check if plugin_reloader is not None else None
+            ),
             run_subagent=lambda args, ctx, subtask_id: ports.run_subagent_tool(
                 parent=session,
                 args=args,
@@ -418,6 +443,8 @@ async def execute_external_run(
                             mcp_runtime, session, assistant
                         )
                     finally:
+                        if plugin_reloader is not None:
+                            await plugin_reloader.aclose()
                         await mcp_runtime.aclose()
                 except asyncio.CancelledError:
                     current = asyncio.current_task()

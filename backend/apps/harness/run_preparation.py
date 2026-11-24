@@ -11,8 +11,8 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from apps.plugins.skills import PluginSkillService
 from apps.runners.services.workspace_admission import WorkspaceAdmissionService
-from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError
 
 from .models import (
@@ -49,7 +49,7 @@ class RunPreparationPorts:
     run_service_for_engine: Callable[..., Any]
     session_settings: SessionSettingsService
     sessions: type[HarnessSessionRepository]
-    skills: SkillService
+    skills: PluginSkillService
     user_abort_requested: Callable[..., Any]
     validate_provider_for_run: Callable[..., Any]
     workspace_admission: WorkspaceAdmissionService
@@ -204,9 +204,9 @@ class RunPreparation:
         captured_settings.retain_execution_settings(session)
         if engine_id == "claude":
             effective_skill_ids = (
-                SkillService.normalize_ids(skill_ids)
+                PluginSkillService.normalize_ids(skill_ids)
                 if skill_ids is not None
-                else SkillService.normalize_ids(list(session.skill_ids or []))
+                else PluginSkillService.normalize_ids(list(session.skill_ids or []))
             )
             from .engines.claude.runtime_state import validate_claude_skills
 
@@ -234,7 +234,7 @@ class RunPreparation:
                     "A user is required to validate selected skills"
                 )
             if _edit_message_id is not None:
-                session.skill_ids = SkillService.normalize_ids(skill_ids)
+                session.skill_ids = PluginSkillService.normalize_ids(skill_ids)
             else:
                 session = await sync_to_async(
                     self.ports.session_settings.update_skill_ids

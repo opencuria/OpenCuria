@@ -114,7 +114,7 @@ describe("client boundaries", () => {
 
   it("leaves every chat-core function to chat-core", () => {
     const shared = sharedFunctions();
-    expect(shared).toContain("setMcpTransport");
+    expect(shared).toContain("setMcpKind");
     const copies = CLIENT_SOURCES.flatMap((root) => {
       const dir = new URL(root, REPO);
       return sourceFiles(dir).flatMap((path) =>

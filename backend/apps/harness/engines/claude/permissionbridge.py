@@ -22,6 +22,7 @@ from .policy import (
     registry_tool_identity,
     tool_identity,
 )
+from .servers import managed_wire_name
 
 
 class PermissionBridge:
@@ -323,9 +324,10 @@ class PermissionBridge:
 
         async def pre_tool_use(hook_input, tool_use_id, _context):
             wire = str(hook_input.get("tool_name") or "")
-            source = wire.removeprefix("mcp__opencuria__")
+            managed = managed_wire_name(wire)
+            source = managed if managed is not None else wire
             registry_source = engine._wire_to_registry.get(source, source)
-            is_mcp = wire.startswith("mcp__opencuria__")
+            is_mcp = managed is not None
             policy_source = registry_source if is_mcp else source
             arguments = hook_input.get("tool_input")
             arguments = arguments if isinstance(arguments, dict) else {}
@@ -577,7 +579,7 @@ class PermissionBridge:
         """Resolve native SDK ask requests through OpenCuria's permission gate."""
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-        is_mcp = source_name.startswith("mcp__opencuria__")
+        is_mcp = managed_wire_name(source_name) is not None
         arguments = (
             dict(arguments)
             if is_mcp
@@ -623,7 +625,7 @@ class PermissionBridge:
                 )
         registry_name = ""
         if is_mcp:
-            wire = source_name.removeprefix("mcp__opencuria__")
+            wire = managed_wire_name(source_name) or source_name
             registry_name = engine._wire_to_registry.get(wire, wire)
             if not call_id or not state:
                 return PermissionResultDeny(

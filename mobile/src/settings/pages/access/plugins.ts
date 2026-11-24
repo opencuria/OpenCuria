@@ -1,76 +1,67 @@
+import type { PluginMcpForm } from "@opencuria/chat-core/pluginForms";
+import {
+  credentialSourceLabel,
+  mcpEndpoint,
+  mcpTransportLabel,
+  pluginAvailability,
+  pluginContents,
+  serverVariableList,
+} from "@opencuria/chat-core/plugins";
 import type {
   Plugin,
   PluginCredentialRequirement,
   PluginMcpServer,
 } from "@opencuria/client";
-import { pluginAvailability } from "@opencuria/chat-core/plugins";
-import { credentialTypeLabel } from "./credentials";
+import type { NativeFormTone } from "../../../ui/NativeForm.types";
 import { count } from "../../format";
+import { credentialTypeLabel } from "./credentials";
 
-/** "STDIO", "Streamable HTTP", "SSE" or "Built-in". */
-export function transportLabel(transport: string): string {
-  switch (transport) {
-    case "builtin":
-      return "Built-in";
-    case "streamable_http":
-      return "Streamable HTTP";
-    case "stdio":
-      return "STDIO";
-    default:
-      return transport.toUpperCase();
-  }
+/**
+ * "1 skill · 2 MCP servers"; admins also see whether a shared plugin is
+ * available in the organization (release is an admin setting).
+ */
+export function pluginSummary(
+  plugin: Plugin,
+  isAdmin: boolean,
+): { text: string; tone: NativeFormTone } {
+  const availability =
+    isAdmin && plugin.scope !== "personal" ? pluginAvailability(plugin) : "";
+  return {
+    text: [pluginContents(plugin), availability].filter(Boolean).join(" · "),
+    tone: availability === "Available" ? "success" : "muted",
+  };
 }
 
-/** The command line of a stdio server, otherwise its URL. */
-export function mcpEndpoint(
-  server: Pick<PluginMcpServer, "transport" | "command" | "args" | "url">,
-): string {
-  return server.transport === "stdio"
-    ? [server.command, ...(server.args ?? [])].filter(Boolean).join(" ")
-    : server.url;
-}
-
-/** "STDIO · npx -y @playwright/mcp" or "Streamable HTTP · OAuth · https://…". */
-export function mcpSubtitle(server: PluginMcpServer): string {
+/** "Command · npx -y pkg · 1 secret" or "Streamable HTTP · https://…". */
+export function mcpServerSubtitle(server: PluginMcpServer): string {
+  const secrets = serverVariableList(server).filter(
+    (variable) => variable.secret,
+  ).length;
   return [
-    transportLabel(server.transport),
-    server.auth_type === "oauth" ? "OAuth" : "",
+    mcpTransportLabel(server.transport),
     mcpEndpoint(server),
+    secrets ? count(secrets, "secret") : "",
   ]
     .filter(Boolean)
     .join(" · ");
 }
 
-/** "Global" or "Organization". */
-export function pluginOwner(plugin: Plugin): string {
-  return plugin.is_global ? "Global" : "Organization";
+/** The same summary for a server being edited. */
+export function mcpFormSubtitle(mcp: PluginMcpForm): string {
+  return mcp.kind === "command"
+    ? ["Command", mcp.commandLine.trim()].filter(Boolean).join(" · ")
+    : [mcpTransportLabel(mcp.transport), mcp.url.trim()]
+        .filter(Boolean)
+        .join(" · ");
 }
 
-/** "Global · 2 skills · 1 MCP server · 1 service"; empty parts are left out. */
-export function pluginSubtitle(plugin: Plugin): string {
-  const skills = plugin.skills?.length ?? 0;
-  const servers = plugin.mcp_servers?.length ?? 0;
-  const services = plugin.credential_requirements.length;
-  return [
-    pluginOwner(plugin),
-    skills ? count(skills, "skill") : "",
-    servers ? count(servers, "MCP server") : "",
-    services ? count(services, "service") : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-/** "Active", "Inactive" or "Unpublished" for the organization. */
-export function pluginStatus(plugin: Plugin): string {
-  return pluginAvailability(plugin);
-}
-
-/** "Required · ENV" plus the requirement's description. */
+/** "Uses “Work token”" or "Required · Each workspace adds its own", plus the description. */
 export function requirementSubtitle(
   requirement: PluginCredentialRequirement,
 ): string {
-  const summary = `${requirement.required ? "Required" : "Optional"} · ${credentialTypeLabel(requirement.credential_type)}`;
+  const summary = requirement.credential_id
+    ? credentialSourceLabel(requirement)
+    : `${requirement.required ? "Required" : "Optional"} · ${credentialTypeLabel(requirement.credential_type)} · ${credentialSourceLabel(requirement)}`;
   return requirement.description
     ? `${summary} · ${requirement.description}`
     : summary;

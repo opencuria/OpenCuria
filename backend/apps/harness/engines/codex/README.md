@@ -33,8 +33,9 @@ and transports; it makes no model, prompt, tool or permission decisions.
   missing or mismatched state never falls back to an older checkpoint.
 - Clear `codex_dirty` only after terminal state, confirmed process-tree closure and
   a persisted checkpoint.
-- Dynamic tool signatures are immutable on resume; incompatible changes need a fork
-  or new chat. Role, depth and policy are checked on every dispatch.
+- A thread keeps the dynamic tools it started with; tools of plugins enabled
+  later arrive with the next chat, removed ones answer with an error. Role, depth
+  and policy are checked on every dispatch.
 - Native question/plan tools are replaced by OpenCuria's question/todo tools; no
   duplicate file/shell tools are advertised. Codex runs subagents natively.
 - Steering sends `turn/steer` before acknowledging delivery; uncertain transport

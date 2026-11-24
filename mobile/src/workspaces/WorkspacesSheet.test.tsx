@@ -83,11 +83,8 @@ const plugin = {
   name: "GitHub",
   slug: "github",
   description: "Issues and pull requests",
-  enabled: true,
-  published: true,
+  available: true,
   organization_id: null,
-  is_global: true,
-  org_enabled: true,
   credential_requirements: [
     {
       id: "requirement",
@@ -414,7 +411,7 @@ it("shows the license state of a Windows workspace in its details", async () => 
   linux.tree.unmount();
 });
 
-it("blocks creation until required plugin credentials are selected", async () => {
+it("attaches plugin credentials and blocks creation without them", async () => {
   const { client, onRefresh, tree } = renderSheet();
   await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
@@ -431,7 +428,17 @@ it("blocks creation until required plugin credentials are selected", async () =>
   fireEvent.press(
     within(sheet).getByRole("button", { name: "Add repository" }),
   );
+  // Enabling the plugin attaches the only matching credential.
   fireEvent.press(within(sheet).getByRole("switch", { name: "GitHub" }));
+  expect(within(sheet).getByText("Uses GitHub token")).toBeTruthy();
+  expect(
+    within(sheet).getByRole("switch", { name: "Personal GitHub" }),
+  ).toBeChecked();
+
+  // Without it, creation is blocked.
+  fireEvent.press(
+    within(sheet).getByRole("switch", { name: "Personal GitHub" }),
+  );
   expect(
     within(sheet).getByText("Select a GitHub token credential below"),
   ).toBeTruthy();

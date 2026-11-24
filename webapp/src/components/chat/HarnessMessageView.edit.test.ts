@@ -51,11 +51,10 @@ function seedSkills(): void {
     {
       id: 'skill-1',
       name: 'Lint rules',
-      body: 'Always lint',
+      description: 'Always lint',
+      plugin_id: 'plugin-1',
+      plugin_name: 'Team tools',
       scope: 'personal',
-      created_by_email: null,
-      created_at: '2026-03-29T10:00:00.000Z',
-      updated_at: '2026-03-29T10:00:00.000Z',
     },
   ]
 }

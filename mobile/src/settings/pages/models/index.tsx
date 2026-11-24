@@ -4,11 +4,9 @@ import { AgentsPage } from "./AgentsPage";
 import { ProviderAccountPage } from "./ProviderAccountPage";
 import { ProviderAccountsPage } from "./ProviderAccountsPage";
 import { ProvidersPage } from "./ProvidersPage";
-import { SkillPage } from "./SkillPage";
-import { SkillsPage } from "./SkillsPage";
 
 /**
- * Pages for Provider & Models, Agents and Skills.
+ * Pages for Provider & Models and Agents.
  * Returns `undefined` for routes this group does not own.
  */
 export function renderModelsRoute(
@@ -37,12 +35,6 @@ export function renderModelsRoute(
     }
     case "agents":
       return <AgentsPage />;
-    case "skills":
-      return <SkillsPage />;
-    case "skill":
-      return argument ? (
-        <SkillPage skillId={argument === "new" ? null : argument} />
-      ) : undefined;
     default:
       return undefined;
   }

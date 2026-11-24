@@ -4,6 +4,7 @@ import * as pluginsApi from '@/services/plugins.api'
 import { usePluginStore } from '@/stores/plugins'
 import { createPinia, setActivePinia } from 'pinia'
 import { toast } from 'vue-sonner'
+import type { Plugin } from '@opencuria/chat-core/plugins'
 
 vi.mock('vue-sonner', () => ({
   toast: {
@@ -28,17 +29,20 @@ vi.mock('@/stores/auth', () => ({
 
 const listPluginsMock = vi.mocked(pluginsApi.listPlugins)
 
-function makePlugin(overrides: Record<string, unknown> = {}) {
+function makePlugin(overrides: Partial<Plugin> = {}): Plugin {
   return {
     id: 'plugin-1',
     name: 'Playwright',
     slug: 'playwright',
     description: 'Browser automation',
+    scope: 'builtin',
     enabled: true,
     published: true,
     organization_id: null,
     is_global: true,
     org_enabled: false,
+    available: false,
+    editable: false,
     skills: [],
     mcp_servers: [],
     credential_requirements: [],
@@ -102,6 +106,35 @@ describe('plugin store', () => {
     expect(store.plugins).toHaveLength(0)
   })
 
+  it('lists only plugins the user can enable as available', () => {
+    const store = usePluginStore()
+    store.plugins = [
+      makePlugin({ id: 'unreleased' }),
+      makePlugin({ id: 'mine', scope: 'personal', available: true, editable: true }),
+      makePlugin({ id: 'released', available: true, org_enabled: true }),
+    ]
+    expect(store.availablePlugins.map((plugin) => plugin.id)).toEqual(['mine', 'released'])
+  })
+
+  it('keeps the message of a failed save for the editor and clears it on success', async () => {
+    const store = usePluginStore()
+    vi.mocked(pluginsApi.createPlugin).mockRejectedValueOnce(new Error('Name is taken.'))
+    expect(await store.createPlugin({ name: 'Playwright' })).toBeNull()
+    expect(store.lastError).toBe('Name is taken.')
+    expect(toast.error).toHaveBeenCalledWith(
+      'Creation failed',
+      expect.objectContaining({ description: 'Name is taken.' }),
+    )
+
+    vi.mocked(pluginsApi.updatePlugin).mockRejectedValueOnce(new Error('Forbidden.'))
+    expect(await store.updatePlugin('plugin-1', { name: 'Renamed' })).toBeNull()
+    expect(store.lastError).toBe('Forbidden.')
+
+    vi.mocked(pluginsApi.updatePlugin).mockResolvedValueOnce(makePlugin({ name: 'Renamed' }))
+    expect(await store.updatePlugin('plugin-1', { name: 'Renamed' })).not.toBeNull()
+    expect(store.lastError).toBeNull()
+  })
+
   it('toggles org activation and surfaces failures', async () => {
     const store = usePluginStore()
     store.plugins = [makePlugin()]
@@ -122,7 +155,7 @@ describe('plugin store', () => {
   it('tracks concurrent toggles per plugin id', async () => {
     const store = usePluginStore()
     store.plugins = [makePlugin(), makePlugin({ id: 'plugin-2', name: 'Other' })]
-    let resolveToggle!: (value: ReturnType<typeof makePlugin>) => void
+    let resolveToggle!: (value: Plugin) => void
     vi.mocked(pluginsApi.togglePluginActivation).mockImplementation(
       (_id: string) =>
         new Promise((resolve) => {
@@ -138,8 +171,8 @@ describe('plugin store', () => {
 
   it('discards stale catalog fetches after an org switch', async () => {
     const store = usePluginStore()
-    let firstResolve!: (value: ReturnType<typeof makePlugin>[]) => void
-    const first = new Promise<ReturnType<typeof makePlugin>[]>((resolve) => {
+    let firstResolve!: (value: Plugin[]) => void
+    const first = new Promise<Plugin[]>((resolve) => {
       firstResolve = resolve
     })
     listPluginsMock.mockReturnValueOnce(first)

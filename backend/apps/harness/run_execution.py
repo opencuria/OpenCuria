@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import anyio
@@ -13,11 +14,11 @@ import structlog
 from asgiref.sync import sync_to_async
 
 from apps.runners.services.workspace_plugin_runtime import WorkspacePluginRuntimeService
-from apps.skills.services import SkillService
 from common.exceptions import NotFoundError
 
 from .engines.base import RunOptions
 from .interaction_service import InteractionService
+from .mcp_client.reload import PluginChange, PluginReloader
 from .models import (
     HarnessMessage,
     HarnessSession,
@@ -31,8 +32,21 @@ from .run_timeline import (
     RunTimeline,
     tail_remainder,
 )
+from .tools.base import ToolRegistry
+from .tools.skill import SkillCatalog, SkillTool
 
 log = structlog.get_logger(__name__)
+
+
+async def _refresh_plugins(
+    reloader: PluginReloader, tools: ToolRegistry
+) -> PluginChange | None:
+    """Apply mid-run plugin changes; offer the skill tool once skills exist."""
+    change = await reloader.check()
+    if change and reloader.catalog and "skill" not in tools:
+        tools.register(SkillTool(reloader.catalog))
+        change.tools.added_tools.append("skill")
+    return change
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -98,6 +112,7 @@ class RunExecution:
         self.ports.run_registry.ensure(key).execution_started = True
         engine_id = (getattr(session, "harness_id", "native") or "native").strip()
         mcp_runtime = None
+        plugin_reloader: PluginReloader | None = None
         phase = "startup"
         if engine_id != "native":
             await self.ports.execute_external_run(
@@ -214,6 +229,7 @@ class RunExecution:
             # snapshot/copy instead of holding the live reference). Prepare
             # runs in the sync ORM context exactly once (snapshot +
             # credential resolution, no second ORM/decrypt round in setup).
+            skill_catalog: SkillCatalog | None = None
             mcp_enabled = accessor is not None and (
                 session.agent_name or ""
             ).strip().lower() not in (
@@ -246,6 +262,31 @@ class RunExecution:
                         session_id=key,
                         skipped=mcp_runtime.skipped,
                     )
+                skill_catalog = SkillCatalog(
+                    mcp_snapshot.snapshot.skill_entries
+                    if mcp_snapshot is not None
+                    else []
+                )
+                plugin_reloader = PluginReloader(
+                    fingerprint=partial(
+                        self.ports.plugin_runtime.fingerprint, session.workspace_id
+                    ),
+                    prepare=partial(
+                        self.ports.plugin_runtime.prepare,
+                        session.workspace_id,
+                        organization_id,
+                    ),
+                    runtime=mcp_runtime,
+                    registry=tools,
+                    accessor=accessor,
+                    catalog=skill_catalog,
+                    session_id=key,
+                    turn_id=str(assistant.id),
+                    runtime_options=computer_options,
+                )
+                await plugin_reloader.prime()
+                if skill_catalog and "skill" not in tools:
+                    tools.register(SkillTool(skill_catalog))
             if self.ports.runner_factory is not None:
                 loop_runner = self.ports.runner_factory(
                     model_resolver=model_resolver,
@@ -283,13 +324,16 @@ class RunExecution:
                         "user_message_id", ""
                     )
                 ),
-                skills=SkillService.merge_bodies(
-                    self.ports.run_registry.get_context(key).get(
-                        "skill_bodies", []
-                    ),
-                    mcp_snapshot.snapshot.plugin_skills
-                    if mcp_snapshot is not None
-                    else [],
+                # Selected skills apply in full; plugin skills are listed and
+                # loaded on demand with the skill tool.
+                skills=list(
+                    self.ports.run_registry.get_context(key).get("skill_bodies", [])
+                ),
+                skill_catalog=skill_catalog,
+                refresh_plugins=(
+                    partial(_refresh_plugins, plugin_reloader, tools)
+                    if plugin_reloader is not None
+                    else None
                 ),
                 steering=self.ports.run_registry.get_context(key).get("steering"),
                 context_length=context_length,
@@ -401,6 +445,8 @@ class RunExecution:
                                     mcp_runtime, session, assistant
                                 )
                             finally:
+                                if plugin_reloader is not None:
+                                    await plugin_reloader.aclose()
                                 await mcp_runtime.aclose()
                         except asyncio.CancelledError:
                             current = asyncio.current_task()

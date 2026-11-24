@@ -42,8 +42,6 @@ import type {
   ScheduledTaskPatch,
   ScheduledTaskRun,
   Skill,
-  SkillCreateInput,
-  SkillUpdateInput,
   SubagentConfig,
   VoiceSettings,
   WindowsLicensing,
@@ -538,16 +536,10 @@ export function createDeletionsApi(getApi: () => ApiClient) {
   };
 }
 
-/** Personal and organization skills (organization skills need an admin). */
+/** Skills of the plugins the user can use; edit them in their plugin. */
 export function createSkillsApi(getApi: () => ApiClient) {
   return {
     list: (signal?: AbortSignal) => getApi().get<Skill[]>("/skills/", signal),
-    create: (input: SkillCreateInput, signal?: AbortSignal) =>
-      getApi().post<Skill>("/skills/", input, signal),
-    update: (skillId: string, input: SkillUpdateInput, signal?: AbortSignal) =>
-      getApi().patch<Skill>(`/skills/${segment(skillId)}/`, input, signal),
-    delete: (skillId: string, signal?: AbortSignal) =>
-      getApi().delete<void>(`/skills/${segment(skillId)}/`, signal),
   };
 }
 

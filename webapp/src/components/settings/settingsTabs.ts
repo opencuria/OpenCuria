@@ -13,7 +13,6 @@ const SETTINGS_TABS = [
   'general',
   'provider',
   'agents',
-  'skills',
   'credentials',
   'plugins',
   'api-keys',
@@ -26,7 +25,11 @@ const SETTINGS_TABS = [
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]
 
+/** Skills live inside plugins; old `skills` links open Plugins. */
+const RENAMED_TABS: Record<string, SettingsTabId> = { skills: 'plugins' }
+
 /** Resolve event or deep-link input to a current tab, defaulting to General. */
 export function resolveSettingsTab(tab: unknown): SettingsTabId {
-  return SETTINGS_TABS.find((id) => id === tab) ?? 'general'
+  const name = typeof tab === 'string' ? (RENAMED_TABS[tab] ?? tab) : tab
+  return SETTINGS_TABS.find((id) => id === name) ?? 'general'
 }
