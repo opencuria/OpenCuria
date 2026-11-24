@@ -49,7 +49,8 @@ certificate) and the credentials of the app it serves:
 cd push-proxy
 cp .env.example .env            # domain, handle key, provider settings
 mkdir -m 700 secrets            # apns.p8 and/or firebase.json go here
-docker compose up -d            # docker compose build first to use this checkout
+sudo chown -R 10001:10001 secrets   # the container runs as UID 10001
+docker compose build && docker compose up -d   # or pull a published image
 curl https://push.example.com/healthz
 ```
 
