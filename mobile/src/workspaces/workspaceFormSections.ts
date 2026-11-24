@@ -6,7 +6,10 @@ import {
   evaluateWorkspacePluginSelection,
   autoAttachCredentials,
   isCredentialConnected,
+  pluginsUsingCredential,
   toggleWorkspaceCredentialSelection,
+  workspaceSelectionSummary,
+  type WorkspaceSelectionSummary,
 } from "@opencuria/chat-core/workspaceConfiguration";
 import {
   areQemuResourcesValid,
@@ -70,10 +73,88 @@ function pluginSubtitle(
   return {
     text:
       available.length === missing.length
-        ? `Select a ${names} credential below`
-        : `Needs a ${names} credential – add it in Settings → Credentials`,
+        ? `Choose a credential for ${names}`
+        : `Add a credential for ${names} in Settings → Credentials`,
     tone: "warning",
   };
+}
+
+const CHOOSE = "";
+const NONE = "__none__";
+
+/**
+ * Rows below an enabled plugin, one per credential it takes from the
+ * workspace: a picker of the matching credentials, or how to get one.
+ */
+function requirementRows(
+  plugin: Plugin,
+  credentials: Credential[],
+  credentialIds: string[],
+  onCredentialIds: (ids: string[]) => void,
+  disabled?: boolean,
+): NativeFormRow[] {
+  return plugin.credential_requirements
+    .filter((requirement) => !requirement.credential_id)
+    .flatMap((requirement): NativeFormRow[] => {
+      const ofService = credentials.filter(
+        (credential) => credential.service_id === requirement.service_id,
+      );
+      const choices = ofService.filter(isCredentialConnected);
+      const id = `requirement-${plugin.id}-${requirement.id}`;
+      const label = requirement.required
+        ? requirement.service_name
+        : `${requirement.service_name} (optional)`;
+      if (!choices.length) {
+        if (!requirement.required) return [];
+        const disconnected = ofService[0];
+        return [
+          {
+            kind: "note",
+            id,
+            symbol: "key.horizontal",
+            tone: "warning",
+            text: disconnected
+              ? `Reconnect ${disconnected.name} in the web app`
+              : `Add a credential for ${requirement.service_name} in Settings → Credentials`,
+          },
+        ];
+      }
+      const attached = choices.find((credential) =>
+        credentialIds.includes(credential.id),
+      );
+      return [
+        {
+          kind: "picker",
+          id,
+          label,
+          symbol: "key.horizontal",
+          value: attached?.id ?? (requirement.required ? CHOOSE : NONE),
+          groups: [
+            {
+              options: [
+                requirement.required
+                  ? { value: CHOOSE, label: "Choose", disabled: true }
+                  : { value: NONE, label: "None" },
+                ...choices.map((credential) => ({
+                  value: credential.id,
+                  label: credential.name,
+                })),
+              ],
+            },
+          ],
+          onChange: (value) => {
+            const others = credentialIds.filter(
+              (entry) =>
+                !ofService.some((credential) => credential.id === entry),
+            );
+            onCredentialIds(
+              value && value !== NONE ? [...others, value] : others,
+            );
+          },
+          disabled,
+        },
+      ];
+    });
 }
 
 /** Plugin and credential sections plus whether the selection can be saved. */
@@ -93,10 +174,16 @@ export function pluginCredentialSections({
   onPluginIds: (ids: string[]) => void;
   onCredentialIds: (ids: string[]) => void;
   disabled?: boolean;
-}): { sections: NativeFormSection[]; valid: boolean } {
+}): {
+  sections: NativeFormSection[];
+  valid: boolean;
+  /** One line for a row linking to these sections; `null` while loading. */
+  summary: WorkspaceSelectionSummary | null;
+} {
   if (catalog.error)
     return {
       valid: false,
+      summary: { text: "Couldn’t load", issue: catalog.error },
       sections: [
         {
           id: "catalog",
@@ -113,6 +200,7 @@ export function pluginCredentialSections({
   if (!catalog.ready)
     return {
       valid: false,
+      summary: null,
       sections: [
         {
           id: "catalog",
@@ -149,23 +237,35 @@ export function pluginCredentialSections({
     if (attached !== credentialIds) onCredentialIds(attached);
   };
   const pluginRows: NativeFormRow[] = [
-    ...selection.catalog.map((plugin): NativeFormRow => {
+    ...selection.catalog.flatMap((plugin): NativeFormRow[] => {
+      const selected = pluginIds.includes(plugin.id);
       const subtitle = pluginSubtitle(
         plugin,
-        pluginIds.includes(plugin.id),
+        selected,
         catalog.credentials,
         selection.selectedCredentials,
       );
-      return {
-        kind: "toggle",
-        id: `plugin-${plugin.id}`,
-        label: plugin.name,
-        subtitle: subtitle.text,
-        subtitleTone: subtitle.tone,
-        value: pluginIds.includes(plugin.id),
-        onChange: () => togglePlugin(plugin.id),
-        disabled,
-      };
+      return [
+        {
+          kind: "toggle",
+          id: `plugin-${plugin.id}`,
+          label: plugin.name,
+          subtitle: subtitle.text,
+          subtitleTone: subtitle.tone,
+          value: selected,
+          onChange: () => togglePlugin(plugin.id),
+          disabled,
+        },
+        ...(selected
+          ? requirementRows(
+              plugin,
+              catalog.credentials,
+              credentialIds,
+              onCredentialIds,
+              disabled,
+            )
+          : []),
+      ];
     }),
     ...selection.unavailablePluginIds.map(
       (id): NativeFormRow => ({
@@ -184,6 +284,9 @@ export function pluginCredentialSections({
     ...catalog.credentials.map((credential): NativeFormRow => {
       const connected = isCredentialConnected(credential);
       const selected = credentialIds.includes(credential.id);
+      const users = selected
+        ? pluginsUsingCredential(selection.catalog, pluginIds, credential)
+        : [];
       return {
         kind: "toggle",
         id: `credential-${credential.id}`,
@@ -191,6 +294,9 @@ export function pluginCredentialSections({
         subtitle: [
           credential.service_name,
           credential.scope === "organization" ? "Organization" : "Personal",
+          users.length
+            ? `Used by ${users.map((plugin) => plugin.name).join(", ")}`
+            : null,
           connected ? null : "Reconnect in the web app",
         ]
           .filter(Boolean)
@@ -229,9 +335,9 @@ export function pluginCredentialSections({
       title: "Plugins",
       rows: pluginRows,
       footer: selection.missingRequired.length
-        ? "Select all required credentials before saving."
-        : undefined,
-      footerTone: "warning",
+        ? "Choose the credentials the selected plugins need before saving."
+        : "Skills and tools for agents in this workspace.",
+      footerTone: selection.missingRequired.length ? "warning" : "muted",
     });
   sections.push({
     id: "credentials",
@@ -250,7 +356,11 @@ export function pluginCredentialSections({
       : "One credential per service. Secrets stay on the server.",
     footerTone: selection.duplicateServiceIds.length ? "danger" : "muted",
   });
-  return { sections, valid: selection.valid };
+  return {
+    sections,
+    valid: selection.valid,
+    summary: workspaceSelectionSummary(selection, pluginIds, credentialIds),
+  };
 }
 
 /** vCPU, memory and storage steppers within the runner's limits. */

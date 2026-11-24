@@ -8,7 +8,9 @@ import {
 import {
   autoAttachCredentials,
   evaluateWorkspacePluginSelection,
+  pluginsUsingCredential,
   toggleWorkspaceCredentialSelection,
+  workspaceSelectionSummary,
 } from "../src/workspaceConfiguration";
 import {
   NEW_IMAGE,
@@ -228,6 +230,64 @@ describe("workspace plugin and credential selection", () => {
       ],
     };
     expect(autoAttachCredentials(own, [], [token])).toEqual([]);
+  });
+
+  it("summarizes the selection and names what blocks saving", () => {
+    const named = {
+      ...plugin,
+      name: "GitHub tools",
+      credential_requirements: [
+        { ...plugin.credential_requirements[0]!, service_name: "GitHub" },
+      ],
+    };
+    const others = ["Notion", "Linear"].map((name) => ({
+      ...plugin,
+      id: name,
+      name,
+      credential_requirements: [],
+    }));
+    const evaluate = (pluginIds: string[], credentialIds: string[]) => {
+      const selection = evaluateWorkspacePluginSelection({
+        plugins: [named, ...others],
+        credentials: [token],
+        organizationId: "org",
+        pluginIds,
+        credentialIds,
+      });
+      return workspaceSelectionSummary(selection, pluginIds, credentialIds);
+    };
+    expect(evaluate([], [])).toEqual({ text: "None", issue: null });
+    expect(evaluate(["plugin-1"], [])).toEqual({
+      text: "GitHub tools",
+      issue: "Missing GitHub credential",
+    });
+    expect(evaluate(["plugin-1", "Notion", "Linear"], ["token"])).toEqual({
+      text: "GitHub tools, Notion +1 · 1 credential",
+      issue: null,
+    });
+    expect(evaluate(["Notion", "gone"], ["token", "missing"])).toEqual({
+      text: "Notion +1 · 2 credentials",
+      issue: "Remove unavailable items",
+    });
+  });
+
+  it("names the selected plugins that use a workspace credential", () => {
+    const own = {
+      ...plugin,
+      id: "own",
+      credential_requirements: [
+        {
+          ...plugin.credential_requirements[0]!,
+          credential_id: "plugin-token",
+        },
+      ],
+    };
+    const users = pluginsUsingCredential(
+      [plugin, own, { ...plugin, id: "off" }],
+      ["plugin-1", "own"],
+      token,
+    );
+    expect(users.map((entry) => entry.id)).toEqual(["plugin-1"]);
   });
 
   it("keeps one credential per service when toggling", () => {

@@ -127,6 +127,8 @@ function mountDialog(
     handleOpen: () => Promise<void>
     handleSubmit: () => Promise<void>
     handleOpenAutoFocus: (event: Event) => void
+    handleEscapeKeyDown: (event: KeyboardEvent) => void
+    page: 'main' | 'access'
     name: string
     selectedPluginIds: string[]
     selectedCredentialIds: string[]
@@ -259,6 +261,8 @@ describe('EditWorkspaceDialog single-patch workspace configuration', () => {
     expect(vm.selectedPluginIds).toEqual(['plugin-2'])
     expect(vm.qemuMemoryMb).toBe(8192)
     expect(vm.desktopWidth).toBe(1600)
+    // Drafts come back from adding a credential, which only the sub page offers.
+    expect(vm.page).toBe('access')
   })
 
   it('submits no patch while shared selector has unsatisfied required dependencies', async () => {
@@ -304,5 +308,90 @@ describe('EditWorkspaceDialog single-patch workspace configuration', () => {
     await vm.handleSubmit()
     expect(mocks.updateWorkspace).toHaveBeenCalledTimes(1)
     expect(vm.open).toBe(true)
+  })
+})
+
+describe('EditWorkspaceDialog Plugins & Credentials page', () => {
+  function saveButton(wrapper: ReturnType<typeof mountDialog>['wrapper']) {
+    return wrapper.get('[data-testid="edit-workspace-save"]')
+  }
+
+  it('summarizes the selection in a row that opens the sub page; Escape goes back', async () => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    const row = wrapper.get('[data-testid="edit-workspace-access"]')
+    const selection = wrapper.findComponent(selectionStub)
+    expect(row.text()).toContain('Loading…')
+
+    selection.vm.$emit('summaryChange', { text: 'GitHub tools · 1 credential', issue: null })
+    await nextTick()
+    expect(row.text()).toContain('Plugins & Credentials')
+    expect(row.text()).toContain('GitHub tools · 1 credential')
+    selection.vm.$emit('summaryChange', {
+      text: 'GitHub tools',
+      issue: 'Missing GitHub credential',
+    })
+    await nextTick()
+    expect(row.text()).toContain('Missing GitHub credential')
+
+    await row.trigger('click')
+    expect(vm.page).toBe('access')
+    expect(wrapper.get('[data-testid="edit-workspace-main"]').attributes('inert')).toBeDefined()
+    expect(wrapper.get('[data-testid="edit-workspace-access-page"]').attributes('inert')).toBe(
+      undefined,
+    )
+
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+    vm.handleEscapeKeyDown(escape)
+    expect(escape.defaultPrevented).toBe(true)
+    expect(vm.page).toBe('main')
+    // On the main page Escape closes the dialog as usual.
+    const close = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+    vm.handleEscapeKeyDown(close)
+    expect(close.defaultPrevented).toBe(false)
+  })
+
+  it('opens on the main page again after closing on the sub page', async () => {
+    vi.useFakeTimers()
+    try {
+      const { wrapper, vm } = mountDialog()
+      await vm.handleOpen()
+      await wrapper.get('[data-testid="edit-workspace-access"]').trigger('click')
+      expect(vm.page).toBe('access')
+      await wrapper
+        .findAll('button')
+        .find((button) => button.text() === 'Cancel')!
+        .trigger('click')
+      vi.advanceTimersByTime(250)
+      expect(vm.page).toBe('main')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('enables Save only for changes and warns that resources restart a running workspace', async () => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = true
+    await nextTick()
+    expect(saveButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="edit-workspace-restart-hint"]').exists()).toBe(false)
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).not.toHaveBeenCalled()
+
+    vm.qemuVcpus = 4
+    await nextTick()
+    expect(saveButton(wrapper).attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-testid="edit-workspace-restart-hint"]').text()).toContain(
+      'Saving restarts the workspace.',
+    )
+  })
+
+  it('does not warn about a restart for a stopped workspace', async () => {
+    const { wrapper, vm } = mountDialog(makeWorkspace({ status: WorkspaceStatus.STOPPED }))
+    await vm.handleOpen()
+    vm.qemuVcpus = 4
+    await nextTick()
+    expect(wrapper.find('[data-testid="edit-workspace-restart-hint"]').exists()).toBe(false)
   })
 })

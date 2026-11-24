@@ -9,6 +9,8 @@ stack that covers every setting of the webapp.
 - `SettingsPage` is one page: a title, `NativeForm` sections, an optional
   primary action (iOS bar / Android button or FAB), overflow actions,
   search, loading and empty states. Pages never draw their own chrome.
+- Other sheets with sub pages (the workspace sheet's "Plugins & Credentials")
+  reuse both with their own `SettingsNavigationContext`.
 - `pages/RootPage.tsx` is the first page: profile, organization card,
   grouped links, the account and, last, Sign out. Page groups:
   `pages/models` (Provider & Models, Agents), `pages/access`

@@ -15,12 +15,14 @@ export interface PluginCredentialRequirementInput {
   key: string;
   required: boolean;
   service_id: string;
+  service_name?: string;
   /** The plugin brings this credential itself; nothing to attach. */
   credential_id?: string | null;
 }
 
 export interface WorkspacePluginInput {
   id: string;
+  name?: string;
   /** Personal plugins, and shared ones released for the organization. */
   available: boolean;
   organization_id: string | null;
@@ -179,5 +181,79 @@ export function evaluateWorkspacePluginSelection<
       !unavailableCredentialIds.length &&
       !duplicateServiceIds.length &&
       !missingRequired.length,
+  };
+}
+
+/** Selected plugins that take the credential from the workspace, e.g. "Used by GitHub tools". */
+export function pluginsUsingCredential<P extends WorkspacePluginInput>(
+  catalog: P[],
+  pluginIds: string[],
+  credential: Pick<WorkspaceCredentialInput, "service_id">,
+): P[] {
+  return catalog.filter(
+    (plugin) =>
+      pluginIds.includes(plugin.id) &&
+      plugin.credential_requirements.some(
+        (requirement) =>
+          !requirement.credential_id &&
+          requirement.service_id === credential.service_id,
+      ),
+  );
+}
+
+export interface WorkspaceSelectionSummary {
+  /** e.g. "GitHub tools, Notion · 2 credentials", or "None". */
+  text: string;
+  /** What blocks saving, e.g. "Missing GitHub credential"; null when it can be saved. */
+  issue: string | null;
+}
+
+function countLabel(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** One line for the plugins and credentials of a workspace and what blocks saving them. */
+export function workspaceSelectionSummary<
+  P extends WorkspacePluginInput,
+  C extends WorkspaceCredentialInput,
+>(
+  selection: WorkspacePluginSelection<P, C>,
+  pluginIds: string[],
+  credentialIds: string[],
+): WorkspaceSelectionSummary {
+  const names = selection.catalog
+    .filter((plugin) => pluginIds.includes(plugin.id))
+    .map((plugin) => plugin.name || "Plugin");
+  const hidden =
+    Math.max(names.length - 2, 0) + selection.unavailablePluginIds.length;
+  const plugins = names.length
+    ? `${names.slice(0, 2).join(", ")}${hidden > 0 ? ` +${hidden}` : ""}`
+    : pluginIds.length
+      ? countLabel(pluginIds.length, "plugin")
+      : null;
+  const credentials = credentialIds.length
+    ? countLabel(credentialIds.length, "credential")
+    : null;
+  const services = [
+    ...new Set(
+      selection.missingRequired.map(
+        ({ requirement }) => requirement.service_name || requirement.key,
+      ),
+    ),
+  ];
+  const issue =
+    services.length === 1
+      ? `Missing ${services[0]} credential`
+      : services.length > 1
+        ? `Missing ${services.length} credentials`
+        : selection.unavailablePluginIds.length ||
+            selection.unavailableCredentialIds.length
+          ? "Remove unavailable items"
+          : selection.duplicateServiceIds.length
+            ? "One credential per service"
+            : null;
+  return {
+    text: [plugins, credentials].filter(Boolean).join(" · ") || "None",
+    issue,
   };
 }
