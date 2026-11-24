@@ -33,8 +33,13 @@ class AppLaunch(
   /** App icon shown while the app starts, if it has one. */
   val iconPath: String?,
   /** Route to the app's workspace backends; null when opened offline. */
-  val gateway: AppGateway.Session?
+  val gateway: AppGateway.Session?,
+  /** What the app companion needs: the app's account and workspace. */
+  val companion: CompanionInfo? = null
 ) {
+  /** The account an app was installed for and the workspace it comes from. */
+  class CompanionInfo(val scope: String, val workspaceId: String?, val versionName: String)
+
   /** The Expo config of the app (`Constants.expoConfig`). */
   val expoConfig: JSONObject
     get() = manifest.optJSONObject("extra")?.optJSONObject("expoClient") ?: JSONObject()
@@ -79,7 +84,14 @@ class AppLaunch(
         orientation = root.optString("orientation", "default"),
         backgroundColor = color,
         iconPath = AppSandbox.iconFile(installDir).takeIf(File::isFile)?.absolutePath,
-        gateway = AppGateway.parse(root.optJSONObject("gateway"))
+        gateway = AppGateway.parse(root.optJSONObject("gateway")),
+        companion = root.optJSONObject("companion")?.let {
+          CompanionInfo(
+            scope = it.optString("scope"),
+            workspaceId = it.optString("workspaceId").takeIf { id -> id.isNotBlank() && id != "null" },
+            versionName = it.optString("versionName")
+          )
+        }
       )
     }
   }

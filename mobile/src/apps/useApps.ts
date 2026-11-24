@@ -280,6 +280,7 @@ export function useApps(
           );
           await installer.install(manifest, {
             scope,
+            workspaceId: app.workspace_id,
             fileRequest: (sha256) =>
               client.apps.fileRequest(app.id, version.id, sha256),
             onProgress: ({ done, total }) =>

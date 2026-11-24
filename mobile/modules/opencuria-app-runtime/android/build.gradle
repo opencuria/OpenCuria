@@ -12,6 +12,12 @@ android {
     versionCode 1
     versionName "0.1.0"
   }
+  // The inspector script installed apps run (shared with iOS).
+  sourceSets {
+    main {
+      assets.srcDirs += ['../inspector']
+    }
+  }
 }
 
 /**

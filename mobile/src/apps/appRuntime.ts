@@ -32,6 +32,15 @@ export interface AppLaunchRequest {
   backgroundColor?: string;
   /** Missing offline: backend requests then fail like without network. */
   gateway?: AppGatewayLaunch;
+  /**
+   * The chat companion over the app: the account the app was installed for
+   * and its workspace, whose chats it shows (`src/apps/companion`).
+   */
+  companion?: {
+    scope: string;
+    workspaceId: string | null;
+    versionName: string;
+  };
 }
 
 interface AppRuntimeModule {

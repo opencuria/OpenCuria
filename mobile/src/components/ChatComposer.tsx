@@ -738,8 +738,13 @@ export function ChatComposer({
   const receiveVoice = voice?.receive;
   useEffect(() => {
     if (!receiveVoice) return;
-    return receiveVoice((text, sendNow) => {
-      const next = appendDictation(draftRef.current, text);
+    return receiveVoice((text, sendNow, recording) => {
+      const next = appendDictation(
+        draftRef.current,
+        text,
+        recording?.path,
+        recording?.kind,
+      );
       const end = { start: next.length, end: next.length };
       nativeSelectionRef.current = false;
       nativeEditTextRef.current = null;

@@ -933,12 +933,23 @@ export interface VoiceTranscribeInput {
   duration_ms: number;
 }
 
-/** Original image pixels or a stored desktop frame a pointer refers to. */
+/** Original image pixels or a recorded desktop or app frame a pointer refers to. */
 export interface VoicePointerTarget {
-  kind: "image" | "desktop";
+  kind: "image" | "desktop" | "app";
   path: string;
   width: number;
   height: number;
+}
+
+/** The app control under a finger (`@opencuria/chat-core/visualRecording`). */
+export interface VoicePointerElement {
+  role?: string;
+  label?: string;
+  text?: string;
+  test_id?: string;
+  type?: string;
+  interactive?: boolean;
+  bounds?: [number, number, number, number];
 }
 
 export interface VoicePointer {
@@ -947,14 +958,36 @@ export interface VoicePointer {
   x: number | null;
   y: number | null;
   target: VoicePointerTarget | null;
+  /** App recordings: a finger that used the app or only pointed. */
+  mode?: "use" | "point";
+  element?: VoicePointerElement;
 }
 
-/** Manifest of a pointing recording; frames were uploaded beforehand. */
+/** A log line, error or backend request of an app recording. */
+export interface VoiceAppEvent {
+  t_ms: number;
+  kind: "log" | "error" | "network";
+  level?: "debug" | "info" | "warn" | "error";
+  message?: string;
+  method?: string;
+  url?: string;
+  status?: number;
+  duration_ms?: number;
+}
+
+/** Manifest of a pointing or app recording; frames were uploaded beforehand. */
 export interface VoiceRecordingInput extends VoiceTranscript {
   recording_id: string;
   duration_ms: number;
   pointers: VoicePointer[];
-  frames: Array<{ t_ms: number; path: string }>;
+  frames: Array<{ t_ms: number; path: string; texts?: string[] }>;
+  events?: VoiceAppEvent[];
+  app?: {
+    app_id: string;
+    name: string;
+    version?: string;
+    platform: "android" | "ios";
+  };
 }
 
 export interface RecentModelUsage {

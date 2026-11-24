@@ -86,4 +86,33 @@ describe("VoiceClipFiles", () => {
     clearVoiceClips();
     expect(new File(await clips.audioUri({ id: "b" })).exists).toBe(false);
   });
+
+  it("keeps an app recording's timeline and frames with its clip until it goes", async () => {
+    const clips = store();
+    const recordingId = "6a1d0f6e-6f8a-4c5e-9a0b-3d2f1e4c5b6a";
+    await clips.adopt("v", recording("file:///cache/rec-3.m4a"));
+    await clips.adopt("w", recording("file:///cache/rec-4.m4a"));
+    await clips.adoptVisual("v", '{"pointers":[],"frames":[]}', [
+      recording("file:///cache/opencuria-app-recordings/000000.jpg", "jpeg"),
+    ]);
+    const visual = await clips.visualUri({ id: "v" });
+    const frame = clips.visualFrameUri(
+      visual,
+      "/workspace/x/frames/000000.jpg",
+    );
+    expect(new File(frame).exists).toBe(true);
+    expect(await clips.visualTimeline({ id: "v" })).toBe(
+      '{"pointers":[],"frames":[]}',
+    );
+    const entry = clip("v", { visual: { kind: "app", recordingId } });
+    await clips.save([
+      entry,
+      clip("w", { visual: { kind: "app", recordingId: "x" } }),
+    ]);
+    // A visual reference that is not a recording id is dropped.
+    expect((await store().load()).map((item) => item.id)).toEqual(["v"]);
+    await clips.remove(entry);
+    expect(new File(frame).exists).toBe(false);
+    expect(await clips.visualTimeline({ id: "v" })).toBeNull();
+  });
 });

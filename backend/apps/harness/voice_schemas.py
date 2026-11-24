@@ -1,4 +1,9 @@
-"""Bounded wire contracts for dictation and synchronized pointing recordings."""
+"""Bounded wire contracts for dictation and synchronized pointing recordings.
+
+Pointing recordings come from the webapp (workspace images, the desktop) and
+from the native app companion (the screen of an open app, its taps, logs and
+backend requests). Limits match `@opencuria/chat-core/visualRecording`.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +18,10 @@ MAX_DURATION_MS = 600_000
 # The base64 JSON fits the configured 12 MiB DATA_UPLOAD_MAX_MEMORY_SIZE.
 MAX_AUDIO_BYTES = 8 * 1024 * 1024
 MAX_AUDIO_BASE64_LENGTH = 4 * ((MAX_AUDIO_BYTES + 2) // 3)
+MAX_FRAMES = 1201
+MAX_APP_EVENTS = 2000
+MAX_FRAME_TEXTS = 40
+MAX_SHORT_TEXT = 120
 
 
 class VoiceModel(Schema):
@@ -74,12 +83,31 @@ class VoiceTranscript(Schema):
 
 
 class VoiceTarget(Schema):
-    """Original image pixels or a stored desktop screenshot coordinate system."""
+    """Original image pixels or a recorded desktop or app frame's pixels."""
 
-    kind: Literal["image", "desktop"]
+    kind: Literal["image", "desktop", "app"]
     path: str = Field(min_length=1, max_length=2048)
     width: int = Field(ge=1, le=32768)
     height: int = Field(ge=1, le=32768)
+
+
+class VoiceElement(Schema):
+    """The app control under a finger, from the app's accessibility tree."""
+
+    role: str = Field(default="", max_length=40)
+    label: str = Field(default="", max_length=MAX_SHORT_TEXT)
+    text: str = Field(default="", max_length=MAX_SHORT_TEXT)
+    test_id: str = Field(default="", max_length=MAX_SHORT_TEXT)
+    type: str = Field(default="", max_length=80)
+    interactive: bool | None = None
+    bounds: tuple[int, int, int, int] | None = None
+
+    @model_validator(mode="after")
+    def positive_bounds(self) -> VoiceElement:
+        """Bounds are a non-negative frame-pixel rectangle."""
+        if self.bounds is not None and any(value < 0 for value in self.bounds):
+            raise ValueError("Element bounds must be non-negative")
+        return self
 
 
 class VoicePointer(Schema):
@@ -90,13 +118,47 @@ class VoicePointer(Schema):
     x: float | None = Field(default=None, allow_inf_nan=False)
     y: float | None = Field(default=None, allow_inf_nan=False)
     target: VoiceTarget | None = None
+    # App recordings: the finger used the app, or only pointed at it.
+    mode: Literal["use", "point"] | None = None
+    element: VoiceElement | None = None
 
 
 class VoiceFrame(Schema):
-    """A desktop frame captured at the given recording-relative time."""
+    """A desktop or app frame captured at the given recording-relative time."""
 
     t_ms: int = Field(ge=0, le=MAX_DURATION_MS)
     path: str = Field(min_length=1, max_length=2048)
+    # Visible texts of an app screen, in reading order.
+    texts: list[str] = Field(default_factory=list, max_length=MAX_FRAME_TEXTS)
+
+    @model_validator(mode="after")
+    def short_texts(self) -> VoiceFrame:
+        """Screen texts stay short."""
+        if any(len(text) > MAX_SHORT_TEXT for text in self.texts):
+            raise ValueError("Frame texts are too long")
+        return self
+
+
+class VoiceAppEvent(Schema):
+    """A log line, error or backend request an open app reported."""
+
+    t_ms: int = Field(ge=0, le=MAX_DURATION_MS)
+    kind: Literal["log", "error", "network"]
+    level: Literal["debug", "info", "warn", "error"] | None = None
+    message: str = Field(default="", max_length=1000)
+    method: str = Field(default="", max_length=12)
+    url: str = Field(default="", max_length=500)
+    status: int | None = Field(default=None, ge=0, le=999)
+    duration_ms: int | None = Field(default=None, ge=0, le=MAX_DURATION_MS * 10)
+
+
+class VoiceAppContext(Schema):
+    """The app an app recording shows."""
+
+    app_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    version: str = Field(default="", max_length=64)
+    platform: Literal["android", "ios"]
 
 
 class VoiceRecordingIn(Schema):
@@ -112,7 +174,9 @@ class VoiceRecordingIn(Schema):
     timing: Literal["provider", "approximate"]
     segments: list[VoiceSegment] = Field(max_length=3000)
     pointers: list[VoicePointer] = Field(max_length=12_000)
-    frames: list[VoiceFrame] = Field(max_length=1201)
+    frames: list[VoiceFrame] = Field(max_length=MAX_FRAMES)
+    events: list[VoiceAppEvent] = Field(default_factory=list, max_length=MAX_APP_EVENTS)
+    app: VoiceAppContext | None = None
 
 
 class VoiceRecordingOut(Schema):

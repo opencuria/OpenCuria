@@ -104,14 +104,17 @@ async function releaseSession(module: AudioModule): Promise<void> {
 /**
  * Start recording into the app's cache. Other audio pauses while the user
  * speaks and the screen stays on, so a long dictation is not cut by the lock.
+ * `mixWithOthers` keeps an open app's own sounds playing (app recordings).
  */
-export async function startVoiceCapture(): Promise<VoiceCapture> {
+export async function startVoiceCapture(
+  options: { mixWithOthers?: boolean } = {},
+): Promise<VoiceCapture> {
   const module = audioModule();
   if (!module) throw new Error("Dictation needs an updated app.");
   await module.setAudioModeAsync({
     allowsRecording: true,
     playsInSilentMode: true,
-    interruptionMode: "doNotMix",
+    interruptionMode: options.mixWithOthers ? "mixWithOthers" : "doNotMix",
   });
   let recorder: Recorder | null = null;
   try {

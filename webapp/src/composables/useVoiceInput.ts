@@ -17,7 +17,8 @@ import {
 import { fileToBase64 } from '@/lib/chatUpload'
 import { createSecureUuid } from '@/lib/secureUuid'
 import { monitorVoiceAudio, type VoiceAudioMonitor } from '@/lib/voiceAudio'
-import { startPointing, type PointingResult } from '@/lib/voicePointing'
+import type { PointingResult } from '@opencuria/chat-core/visualRecording'
+import { startPointing } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
 // The meter scales RMS by 12; ignore low background energy when pacing visuals.

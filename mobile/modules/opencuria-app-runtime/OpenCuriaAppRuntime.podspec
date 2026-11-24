@@ -13,6 +13,8 @@ Pod::Spec.new do |s|
   s.platforms = { :ios => '16.1' }
   s.source = { :path => '.' }
   s.source_files = 'ios/**/*.{h,mm,swift}'
+  # The inspector script installed apps run; shared with Android.
+  s.resources = ['inspector/app-inspector.js']
   s.swift_version = '5.9'
   s.frameworks = 'UIKit', 'Security'
   s.dependency 'ExpoModulesCore'

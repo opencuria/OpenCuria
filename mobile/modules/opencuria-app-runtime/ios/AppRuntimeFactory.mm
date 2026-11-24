@@ -12,7 +12,11 @@
 #import <React/RCTInvalidating.h>
 #import <React/RCTNetworking.h>
 #import <ReactCommon/RCTHost.h>
+#import <jsi/jsi.h>
 #import <react/renderer/runtimescheduler/RuntimeSchedulerBinding.h>
+
+#include <memory>
+#include <string>
 
 #if __has_include(<ExpoModulesCore/ExpoModulesCore-Swift.h>)
 #import <ExpoModulesCore/ExpoModulesCore-Swift.h>
@@ -198,6 +202,46 @@
     self.registerModules(appContext);
   } else {
     [appContext registerNativeModules];
+  }
+  [self installInspectorInRuntime:runtime];
+}
+
+// [JS thread] The sink the inspector script reports to, then the script itself;
+// it hooks requests and errors by itself once the bundle defined them.
+- (void)installInspectorInRuntime:(facebook::jsi::Runtime &)runtime
+{
+  void (^report)(NSString *) = self.onInspectorReport;
+  NSString *script = self.inspectorScript;
+  if (report == nil || script.length == 0) {
+    return;
+  }
+  auto sink = facebook::jsi::Function::createFromHostFunction(
+      runtime,
+      facebook::jsi::PropNameID::forAscii(runtime, "__opencuriaInspectorReport"),
+      1,
+      [report](
+          facebook::jsi::Runtime &rt,
+          const facebook::jsi::Value &,
+          const facebook::jsi::Value *arguments,
+          size_t count) -> facebook::jsi::Value {
+        if (count > 0 && arguments[0].isString()) {
+          std::string json = arguments[0].getString(rt).utf8(rt);
+          NSString *value = [[NSString alloc] initWithBytes:json.data()
+                                                     length:json.size()
+                                                   encoding:NSUTF8StringEncoding];
+          if (value != nil) {
+            report(value);
+          }
+        }
+        return facebook::jsi::Value::undefined();
+      });
+  runtime.global().setProperty(runtime, "__opencuriaInspectorReport", std::move(sink));
+  try {
+    runtime.evaluateJavaScript(
+        std::make_shared<facebook::jsi::StringBuffer>(std::string(script.UTF8String)),
+        "opencuria-app-inspector.js");
+  } catch (const std::exception &) {
+    // The app runs without the inspector.
   }
 }
 

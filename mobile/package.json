@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "AGPL-3.0-only",
-  "main": "expo-router/entry",
+  "main": "index.ts",
   "scripts": {
     "start": "APP_VARIANT=development expo start --dev-client",
     "android": "APP_VARIANT=development expo run:android",

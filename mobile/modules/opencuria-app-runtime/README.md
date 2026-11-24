@@ -34,12 +34,26 @@ data and draws the Android Apps widget.
 - **Workspace backends:** `AppGateway` rewrites `http://<process>.opencuria.local[:port]`
   to the API gateway and adds the session token, which the app never sees. Android
   routes clients created through `OkHttpClientProvider` only.
-- **App menu** (`AppMenuTriggers`, `AppMenuButton`): shaking, a three-finger long
-  press or a draggable menu button opens Close app and Reload. Each way can be turned
-  off, but never the last one; the setting applies to every app.
+- **App companion** (`AppCompanion`): shaking, a three-finger long press or the
+  draggable menu button (`AppMenuTriggers`, `AppMenuButton`; never all off) show a
+  surface of OpenCuria's own React instance (`OpenCuriaAppCompanion`) in a layer
+  above the app. While it exists, OpenCuria's host follows the app activity's
+  lifecycle (Android), so its dialogs, pickers and keyboard work over the app. The
+  layer's touch mode decides who gets touches: `none` (hidden), `all` (sheet,
+  pointer mode) or `regions` (only the recording bar; the app gets the rest).
+  Without OpenCuria's factory (iOS: an app delegate that is no
+  `ExpoReactNativeFactoryProvider`) the native menu with Close app and Reload shows.
+- **Recordings** (`AppRecorder`): while observed, touches on the window are reported
+  with the control under the finger (role, text, `testID`, bounds), and frames of
+  the app's content are captured as JPEG (unchanged pixels and texts are skipped).
+  `inspector/app-inspector.js` runs in the app's JavaScript (Android: around the
+  bundle; iOS: from `host:didInitializeRuntime:`) and reports console output,
+  uncaught errors and requests (no headers, bodies or query values); the latest 300
+  are kept per app.
 - **One app at a time.** A fatal JavaScript error shows Reload/Close instead of
   ending OpenCuria.
 
 JavaScript API (`src/apps/appRuntime.ts`): `open(request)`, `close()`,
-`clearData(appId)` and, on Android, `updateAppsWidget(snapshot)`. Rebuild the
+`clearData(appId)` and, on Android, `updateAppsWidget(snapshot)`; the companion's
+functions and events are in `src/apps/companion/companionNative.ts`. Rebuild the
 development client after native changes. The iOS side has not been built in CI.

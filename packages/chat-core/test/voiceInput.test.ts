@@ -107,8 +107,13 @@ describe("voice input rules", () => {
       "Fix this:\nHello.",
     );
     expect(appendDictation("Draft", "")).toBe("Draft");
-    expect(appendDictation("", "Look.", "/workspace/rec/manifest.json")).toBe(
-      "Look.\n\nPointing recording (transcript, pointer timeline and desktop frames): @file:/workspace/rec/manifest.json",
+    expect(appendDictation("", "Look.", "/workspace/rec/timeline.md")).toBe(
+      "Look.\n\nPointing recording (timeline of the transcript with timestamps, pointer and desktop frames): @file:/workspace/rec/timeline.md",
+    );
+    expect(
+      appendDictation("Draft", " This. ", "/workspace/rec/timeline.md", "app"),
+    ).toBe(
+      "Draft\nThis.\n\nApp recording (timeline of the transcript with timestamps, taps, screens and app logs): @file:/workspace/rec/timeline.md",
     );
   });
 });

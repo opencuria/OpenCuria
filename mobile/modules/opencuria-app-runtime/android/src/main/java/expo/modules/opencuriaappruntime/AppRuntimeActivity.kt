@@ -26,7 +26,6 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDialog
 import androidx.core.view.WindowCompat
-import com.facebook.react.bridge.JSBundleLoader
 import com.facebook.react.common.ShakeDetector
 import com.facebook.react.common.annotations.UnstableReactNativeAPI
 import com.facebook.react.defaults.DefaultComponentsRegistry
@@ -49,9 +48,11 @@ private const val TAG = "OpenCuriaAppRuntime"
  * experience: its JavaScript bundle from local storage, every native module
  * from OpenCuria. The instance never touches OpenCuria's own React host and
  * ends with this activity. Back at the app's root closes it. Shaking, a
- * three-finger long press and the floating menu button open the app menu,
- * each as switched on there ([AppMenuTriggers]); a note at the bottom says
- * how when the app opens.
+ * three-finger long press and the floating menu button open the app
+ * companion ([AppCompanionHost]: OpenCuria's chat for the app's workspace
+ * and recordings), each as switched on ([AppMenuTriggers]); a note at the
+ * bottom says how when the app opens. Builds whose OpenCuria instance cannot
+ * draw the companion show the native app menu instead.
  */
 class AppRuntimeActivity :
   AppCompatActivity(),
@@ -65,6 +66,8 @@ class AppRuntimeActivity :
   /** The app's surface and its loading screen, beneath the menu button. */
   private lateinit var content: FrameLayout
   private lateinit var menuButton: AppMenuButton
+  private lateinit var companionLayer: AppCompanionLayer
+  private lateinit var companion: AppCompanionHost
   private var host: ReactHostImpl? = null
   private var surface: ReactSurface? = null
   /** Identifies the running instance; callbacks of a stopped one are ignored. */
@@ -101,6 +104,7 @@ class AppRuntimeActivity :
       return
     }
     current = WeakReference(this)
+    AppRecorder.reset()
     AppGateway.open(launch.gateway)
     requestedOrientation = launch.requestedOrientation
     // Apps lay out edge to edge with safe-area insets, as in Expo Go; the
@@ -114,11 +118,15 @@ class AppRuntimeActivity :
     container.addView(content, matchParent())
     menuButton = AppMenuButton(this, ::showMenu)
     container.addView(menuButton)
+    companionLayer = AppCompanionLayer(this)
+    container.addView(companionLayer, matchParent())
+    companion = AppCompanionHost(this, launch, companionLayer)
     setContentView(container)
     onBackPressedDispatcher.addCallback(
       this,
       object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
+          if (companion.onBackPressed()) return
           if (host?.onBackPressed() != true) finish()
         }
       }
@@ -133,9 +141,11 @@ class AppRuntimeActivity :
     FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
 
   /** Arm the ways that open the app menu, at start and whenever they change. */
-  private fun applyTriggers() {
+  internal fun applyTriggers() {
     isThreeFingerPressOn = triggers.isEnabled(AppMenuTrigger.THREE_FINGER_PRESS)
-    menuButton.isOn = triggers.isEnabled(AppMenuTrigger.BUTTON)
+    // The companion covers the button while it shows.
+    menuButton.isOn = triggers.isEnabled(AppMenuTrigger.BUTTON) &&
+      companionLayer.touchMode == AppCompanionLayer.TouchMode.NONE
     updateShakeDetector()
   }
 
@@ -165,7 +175,8 @@ class AppRuntimeActivity :
     fun whileCurrent(action: () -> Unit) = runOnUiThread { if (id == instance) action() }
     val delegate = DefaultReactHostDelegate(
       jsMainModulePath = "index",
-      jsBundleLoader = JSBundleLoader.createFileLoader(launch.bundlePath),
+      // The inspector reports the app's logs and requests to the companion.
+      jsBundleLoader = AppInspector.bundleLoader(this, launch.bundlePath),
       reactPackages = AppRuntimePackages.create(application, sandbox) {
         whileCurrent(::restart)
       },
@@ -259,6 +270,7 @@ class AppRuntimeActivity :
 
   private fun onAppFailed(error: Exception) {
     Log.e(TAG, "App ${launch.appId} failed", error)
+    AppRecorder.reportFatal(describe(error))
     if (isFinishing || isDestroyed) return
     stop()
     dialog?.dismiss()
@@ -287,6 +299,10 @@ class AppRuntimeActivity :
 
   private fun showMenu() {
     if (isFinishing || isDestroyed || dialog?.isShowing == true) return
+    if (companion.isAvailable && companion.open()) {
+      applyTriggers()
+      return
+    }
     dialog = AppMenuSheet.show(
       activity = this,
       launch = launch,
@@ -299,6 +315,7 @@ class AppRuntimeActivity :
 
   /** A three-finger long press opens the app menu if on; touches still reach the app. */
   override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+    AppRecorder.onTouch(event, content, companionLayer)
     when (event.actionMasked) {
       MotionEvent.ACTION_POINTER_DOWN ->
         if (isThreeFingerPressOn && event.pointerCount == MENU_FINGERS) {
@@ -319,12 +336,14 @@ class AppRuntimeActivity :
   override fun onResume() {
     super.onResume()
     host?.onHostResume(this, this)
+    companion.resume()
     isInForeground = true
     if (::triggers.isInitialized) updateShakeDetector()
   }
 
   override fun onPause() {
     host?.onHostPause(this)
+    if (::companion.isInitialized) companion.pause()
     isInForeground = false
     if (::triggers.isInitialized) updateShakeDetector()
     super.onPause()
@@ -335,6 +354,8 @@ class AppRuntimeActivity :
     handler.removeCallbacks(showCloseHint)
     shakeDetector.stop()
     dialog?.dismiss()
+    if (::companion.isInitialized) companion.destroy()
+    AppRecorder.stop()
     if (::launch.isInitialized) {
       stop()
       AppGateway.close(launch.gateway)
@@ -353,16 +374,56 @@ class AppRuntimeActivity :
   override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
     super.onActivityResult(requestCode, resultCode, data)
     host?.onActivityResult(this, requestCode, resultCode, data)
+    if (::companion.isInitialized) companion.onActivityResult(requestCode, resultCode, data)
   }
 
   override fun onWindowFocusChanged(hasFocus: Boolean) {
     super.onWindowFocusChanged(hasFocus)
     host?.onWindowFocusChange(hasFocus)
+    if (::companion.isInitialized) companion.onWindowFocusChange(hasFocus)
+  }
+
+  /** Whether the activity is in the foreground, so a new companion resumes at once. */
+  internal val isResumedNow: Boolean
+    get() = isInForeground
+
+  /** Which touches the companion takes ([AppCompanionLayer]). */
+  internal fun setCompanionTouchMode(mode: AppCompanionLayer.TouchMode, regions: List<Double>) {
+    if (!::companion.isInitialized) return
+    companionLayer.setTouchMode(mode, regions)
+    applyTriggers()
+  }
+
+  /** Reload, from the companion's menu. */
+  internal fun reloadApp() {
+    restart()
+  }
+
+  /** Start observing the app for a recording; the content's size in pixels. */
+  internal fun startObservation(id: String): Map<String, Any?> {
+    AppRecorder.start(cacheDir, id)
+    return mapOf("width" to content.width, "height" to content.height, "platform" to "android")
+  }
+
+  /** A frame of the app's content for the recording being observed. */
+  internal fun captureFrame(
+    index: Int,
+    previousFrameId: String?,
+    resolve: (Map<String, Any?>) -> Unit,
+    reject: (Throwable) -> Unit
+  ) {
+    AppRecorder.capture(content, backgroundColor(), index, previousFrameId, resolve, reject)
+  }
+
+  internal fun stopObservation() {
+    AppRecorder.stop()
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {
     super.onConfigurationChanged(newConfig)
     host?.onConfigurationChanged(this)
+    // E.g. dark mode: the companion follows like the app.
+    if (::companion.isInitialized) companion.onConfigurationChanged()
   }
 
   override fun requestPermissions(
@@ -409,6 +470,10 @@ class AppRuntimeActivity :
     fun close() {
       current?.get()?.finish()
     }
+
+    /** The open app's activity, while it is alive. */
+    internal fun open(): AppRuntimeActivity? =
+      current?.get()?.takeUnless { it.isFinishing || it.isDestroyed }
 
     /**
      * Open an app; an app that is already open closes first. The request

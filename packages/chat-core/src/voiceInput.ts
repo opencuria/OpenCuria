@@ -190,16 +190,29 @@ export function voiceMicrophoneMessage(denied: boolean): string {
 }
 
 /**
+ * What a recording beside the transcript shows: pointing at workspace images
+ * or the desktop (web), or using an open app (the native app companion).
+ */
+export type DictationRecordingKind = "pointing" | "app";
+
+const RECORDING_LABELS: Record<DictationRecordingKind, string> = {
+  pointing:
+    "Pointing recording (timeline of the transcript with timestamps, pointer and desktop frames)",
+  app: "App recording (timeline of the transcript with timestamps, taps, screens and app logs)",
+};
+
+/**
  * The draft with a transcript appended on its own line, as both composers
- * insert dictation. A pointing recording (web) is referenced by its path.
+ * insert dictation. A recording's timeline is referenced by its path.
  */
 export function appendDictation(
   draft: string,
   text: string,
   recordingPath?: string,
+  kind: DictationRecordingKind = "pointing",
 ): string {
   const addition = recordingPath
-    ? `${text}\n\nPointing recording (transcript, pointer timeline and desktop frames): @file:${recordingPath}`
+    ? `${text.trim()}\n\n${RECORDING_LABELS[kind]}: @file:${recordingPath}`
     : text.trim();
   return [draft.trimEnd(), addition].filter(Boolean).join("\n");
 }

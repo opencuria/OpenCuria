@@ -40,6 +40,15 @@ struct AppLaunch {
   let iconPath: String?
   /// Route to the app's workspace backends; nil when opened offline.
   let gateway: AppGatewaySession?
+  /// What the app companion needs: the app's account and workspace.
+  let companion: CompanionInfo?
+
+  /// The account an app was installed for and the workspace it comes from.
+  struct CompanionInfo {
+    let scope: String
+    let workspaceId: String?
+    let versionName: String
+  }
 
   /// The app's Expo config (`Constants.expoConfig`).
   var expoConfig: [String: Any] {
@@ -94,7 +103,14 @@ struct AppLaunch {
       orientation: root["orientation"] as? String ?? "default",
       backgroundColor: (root["backgroundColor"] as? String).flatMap(UIColor.init(hex:)),
       iconPath: FileManager.default.fileExists(atPath: iconPath) ? iconPath : nil,
-      gateway: AppGateway.session(fromJSON: root["gateway"] as? [String: Any])
+      gateway: AppGateway.session(fromJSON: root["gateway"] as? [String: Any]),
+      companion: (root["companion"] as? [String: Any]).map {
+        CompanionInfo(
+          scope: $0["scope"] as? String ?? "",
+          workspaceId: ($0["workspaceId"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+          versionName: $0["versionName"] as? String ?? ""
+        )
+      }
     )
   }
 }

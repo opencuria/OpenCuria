@@ -11,9 +11,12 @@ on Android (`@expo/ui`, native menus, native navigation and text editing).
   while the agent works steer its turn; holding Send schedules a message for later.
 - Workspace tools: Git, the KasmVNC desktop (trackpad and keyboard), terminal, files.
 - Apps published by agents (`app_publish`): installed and run inside OpenCuria like
-  in Expo Go, also offline, with an app menu (shake, three fingers or menu button)
-  and a home screen widget. See
-  [`modules/opencuria-app-runtime`](modules/opencuria-app-runtime/README.md).
+  in Expo Go, also offline, with a home screen widget. Shaking, three fingers or the
+  menu button open the app companion: a half or full height sheet with the chats of
+  the app's workspace (the same chat as everywhere else) and Record, which records
+  speech while the user taps (Use) or points (Point) in the app. The chat's draft
+  then references a `timeline.md` with timestamped speech, taps, screenshots, logs
+  and requests. See [`modules/opencuria-app-runtime`](modules/opencuria-app-runtime/README.md).
 - Scheduled tasks, push notifications, iOS Live Activities and every webapp setting.
   MCP OAuth connections finish in the browser.
 - Dictation as in the webapp: the microphone takes Send's place while the draft
@@ -56,6 +59,10 @@ hosts; public hosts need `https://`.
 ## Repository map
 
 - `app/`: Expo Router routes only. Screens live in `src/screens/`; never add `src/app/`.
+  `index.ts` also registers `OpenCuriaAppCompanion`, a second React root drawn over
+  open apps; roots share one session (`SessionScope`), draft store and voice queue.
+- `src/state/useWorkspaceChat.ts` and `src/components/WorkspaceChatView.tsx`: one
+  workspace chat, used by `MainScreen` and `AppCompanionScreen`.
 - `src/state/chatController.ts`: REST hydration, live subscriptions, immutable chat snapshots.
 - `src/components/`, `src/ui/`: chat presentation and native controls. One design
   language everywhere: ink on a white/black canvas (`theme.primary` is the text
@@ -63,7 +70,8 @@ hosts; public hosts need `https://`.
   shared list states in `ui/formStates.ts`.
 - `src/tools/`: workspace tools sheet (Git, desktop, terminal, files).
 - `src/settings/`: settings sheet and pages.
-- `src/apps/`: installing and opening published apps. After adding or upgrading a
+- `src/apps/`: installing and opening published apps; `src/apps/companion/` holds
+  the companion's sheet, recording bar and recorder. After adding or upgrading a
   native dependency run `node mobile/scripts/sync-app-runtime.mjs`.
 - `src/voice/`: dictation (expo-audio capture, saved recordings, transcription
   queue from `@opencuria/chat-core/voiceTranscriptions`).

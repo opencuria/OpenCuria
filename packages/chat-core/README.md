@@ -35,7 +35,11 @@ checks before upload, failure kinds, where the text goes in the draft).
 `runVoiceTranscription` retries lost connections until they return and a busy
 service a few times; `VoiceTranscriptionQueue` keeps recordings in client
 storage until their text was delivered or the user discarded them, so nothing
-has to be recorded twice.
+has to be recorded twice; its `attach` step saves what a recording kept beside
+the audio. `visualRecording.ts` holds the rules of recordings with visual
+references (web pointing at images and the desktop, the native app companion):
+frame cadence, pointer samples, coordinates in frame pixels and the manifest
+from which the server writes the agent's `timeline.md`.
 
 ## Desktop viewer
 

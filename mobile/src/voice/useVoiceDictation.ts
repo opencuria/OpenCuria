@@ -7,7 +7,6 @@ import {
   useSyncExternalStore,
 } from "react";
 import { AppState, Linking, Platform } from "react-native";
-import { File } from "expo-file-system";
 import { randomUUID } from "expo-crypto";
 import {
   chatInputCacheKey,
@@ -15,7 +14,6 @@ import {
 } from "@opencuria/chat-core/chatInputCache";
 import {
   VOICE_LEVEL_INTERVAL_MS,
-  appendDictation,
   appendVoiceLevel,
   formatVoiceDuration,
   voiceDecibelsHaveSignal,
@@ -24,10 +22,9 @@ import {
   voiceRecordingLimits,
   voiceRecordingProblem,
 } from "@opencuria/chat-core/voiceInput";
-import {
+import type {
+  VoiceClipEntry,
   VoiceTranscriptionQueue,
-  type VoiceClipEntry,
-  type VoiceTranscriptText,
 } from "@opencuria/chat-core/voiceTranscriptions";
 import type { OpenCuriaClient } from "@opencuria/client";
 import type {
@@ -37,8 +34,12 @@ import type {
   ComposerVoiceRecording,
 } from "../components/ComposerVoice";
 import { lightTapHaptic } from "../ui/haptics";
-import { AppVoiceConnectivity } from "./voiceConnectivity";
-import { voiceClipFiles, type ChatVoiceClip } from "./voiceClipStore";
+import type { ChatVoiceClip, VoiceClipFiles } from "./voiceClipStore";
+import {
+  sharedVoiceQueue,
+  type SharedVoiceQueue,
+  type VoiceQueuePort,
+} from "./voiceQueue";
 import {
   VOICE_MIME_TYPE,
   requestMicrophone,
@@ -69,7 +70,7 @@ interface Session {
   scope: ChatInputScope;
   key: string;
   queue: VoiceTranscriptionQueue<ChatInputScope>;
-  files: ReturnType<typeof voiceClipFiles>;
+  files: VoiceClipFiles;
   capture: VoiceCapture | null;
   phase: ComposerVoiceRecording["phase"];
   cancelled: boolean;
@@ -95,6 +96,7 @@ const PAUSED_TICKS_LIMIT = 10;
  * device before anything is sent and wait there through lost connections and
  * restarts; their text goes to the draft of the chat they were recorded in.
  * Leaving the chat or the app finishes a recording instead of losing it.
+ * Every root (OpenCuria, the app companion) shares one queue per account.
  */
 export function useVoiceDictation(
   options: VoiceDictationOptions,
@@ -114,47 +116,36 @@ export function useVoiceDictation(
   >(null);
   const session = useRef<Session | null>(null);
 
-  const connectivity = useMemo(() => new AppVoiceConnectivity(), []);
-  useEffect(() => () => connectivity.dispose(), [connectivity]);
-  useEffect(() => {
-    connectivity.setServerReachable(!offline);
-  }, [connectivity, offline]);
-
-  const files = useMemo(
-    () => (account ? voiceClipFiles(account) : null),
-    [account],
+  // One queue per account for every React root, so each recording is
+  // transcribed and delivered once, to whichever root shows its chat.
+  const port = useMemo<VoiceQueuePort>(
+    () => ({
+      client: () => optionsRef.current.client,
+      shownKey: () => scopeKeyRef.current,
+      receiver: () => receiver.current?.receive ?? null,
+      editDraft: (target, update) =>
+        optionsRef.current.editDraft(target, update),
+      flushDrafts: () => optionsRef.current.flushDrafts(),
+      notify: (next) => setNotice(next),
+    }),
+    [],
   );
-  const queue = useMemo(() => {
-    if (!files) return null;
-    return new VoiceTranscriptionQueue<ChatInputScope>({
-      store: files,
-      connectivity,
-      transcribe: async (clip, signal) => {
-        const client = optionsRef.current.client;
-        // Without a client the request cannot leave; wait like offline.
-        if (!client) throw new TypeError("Not signed in.");
-        let audio: string;
-        try {
-          audio = await new File(await files.audioUri(clip)).base64();
-        } catch {
-          throw new Error("The recording is no longer on this device.");
-        }
-        return client.voice.transcribe(
-          clip.workspaceId,
-          {
-            audio_base64: audio,
-            mime_type: clip.mimeType,
-            duration_ms: clip.durationMs,
-          },
-          signal,
-        );
-      },
-      deliver: (clip, transcript) => deliver(clip, transcript),
-    });
-    // `deliver` reads everything it needs from refs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [files, connectivity]);
-  useEffect(() => () => queue?.dispose(), [queue]);
+  const [shared, setShared] = useState<SharedVoiceQueue | null>(null);
+  useEffect(() => {
+    if (!account) {
+      setShared(null);
+      return;
+    }
+    const next = sharedVoiceQueue(account);
+    const release = next.acquire(port);
+    setShared(next);
+    return release;
+  }, [account, port]);
+  useEffect(() => {
+    shared?.connectivity.setServerReachable(!offline);
+  }, [shared, offline]);
+  const files = shared?.files ?? null;
+  const queue = shared?.queue ?? null;
   const entries = useSyncExternalStore(
     queue?.subscribe ?? noSubscription,
     queue?.getSnapshot ?? noEntries,
@@ -164,34 +155,6 @@ export function useVoiceDictation(
   queueRef.current = queue;
   const filesRef = useRef(files);
   filesRef.current = files;
-
-  /** The transcript joins its chat's draft; on screen the composer takes it. */
-  async function deliver(
-    clip: ChatVoiceClip,
-    transcript: VoiceTranscriptText,
-  ): Promise<void> {
-    const text = transcript.text.trim();
-    const onScreen = chatInputCacheKey(clip.target) === scopeKeyRef.current;
-    if (!text) {
-      if (onScreen)
-        setNotice({
-          tone: "neutral",
-          message: "No speech was recognized in the recording.",
-        });
-      return;
-    }
-    const composer = onScreen ? receiver.current : null;
-    if (composer) {
-      composer.receive(text, Boolean(clip.send));
-      await optionsRef.current.flushDrafts();
-    } else {
-      await optionsRef.current.editDraft(clip.target, (current) =>
-        appendDictation(current, text),
-      );
-    }
-    if (onScreen && transcript.cleanup_warning)
-      setNotice({ tone: "neutral", message: transcript.cleanup_warning });
-  }
 
   const publish = useCallback((current: Session | null) => {
     if (session.current !== current) return;

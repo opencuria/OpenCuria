@@ -12,7 +12,11 @@ import {
   createChatInputCache,
   type ChatInputScope,
 } from "@opencuria/chat-core/chatInputCache";
-import { ChatDraftStore, type DraftAccount } from "./chatDrafts";
+import {
+  chatDraftStore,
+  retainChatDraftStore,
+  type DraftAccount,
+} from "./chatDrafts";
 
 type DraftUpdate = string | ((current: string) => string);
 /** Whether the draft goes along with a change from one chat to another. */
@@ -50,7 +54,8 @@ export function useChatDraft(
   /** Save edits now instead of after the typing pause. */
   flush: () => Promise<void>;
 } {
-  const store = useMemo(() => new ChatDraftStore(account), [account]);
+  // Shared by every root of the account, so both see each other's edits.
+  const store = useMemo(() => chatDraftStore(account), [account]);
   const cache = useMemo(() => createChatInputCache(() => store), [store]);
   const key = scope ? chatInputCacheKey(scope) : null;
   const [draft, setShownDraft] = useState(() =>
@@ -86,6 +91,7 @@ export function useChatDraft(
 
   useEffect(() => {
     let alive = true;
+    const release = retainChatDraftStore(account, store);
     // Drafts saved on the device arrive after the first render; typing wins.
     void store.ready.then(() => {
       const { scope: current, text } = shown.current;
@@ -95,12 +101,20 @@ export function useChatDraft(
     const background = AppState.addEventListener("change", (state) => {
       if (state !== "active") void store.flush();
     });
+    // Another root (the app companion or OpenCuria) edited the draft on screen.
+    const unsubscribe = store.subscribe((changed) => {
+      const { key: current, scope: shownScope, text } = shown.current;
+      if (!alive || !shownScope || changed !== current) return;
+      const next = cacheRef.current.load(shownScope);
+      if (next !== text) show(next);
+    });
     return () => {
       alive = false;
       background.remove();
-      void store.flush();
+      unsubscribe();
+      release();
     };
-  }, [store, show]);
+  }, [account, store, show]);
 
   const setDraft = useCallback(
     (update: DraftUpdate) => {

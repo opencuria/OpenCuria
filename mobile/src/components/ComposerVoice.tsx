@@ -27,6 +27,7 @@ import {
   formatVoiceDuration,
   voiceWaveformBars,
 } from "@opencuria/chat-core/voiceInput";
+import type { DictationRecordingKind } from "@opencuria/chat-core/voiceInput";
 import type { VoiceClipStatus } from "@opencuria/chat-core/voiceTranscriptions";
 import { ComposerAction } from "../ui/ComposerAction";
 import { IconButton } from "../ui/primitives";
@@ -56,7 +57,17 @@ export interface ComposerVoiceNotice {
 }
 
 /** Takes a transcript of the chat on screen; `send` asks to send it at once. */
-export type ComposerVoiceReceiver = (text: string, send: boolean) => void;
+/** A recording saved beside the transcript, referenced in the draft. */
+export interface ComposerVoiceRecordingRef {
+  path: string;
+  kind: DictationRecordingKind;
+}
+
+export type ComposerVoiceReceiver = (
+  text: string,
+  send: boolean,
+  recording?: ComposerVoiceRecordingRef,
+) => void;
 
 /** Dictation in the composer; the host owns recording and transcription. */
 export interface ComposerVoice {
@@ -81,7 +92,7 @@ const BAR_MIN = 3;
 const BAR_RANGE = 21;
 
 /** Live microphone levels, newest at the trailing edge, as in the webapp. */
-function VoiceWaveform({
+export function VoiceWaveform({
   levels,
   color,
 }: {
@@ -117,7 +128,11 @@ function VoiceWaveform({
 }
 
 /** The red recording light, pulsing like the system's while it records. */
-function RecordingLight({ active }: { active: boolean }): React.JSX.Element {
+export function RecordingLight({
+  active,
+}: {
+  active: boolean;
+}): React.JSX.Element {
   const { theme } = useTheme();
   const reduceMotion = useReducedMotion();
   const opacity = useSharedValue(1);

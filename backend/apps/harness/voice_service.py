@@ -27,6 +27,7 @@ from .repositories import AgentConfigRepository, ProviderConfigRepository
 from .services import ProviderConfigService
 from .voice_cleanup import normalize_edited_dictation
 from .voice_provider import VoiceAccount, VoiceProvider
+from .voice_recording_timeline import render_recording_timeline
 from .voice_schemas import (
     MAX_AUDIO_BYTES,
     VoiceConfig,
@@ -82,12 +83,20 @@ def validate_recording(payload: VoiceRecordingIn) -> str:
             continue
         target = pointer.target
         _safe_workspace_path(target.path)
-        if target.kind == "desktop" and target.path not in frames:
+        if target.kind in {"desktop", "app"} and target.path not in frames:
             raise ValueError("Desktop pointers must reference a recorded frame")
         if pointer.x is None or pointer.y is None:
             raise ValueError("Pointer target requires pixel coordinates")
         if not (0 <= pointer.x < target.width and 0 <= pointer.y < target.height):
             raise ValueError("Pointer coordinates fall outside the target image")
+        bounds = pointer.element.bounds if pointer.element else None
+        if bounds and (
+            bounds[0] + bounds[2] > target.width
+            or bounds[1] + bounds[3] > target.height
+        ):
+            raise ValueError("Element bounds fall outside the target frame")
+    if any(event.t_ms > payload.duration_ms for event in payload.events):
+        raise ValueError("App events must lie within the recording")
     last = -1
     for segment in payload.segments:
         if segment.start_ms < last or segment.end_ms > payload.duration_ms:
@@ -396,7 +405,12 @@ class VoiceService:
     async def save_recording(
         self, workspace_id: uuid.UUID, payload: VoiceRecordingIn
     ) -> str:
-        """Write bounded manifests; metadata is the final completion marker."""
+        """Write bounded manifests; the timeline is the final completion marker.
+
+        ``timeline.md`` is the entry point agents get: every spoken phrase with
+        its timestamps, interleaved with pointers, taps, screens and app
+        events. The JSON files keep the complete, machine-readable data.
+        """
         root = validate_recording(payload)
         accessor = await create_harness_accessor(
             get_runner_service(), str(workspace_id)
@@ -419,26 +433,45 @@ class VoiceService:
             "unchanged_positions_omitted": True,
             "events": [item.model_dump() for item in payload.pointers],
         }
+        saved_at = datetime.now(timezone.utc)
         metadata = {
             "schema_version": 1,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "saved_at": saved_at.isoformat(),
             "recording_id": str(payload.recording_id),
             "duration_ms": payload.duration_ms,
             "speech_model": payload.speech_model,
             "cleanup_model": payload.cleanup_model,
             "timestamp_unit": "milliseconds",
             "timestamp_origin": "microphone-recording-start",
+            "timeline_path": f"{root}/timeline.md",
             "transcript_path": f"{root}/transcript.json",
             "pointer_path": f"{root}/pointer.json",
             "frames": [item.model_dump() for item in payload.frames],
         }
-        for filename, content in (
+        files: list[tuple[str, object]] = [
             ("transcript.json", transcript),
             ("pointer.json", pointers),
-            ("metadata.json", metadata),
-        ):
+        ]
+        if payload.app is not None or payload.events:
+            metadata["app"] = payload.app.model_dump() if payload.app else None
+            metadata["events_path"] = f"{root}/events.json"
+            files.append(
+                (
+                    "events.json",
+                    {
+                        "schema_version": 1,
+                        "events": [item.model_dump() for item in payload.events],
+                    },
+                )
+            )
+        files.append(("metadata.json", metadata))
+        for filename, content in files:
             await accessor.write_file(
                 f"{root}/{filename}",
                 json.dumps(content, ensure_ascii=False, indent=2).encode(),
             )
-        return f"{root}/metadata.json"
+        timeline = f"{root}/timeline.md"
+        await accessor.write_file(
+            timeline, render_recording_timeline(payload, root, saved_at).encode()
+        )
+        return timeline

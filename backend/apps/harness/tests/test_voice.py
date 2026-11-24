@@ -128,11 +128,15 @@ def test_full_length_requests_pass_http_body_limits(
             APIKeyPermission.TERMINAL_ACCESS.value,
         ],
     )
-    body = ten_minute_recording if endpoint == "recordings" else {
-        "audio_base64": base64.b64encode(b"a" * MAX_AUDIO_BYTES).decode(),
-        "mime_type": "audio/webm;codecs=opus",
-        "duration_ms": MAX_DURATION_MS,
-    }
+    body = (
+        ten_minute_recording
+        if endpoint == "recordings"
+        else {
+            "audio_base64": base64.b64encode(b"a" * MAX_AUDIO_BYTES).decode(),
+            "mime_type": "audio/webm;codecs=opus",
+            "duration_ms": MAX_DURATION_MS,
+        }
+    )
     response = Client().post(
         f"/api/v1/workspaces/{harness_workspace.id}/voice/{endpoint}/",
         data=json.dumps(body),
@@ -149,10 +153,13 @@ async def test_audio_over_byte_limit_never_reaches_provider() -> None:
     provider = SimpleNamespace(transcribe=AsyncMock())
     with pytest.raises(ValueError, match="audio size limit"):
         await VoiceService(provider).transcribe(
-            uuid.uuid4(), 1, VoiceTranscribeIn(
+            uuid.uuid4(),
+            1,
+            VoiceTranscribeIn(
                 audio_base64=base64.b64encode(b"a" * (MAX_AUDIO_BYTES + 1)).decode(),
-                mime_type="audio/webm", duration_ms=MAX_DURATION_MS,
-            )
+                mime_type="audio/webm",
+                duration_ms=MAX_DURATION_MS,
+            ),
         )
     provider.transcribe.assert_not_awaited()
 
@@ -346,7 +353,7 @@ async def test_cleanup_failure_keeps_transcript(monkeypatch) -> None:
 async def test_save_recording_writes_completion_marker_last(
     monkeypatch, recording
 ) -> None:
-    """Incomplete uploads never expose a completed metadata entry point."""
+    """Incomplete uploads never expose a completed timeline entry point."""
     accessor = SimpleNamespace(write_file=AsyncMock())
     monkeypatch.setattr(
         "apps.harness.voice_service.create_harness_accessor",
@@ -360,10 +367,151 @@ async def test_save_recording_writes_completion_marker_last(
         "transcript.json",
         "pointer.json",
         "metadata.json",
+        "timeline.md",
     ]
     assert result == calls[-1].args[0]
     assert json.loads(calls[1].args[1])["coordinate_space"] == "original-image-pixels"
     assert json.loads(calls[1].args[1])["unchanged_positions_omitted"] is True
+    metadata = json.loads(calls[2].args[1])
+    assert metadata["timeline_path"] == result
+    timeline = calls[-1].args[1].decode()
+    assert timeline.startswith("# Pointing recording")
+    assert '- 00:00.0  said (00:00.0–00:00.8)  "Change this."' in timeline
+    assert "- 00:00.5  click  at 100,50 on frames/000001.jpg" in timeline
+
+
+@pytest.fixture
+def app_recording(recording: dict) -> dict:
+    """An app screen with a tap, a pointed-at button, a log and a request."""
+    root = f"/workspace/.opencuria/recordings/{recording['recording_id']}"
+    first, second = f"{root}/frames/000000.jpg", f"{root}/frames/000001.jpg"
+    target = {"kind": "app", "width": 540, "height": 1200}
+    recording.update(
+        duration_ms=4000,
+        text="Make this button green. Nothing happens here.",
+        segments=[
+            {"start_ms": 200, "end_ms": 1800, "text": "Make this button green."},
+            {"start_ms": 2100, "end_ms": 3500, "text": "Nothing happens here."},
+        ],
+        frames=[
+            {"t_ms": 0, "path": first, "texts": ["Todos", "Buy milk", "Add"]},
+            {"t_ms": 2400, "path": second, "texts": ["Todos", "Profile"]},
+        ],
+        pointers=[
+            {
+                "t_ms": 900,
+                "event": "down",
+                "x": 270,
+                "y": 980,
+                "mode": "point",
+                "target": {**target, "path": first},
+                "element": {
+                    "role": "button",
+                    "text": "Add",
+                    "test_id": "add-button",
+                    "interactive": True,
+                    "bounds": [200, 950, 140, 60],
+                },
+            },
+            {
+                "t_ms": 1000,
+                "event": "up",
+                "x": 272,
+                "y": 981,
+                "mode": "point",
+                "target": {**target, "path": first},
+            },
+            {
+                "t_ms": 2500,
+                "event": "down",
+                "x": 120,
+                "y": 410,
+                "mode": "use",
+                "target": {**target, "path": second},
+                "element": {"role": "text", "text": "Profile", "interactive": False},
+            },
+            {
+                "t_ms": 2600,
+                "event": "up",
+                "x": 120,
+                "y": 410,
+                "mode": "use",
+                "target": {**target, "path": second},
+            },
+        ],
+        events=[
+            {"t_ms": 2550, "kind": "log", "level": "warn", "message": "No handler"},
+            {
+                "t_ms": 2700,
+                "kind": "network",
+                "method": "GET",
+                "url": "http://api.opencuria.local:8080/todos",
+                "status": 500,
+                "duration_ms": 120,
+            },
+        ],
+        app={
+            "app_id": "app-1",
+            "name": "Todo Demo",
+            "version": "1.0.2",
+            "platform": "android",
+        },
+    )
+    return recording
+
+
+async def test_app_recording_timeline_and_events(monkeypatch, app_recording) -> None:
+    """Agents get every phrase with timestamps next to taps, screens and logs."""
+    accessor = SimpleNamespace(write_file=AsyncMock())
+    monkeypatch.setattr(
+        "apps.harness.voice_service.create_harness_accessor",
+        AsyncMock(return_value=accessor),
+    )
+    result = await VoiceService().save_recording(
+        uuid.uuid4(), VoiceRecordingIn(**app_recording)
+    )
+    written = {
+        call.args[0].rsplit("/", 1)[-1]: call.args[1]
+        for call in accessor.write_file.call_args_list
+    }
+    assert list(written) == [
+        "transcript.json",
+        "pointer.json",
+        "events.json",
+        "metadata.json",
+        "timeline.md",
+    ]
+    assert result.endswith("/timeline.md")
+    assert json.loads(written["events.json"])["events"][1]["status"] == 500
+    assert json.loads(written["metadata.json"])["app"]["name"] == "Todo Demo"
+    lines = written["timeline.md"].decode().splitlines()
+    assert lines[0] == "# App recording: Todo Demo 1.0.2 (Android)"
+    timeline = lines[lines.index("## Timeline") + 2 :]
+    assert timeline == [
+        "- 00:00.0  screen  frames/000000.jpg  shows: Todos · Buy milk · Add",
+        '- 00:00.2  said (00:00.2–00:01.8)  "Make this button green."',
+        '- 00:00.9  point  button "Add" (testID add-button)  at 270,980 on '
+        "frames/000000.jpg",
+        '- 00:02.1  said (00:02.1–00:03.5)  "Nothing happens here."',
+        "- 00:02.4  screen  frames/000001.jpg  shows: Todos · Profile",
+        '- 00:02.5  tap  text "Profile" (not tappable)  at 120,410 on '
+        "frames/000001.jpg",
+        "- 00:02.5  app log (warn)  No handler",
+        "- 00:02.7  request  GET http://api.opencuria.local:8080/todos → 500 (120 ms)",
+    ]
+
+
+@pytest.mark.parametrize("change", ["unknown_frame", "bounds", "late_event"])
+def test_invalid_app_recordings(app_recording: dict, change: str) -> None:
+    """App pointers stay on recorded frames and events inside the recording."""
+    if change == "unknown_frame":
+        app_recording["pointers"][0]["target"]["path"] += ".png"
+    elif change == "bounds":
+        app_recording["pointers"][0]["element"]["bounds"] = [500, 950, 140, 60]
+    else:
+        app_recording["events"][0]["t_ms"] = 4001
+    with pytest.raises(ValueError):
+        validate_recording(VoiceRecordingIn(**app_recording))
 
 
 @pytest.mark.django_db(transaction=True)
