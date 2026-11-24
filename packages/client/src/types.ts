@@ -18,17 +18,18 @@ export interface TokenPair {
   refresh_token: string;
 }
 
+/** The push proxy a server sends through and the key it signs with; null: off. */
 export interface PushCapabilities {
-  ios: boolean;
-  android: boolean;
-  live_activities: boolean;
+  proxy_url: string | null;
+  server_key: string | null;
 }
 
+/** A push proxy handle (never a native token) and the device's RFC 8291 key. */
 export interface MobileDeviceRegistration {
   platform: "ios" | "android";
-  app_id: string;
-  apns_environment: "sandbox" | "production";
-  push_token: string;
+  push_handle: string;
+  encryption_key: string;
+  auth_secret: string;
   notifications_enabled: boolean;
   live_activities_enabled: boolean;
 }

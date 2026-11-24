@@ -4,6 +4,9 @@ import { NotificationController } from "./controller";
 import type { NativeNotifications } from "./native";
 import type { LiveActivityHandle } from "./liveActivity";
 import type { NotificationTarget } from "./target";
+import type { ProxyRegistration, PushProxy } from "./pushProxy";
+
+const PROXY_URL = "https://push.example.test";
 
 const deviceId = "11111111-1111-4111-8111-111111111111";
 const organizationId = "22222222-2222-4222-8222-222222222222";
@@ -36,7 +39,7 @@ function setup(
   const api = {
     capabilities: vi
       .fn()
-      .mockResolvedValue({ ios: true, android: true, live_activities: true }),
+      .mockResolvedValue({ proxy_url: PROXY_URL, server_key: "server-key" }),
     registerDevice: vi.fn().mockResolvedValue({ id: deviceId }),
     unregisterDevice: vi.fn().mockResolvedValue(undefined),
     registerActivity: vi.fn().mockResolvedValue(undefined),
@@ -54,6 +57,11 @@ function setup(
     isActive: vi.fn().mockReturnValue(true),
     permission: vi.fn().mockResolvedValue(true),
     token: vi.fn().mockResolvedValue("device-token-a"),
+    keys: vi.fn().mockResolvedValue({
+      publicKey: "device-public",
+      authSecret: "device-auth",
+    }),
+    deleteKeys: vi.fn().mockResolvedValue(undefined),
     reset: vi.fn().mockResolvedValue(undefined),
     onToken: vi.fn((fn) => listen("device-token", fn)),
     onActivity: vi.fn((fn) => listen("foreground", fn)),
@@ -79,12 +87,20 @@ function setup(
     notifications: api,
     realtime: { on: vi.fn((name, fn) => listen(name, fn)) },
   } as unknown as OpenCuriaClient;
+  const proxy = {
+    url: PROXY_URL,
+    register: vi.fn(
+      async (input: ProxyRegistration) =>
+        `handle-${input.kind}-${input.token}-${input.server_key}`,
+    ),
+  } satisfies PushProxy;
   const controller = new NotificationController(
     client,
     organizationId,
     storage,
     native,
     live,
+    proxy,
   );
   return {
     controller,
@@ -92,6 +108,7 @@ function setup(
     storage,
     native,
     live,
+    proxy,
     handle,
     listeners,
     cleanups,
@@ -142,14 +159,28 @@ describe("native notification lifecycle", () => {
     expect(test.native.token).not.toHaveBeenCalled();
     await test.controller.setEnabled("notifications", true);
     expect(test.native.permission).toHaveBeenLastCalledWith(true);
-    expect(test.api.registerDevice).toHaveBeenLastCalledWith(
-      deviceId,
-      expect.objectContaining({
-        notifications_enabled: true,
-        push_token: "device-token-a",
-      }),
+    expect(test.proxy.register).toHaveBeenCalledWith({
+      platform: "ios",
+      app_id: "com.opencuria.mobile.dev",
+      environment: "sandbox",
+      kind: "alert",
+      token: "device-token-a",
+      server_key: "server-key",
+    });
+    expect(test.native.keys).toHaveBeenCalledWith(deviceId);
+    expect(test.api.registerDevice).toHaveBeenLastCalledWith(deviceId, {
+      platform: "ios",
+      push_handle: "handle-alert-device-token-a-server-key",
+      encryption_key: "device-public",
+      auth_secret: "device-auth",
+      notifications_enabled: true,
+      live_activities_enabled: false,
+    });
+    expect(JSON.stringify(test.api.registerDevice.mock.calls)).not.toContain(
+      '"device-token-a"',
     );
     expect(test.controller.getSnapshot().notifications).toBe(true);
+    expect(test.controller.getSnapshot().availability).toBe("available");
     test.controller.dispose();
   });
 
@@ -190,10 +221,18 @@ describe("native notification lifecycle", () => {
     test.native.permission.mockResolvedValue(false);
     await test.controller.start();
     expect(test.live.start).toHaveBeenCalledWith(snapshot);
+    expect(test.api.registerDevice).toHaveBeenLastCalledWith(
+      deviceId,
+      expect.objectContaining({
+        push_handle: "",
+        encryption_key: "device-public",
+        live_activities_enabled: true,
+      }),
+    );
     expect(test.api.registerActivity).toHaveBeenLastCalledWith(
       deviceId,
       "activity-one",
-      "activity-token-a",
+      "handle-activity-activity-token-a-server-key",
     );
     test.handle.token.mockResolvedValue("activity-token-b");
     test.listeners["activity-token"]!("activity-token-b");
@@ -201,7 +240,10 @@ describe("native notification lifecycle", () => {
     expect(test.api.registerActivity).toHaveBeenLastCalledWith(
       deviceId,
       "activity-one",
-      "activity-token-b",
+      "handle-activity-activity-token-b-server-key",
+    );
+    expect(test.proxy.register).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "activity", environment: "sandbox" }),
     );
     test.controller.dispose();
     expect(
@@ -221,13 +263,19 @@ describe("native notification lifecycle", () => {
     await test.controller.refresh();
     expect(test.api.registerDevice).toHaveBeenLastCalledWith(
       deviceId,
-      expect.objectContaining({ push_token: "device-token-b" }),
+      expect.objectContaining({
+        push_handle: "handle-alert-device-token-b-server-key",
+      }),
     );
     test.native.permission.mockResolvedValue(false);
     await test.controller.refresh();
     expect(test.api.registerDevice).toHaveBeenLastCalledWith(
       deviceId,
-      expect.objectContaining({ notifications_enabled: false, push_token: "" }),
+      expect.objectContaining({
+        notifications_enabled: false,
+        push_handle: "",
+        encryption_key: "",
+      }),
     );
     expect(test.controller.getSnapshot().permissionGranted).toBe(false);
     test.controller.dispose();
@@ -320,6 +368,7 @@ describe("native notification lifecycle", () => {
     test.listeners["activity-token"]!("late-token");
     await test.controller.refresh();
     expect(test.api.unregisterDevice).toHaveBeenCalledWith(deviceId);
+    expect(test.native.deleteKeys).toHaveBeenCalledWith(deviceId);
     expect(test.native.reset).toHaveBeenCalledOnce();
     expect(test.api.registerDevice).toHaveBeenCalledTimes(count);
     expect(test.storage.save).toHaveBeenLastCalledWith({
@@ -341,6 +390,7 @@ describe("native notification lifecycle", () => {
     test.api.unregisterDevice.mockRejectedValueOnce(new Error("offline"));
     await expect(test.controller.revoke()).rejects.toThrow(/Reconnect/);
     expect(test.storage.save).not.toHaveBeenCalled();
+    expect(test.native.deleteKeys).not.toHaveBeenCalled();
     await test.controller.revoke();
     expect(test.api.unregisterDevice).toHaveBeenCalledTimes(2);
     test.controller.dispose();
@@ -355,6 +405,91 @@ describe("native notification lifecycle", () => {
     await test.controller.revoke();
     expect(test.api.unregisterDevice).toHaveBeenCalledWith(deviceId);
     expect(test.native.reset).toHaveBeenCalledOnce();
+    test.controller.dispose();
+  });
+  it("asks the push proxy once per token and server key", async () => {
+    const test = setup({
+      deviceId,
+      notifications: true,
+      liveActivities: false,
+    });
+    await test.controller.start();
+    await test.controller.refresh();
+    await test.controller.refresh();
+    expect(test.proxy.register).toHaveBeenCalledOnce();
+    expect(test.api.registerDevice).toHaveBeenCalledTimes(3);
+    test.api.capabilities.mockResolvedValue({
+      proxy_url: PROXY_URL,
+      server_key: "rotated-server-key",
+    });
+    await test.controller.refresh();
+    expect(test.proxy.register).toHaveBeenCalledTimes(2);
+    expect(test.api.registerDevice).toHaveBeenLastCalledWith(
+      deviceId,
+      expect.objectContaining({
+        push_handle: "handle-alert-device-token-a-rotated-server-key",
+      }),
+    );
+    test.controller.dispose();
+  });
+
+  it("asks the proxy again after the server rejects a registration", async () => {
+    const test = setup({
+      deviceId,
+      notifications: true,
+      liveActivities: false,
+    });
+    test.api.registerDevice.mockRejectedValueOnce(new Error("Stale handle"));
+    await test.controller.start();
+    expect(test.controller.getSnapshot().error).toBe("Stale handle");
+    await test.controller.refresh();
+    expect(test.proxy.register).toHaveBeenCalledTimes(2);
+    expect(test.controller.getSnapshot().error).toBeNull();
+    test.controller.dispose();
+  });
+
+  it.each([
+    [
+      { proxy_url: "https://push.other.example", server_key: "server-key" },
+      "mismatch",
+      /through push\.other\.example, but this app uses push\.example\.test/,
+    ],
+    [{ proxy_url: null, server_key: null }, "off", /turned off/],
+  ])(
+    "never registers with a server that uses another proxy or none (%j)",
+    async (capabilities, availability, message) => {
+      const test = setup();
+      test.api.capabilities.mockResolvedValue(capabilities);
+      await test.controller.start();
+      expect(test.controller.getSnapshot().availability).toBe(availability);
+      await test.controller.setEnabled("notifications", true);
+      expect(test.controller.getSnapshot().error).toMatch(message);
+      expect(test.controller.getSnapshot().notifications).toBe(false);
+      expect(test.proxy.register).not.toHaveBeenCalled();
+      expect(test.native.token).not.toHaveBeenCalled();
+      expect(
+        test.api.registerDevice.mock.calls.every(
+          ([, data]) => !data.notifications_enabled && !data.push_handle,
+        ),
+      ).toBe(true);
+      test.controller.dispose();
+    },
+  );
+
+  it("rolls back an opt-in the push proxy refuses", async () => {
+    const test = setup();
+    await test.controller.start();
+    test.proxy.register.mockRejectedValueOnce(
+      new Error(
+        "The push service at push.example.test does not support this app build.",
+      ),
+    );
+    await test.controller.setEnabled("notifications", true);
+    expect(test.controller.getSnapshot().notifications).toBe(false);
+    expect(test.controller.getSnapshot().error).toMatch(/does not support/);
+    expect(test.storage.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ notifications: false }),
+    );
     test.controller.dispose();
   });
 });

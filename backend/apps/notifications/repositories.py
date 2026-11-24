@@ -1,4 +1,4 @@
-"""ORM operations for mobile destinations and outbox claims."""
+"""ORM operations for push proxy destinations and outbox claims."""
 
 from __future__ import annotations
 
@@ -56,18 +56,18 @@ class NotificationRepository:
             existing.user_id != user_id or existing.organization_id != org_id
         ):
             raise NotFoundError("Mobile device")
-        token_hash = fields.get("push_token_hash")
-        if token_hash:
+        # The proxy issues the same handle for the same native token, so an
+        # equal hash is this phone registered under another account.
+        handle_hash = fields.get("push_handle_hash")
+        if handle_hash:
             previous = MobileDevice.objects.filter(
-                push_token_hash=token_hash,
-                platform=fields["platform"],
-                app_id=fields["app_id"],
+                push_handle_hash=handle_hash, platform=fields["platform"]
             ).exclude(id=device_id)
             PushDelivery.objects.filter(device__in=previous).delete()
             previous.delete()
         if existing and not fields.get("live_activities_enabled"):
             fields.update(
-                activity_id="", encrypted_activity_token="", activity_updated_at=None
+                activity_id="", encrypted_activity_handle="", activity_updated_at=None
             )
         fields["notifications_enabled_at"] = (
             (
@@ -95,12 +95,12 @@ class NotificationRepository:
 
     @staticmethod
     def update_activity(
-        device: MobileDevice, activity_id: str, encrypted_token: str
+        device: MobileDevice, activity_id: str, encrypted_handle: str
     ) -> None:
-        """Replace an activity token atomically; never keep old destinations."""
+        """Replace an activity handle atomically; never keep old destinations."""
         MobileDevice.objects.filter(id=device.id).update(
             activity_id=activity_id,
-            encrypted_activity_token=encrypted_token,
+            encrypted_activity_handle=encrypted_handle,
             activity_updated_at=timezone.now(),
             last_seen_at=timezone.now(),
         )
@@ -111,19 +111,19 @@ class NotificationRepository:
         device.delete()
 
     @staticmethod
-    def clear_activity(device_id: uuid.UUID, encrypted_token: str) -> None:
-        """A stale provider response cannot remove a newly rotated token."""
+    def clear_activity(device_id: uuid.UUID, encrypted_handle: str) -> None:
+        """A stale proxy response cannot remove a newly rotated handle."""
         MobileDevice.objects.filter(
-            id=device_id, encrypted_activity_token=encrypted_token
-        ).update(activity_id="", encrypted_activity_token="", activity_updated_at=None)
+            id=device_id, encrypted_activity_handle=encrypted_handle
+        ).update(activity_id="", encrypted_activity_handle="", activity_updated_at=None)
 
     @staticmethod
-    def clear_push_token(device_id: uuid.UUID, encrypted_token: str) -> None:
-        """Invalidate only the destination rejected by the provider."""
+    def clear_push_handle(device_id: uuid.UUID, encrypted_handle: str) -> None:
+        """Invalidate only the destination the proxy rejected."""
         MobileDevice.objects.filter(
-            id=device_id, encrypted_push_token=encrypted_token
+            id=device_id, encrypted_push_handle=encrypted_handle
         ).update(
-            encrypted_push_token="", push_token_hash="", notifications_enabled=False
+            encrypted_push_handle="", push_handle_hash="", notifications_enabled=False
         )
 
     @staticmethod
@@ -198,7 +198,7 @@ class NotificationRepository:
                 live_activities_enabled=True,
                 platform="ios",
                 last_seen_at__gte=seen_since,
-            ).exclude(encrypted_activity_token="")
+            ).exclude(encrypted_activity_handle="")
         )
 
     @staticmethod

@@ -1,4 +1,4 @@
-"""Native delivery contracts: ownership, lifecycle, restart and provider failures."""
+"""Native delivery: ownership, lifecycle, restart, encryption and proxy errors."""
 
 import asyncio
 import json
@@ -19,11 +19,13 @@ from apps.harness.run_events import publish_assistant_run_finished
 from apps.organizations.models import Membership, Organization
 from common.utils import decrypt_value
 
+from ..encryption import ACTIVITY_PADDED_SIZE
 from ..models import MobileDevice, PushDelivery
-from ..providers import DeliveryResult
+from ..proxy import DeliveryResult
 from ..repositories import NotificationRepository
 from ..schemas import ActivityRegistrationIn, DeviceRegistrationIn
 from ..services import NotificationService
+from .conftest import registration
 
 pytestmark = pytest.mark.django_db
 
@@ -35,12 +37,20 @@ def finish(message, reason="stop", error=""):
     message.save(update_fields=["finish", "error", "completed_at"])
 
 
-def providers(result=DeliveryResult("sent")):
-    class Providers:
-        send_apns = AsyncMock(return_value=result)
-        send_fcm = AsyncMock(return_value=result)
+def proxy(result=DeliveryResult("sent")):
+    class Proxy:
+        send = AsyncMock(return_value=result)
 
-    return Providers()
+    return Proxy()
+
+
+def sent(transport, kind="alert"):
+    """Messages handed to the proxy, newest last."""
+    return [
+        call.args[0]
+        for call in transport.send.call_args_list
+        if (call.args[0].type == "alert") == (kind == "alert")
+    ]
 
 
 @pytest.mark.parametrize("organization", [None, "", "not-a-uuid"])
@@ -53,13 +63,16 @@ def test_invalid_organization_context_is_rejected(client, headers, organization)
     assert response.json()["code"] == "authentication_error"
 
 
-def test_device_api_enforces_scope_and_never_echoes_tokens(client, setup, headers):
+def test_device_api_enforces_scope_and_never_echoes_handles(
+    client, setup, headers, device_keys
+):
     org, user, *_ = setup
     device_id = uuid.uuid4()
     payload = {
         "platform": "ios",
-        "app_id": "com.opencuria.mobile",
-        "push_token": "cd" * 32,
+        "push_handle": "sealed-proxy-handle",
+        "encryption_key": device_keys.public,
+        "auth_secret": device_keys.auth_secret,
         "notifications_enabled": True,
     }
     path = f"/api/v1/notifications/devices/{device_id}/"
@@ -79,8 +92,10 @@ def test_device_api_enforces_scope_and_never_echoes_tokens(client, setup, header
         "live_activities_enabled",
     }
     device = MobileDevice.objects.get(id=device_id)
-    assert decrypt_value(device.encrypted_push_token) == payload["push_token"]
-    assert payload["push_token"] not in device.encrypted_push_token
+    assert decrypt_value(device.encrypted_push_handle) == payload["push_handle"]
+    assert payload["push_handle"] not in device.encrypted_push_handle
+    assert decrypt_value(device.encrypted_auth_secret) == device_keys.auth_secret
+    assert device.encryption_key == device_keys.public
     outsider = User.objects.create_user(email="outsider@example.com")
     Membership.objects.create(user=outsider, organization=org)
     token = DjangoJWTBackend().generate_tokens(outsider).access_token
@@ -104,41 +119,39 @@ def test_device_api_enforces_scope_and_never_echoes_tokens(client, setup, header
     assert client.delete(path, **headers).status_code == 204
 
 
-def test_invalid_native_registration_and_missing_provider(
-    client, setup, headers, settings
-):
-    for payload in (
-        {"platform": "web", "app_id": "com.opencuria.mobile"},
-        {"platform": "ios", "app_id": "attacker.app"},
-        {
-            "platform": "ios",
-            "app_id": "com.opencuria.mobile",
-            "push_token": "token\nsecret",
-        },
+def test_invalid_native_registrations_are_rejected(client, setup, headers, device_keys):
+    valid = {
+        "platform": "ios",
+        "push_handle": "handle",
+        "encryption_key": device_keys.public,
+        "auth_secret": device_keys.auth_secret,
+        "notifications_enabled": True,
+    }
+    for change in (
+        {"platform": "web"},
+        {"push_handle": "handle\nsecret"},
+        {"encryption_key": "BAAA"},
+        {"encryption_key": "B" + "A" * 86},
+        {"auth_secret": "c2hvcnQ"},
     ):
-        assert (
-            client.put(
-                f"/api/v1/notifications/devices/{uuid.uuid4()}/",
-                data=json.dumps(payload),
-                content_type="application/json",
-                **headers,
-            ).status_code
-            == 422
+        response = client.put(
+            f"/api/v1/notifications/devices/{uuid.uuid4()}/",
+            data=json.dumps({**valid, **change}),
+            content_type="application/json",
+            **headers,
         )
+        assert response.status_code == 422, change
     org, user, *_ = setup
-    settings.FCM_SERVICE_ACCOUNT_FILE = ""
-    with pytest.raises(ValueError, match="not configured"):
-        NotificationService().register(
-            user,
-            org.id,
-            uuid.uuid4(),
-            DeviceRegistrationIn(
-                platform="android",
-                app_id="com.opencuria.mobile",
-                notifications_enabled=True,
-                push_token="fcm-token",
-            ),
-        )
+    service = NotificationService()
+    for change, message in (
+        ({"push_handle": ""}, "push handle is required"),
+        ({"encryption_key": "", "auth_secret": ""}, "encryption key is required"),
+        ({"platform": "android"}, "only available on iOS"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            service.register(
+                user, org.id, uuid.uuid4(), registration(device_keys, **change)
+            )
 
 
 @pytest.mark.parametrize("engine", ["native", "claude", "codex"])
@@ -220,18 +233,26 @@ def test_gate_events_include_child_attention_and_resolutions(setup, device):
     assert rows[0][1] == "waiting_for_input"
     question.status = "answered"
     question.save()
-    service = NotificationService(providers=providers())
+    service = NotificationService(proxy=proxy())
     result = asyncio.run(service.deliver(alert))
     assert result.code == "attention_resolved"
-    assert not service.providers.send_apns.called
+    assert not service.proxy.send.called
 
 
-def test_permission_phase_is_current_and_payload_is_bounded(setup, device):
+def test_permission_phase_is_current_and_payload_fits_its_padding(setup, device):
     org, user, workspace, session, _ = setup
     session.title = "😀" * 255
     session.save()
     workspace.name = "😀" * 255
     workspace.save()
+    for index in range(3):
+        HarnessSession.objects.create(
+            workspace=workspace,
+            organization_id=org.id,
+            created_by=user,
+            title="😀" * 255,
+            status="busy",
+        )
     PermissionRequest.objects.create(
         organization_id=org.id,
         workspace_id=workspace.id,
@@ -239,9 +260,13 @@ def test_permission_phase_is_current_and_payload_is_bounded(setup, device):
         tool="exec",
     )
     snapshot = NotificationService().snapshot(user, org.id, device.id)
-    assert snapshot["activeCount"] == 1
+    assert snapshot["activeCount"] == 4
     assert snapshot["activities"][0]["phase"] == "waiting_for_approval"
-    assert len(json.dumps(snapshot, ensure_ascii=False).encode()) < 4096
+    snapshot["activeCount"] = 99999
+    for row in snapshot["activities"]:
+        row["phase"] = "waiting_for_approval"
+    size = len(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode())
+    assert size <= ACTIVITY_PADDED_SIZE
 
 
 @pytest.mark.parametrize(
@@ -294,23 +319,41 @@ def test_workspace_organization_change_fences_old_notification_scope(setup, devi
     assert not PushDelivery.objects.exists()
 
 
-def test_token_rotation_and_account_switch_retire_previous_binding(setup, device):
+def test_handle_rotation_and_account_switch_retire_previous_binding(
+    setup, device, device_keys
+):
     org, user, *_ = setup
     service = NotificationService()
-    registration = DeviceRegistrationIn(
-        platform="ios",
-        app_id="com.opencuria.mobile.dev",
-        push_token="cd" * 32,
-        notifications_enabled=True,
-    )
-    service.register(user, org.id, device.id, registration)
+    rotated = registration(device_keys, push_handle="rotated-handle")
+    service.register(user, org.id, device.id, rotated)
     device.refresh_from_db()
-    assert decrypt_value(device.encrypted_push_token) == "cd" * 32
+    assert decrypt_value(device.encrypted_push_handle) == "rotated-handle"
     other = User.objects.create_user(email="new-account@example.com")
     Membership.objects.create(user=other, organization=org)
-    next_device = service.register(other, org.id, uuid.uuid4(), registration)
+    next_device = service.register(other, org.id, uuid.uuid4(), rotated)
     assert MobileDevice.objects.filter(id=next_device.id).exists()
     assert not MobileDevice.objects.filter(id=device.id).exists()
+
+
+def test_disabling_everything_forgets_handles_and_keys(setup, device, device_keys):
+    org, user, *_ = setup
+    NotificationService().register(
+        user,
+        org.id,
+        device.id,
+        registration(
+            device_keys,
+            push_handle="",
+            encryption_key="",
+            auth_secret="",
+            notifications_enabled=False,
+            live_activities_enabled=False,
+        ),
+    )
+    device.refresh_from_db()
+    assert not device.encrypted_push_handle
+    assert not device.encryption_key
+    assert not device.encrypted_auth_secret
 
 
 def test_outbox_claim_recovery_and_fencing(setup, device):
@@ -331,79 +374,123 @@ def test_outbox_claim_recovery_and_fencing(setup, device):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_alerts_are_end_to_end_encrypted_for_the_device(setup, device, device_keys):
+    _, _, _, session, message = setup
+    message.content = "This private response must not appear on a lock screen"
+    message.save()
+    finish(message)
+    NotificationService().record_finished(message.id)
+    transport = proxy()
+    asyncio.run(NotificationService(proxy=transport).process_one())
+    (sent_alert,) = sent(transport)
+    assert sent_alert.handle == "alert-handle"
+    assert sent_alert.timestamp is None
+    assert len(sent_alert.collapse_id) == 32
+    for value in ("Build feature", "Push workspace", str(session.id), "finished"):
+        assert value not in json.dumps(sent_alert.__dict__)
+    plaintext = device_keys.open(sent_alert.payload)
+    assert plaintext == {
+        "title": "Agent finished",
+        "body": "Build feature · Push workspace",
+        "thread": str(session.id),
+        "tag": sent_alert.collapse_id,
+        "data": {
+            "type": "opencuria.agent-activity",
+            "deviceId": str(device.id),
+            "organizationId": str(device.organization_id),
+            "workspaceId": str(session.workspace_id),
+            "sessionId": str(session.id),
+            "phase": "completed",
+        },
+    }
+    assert message.content not in json.dumps(plaintext)
+
+
+@pytest.mark.django_db(transaction=True)
 def test_transient_delivery_retries_then_acknowledges(setup, device):
     finish(setup[4])
     NotificationService().record_finished(setup[4].id)
-    transport = providers(DeliveryResult("retry", "apns_503"))
-    service = NotificationService(providers=transport)
+    transport = proxy(DeliveryResult("retry", "proxy_503_provider_unavailable"))
+    service = NotificationService(proxy=transport)
     assert asyncio.run(service.process_one())
     job = PushDelivery.objects.get(kind="alert")
     assert job.status == "pending" and job.attempts == 1
     assert job.available_at > timezone.now()
     PushDelivery.objects.filter(id=job.id).update(available_at=timezone.now())
-    transport.send_apns.return_value = DeliveryResult("sent")
+    transport.send.return_value = DeliveryResult("sent")
     assert asyncio.run(service.process_one())
     job.refresh_from_db()
     assert job.status == "sent" and job.attempts == 2
-    assert transport.send_apns.call_args.kwargs["payload"]["body"]["sessionId"] == str(
-        setup[3].id
-    )
 
 
 @pytest.mark.django_db(transaction=True)
-def test_activity_token_registration_updates_and_ends_in_background(setup, device):
+def test_activity_handle_registration_updates_and_ends_in_background(
+    setup, device, device_keys
+):
     org, user, _, session, message = setup
-    transport = providers()
-    service = NotificationService(providers=transport)
+    transport = proxy()
+    service = NotificationService(proxy=transport)
     service.register_activity(
         user,
         org.id,
         device.id,
-        ActivityRegistrationIn(activity_id="activity-1", push_token="ef" * 32),
+        ActivityRegistrationIn(activity_id="activity-1", push_handle="activity-handle"),
     )
     assert asyncio.run(service.process_one())
-    aps = transport.send_apns.call_args.kwargs["payload"]["aps"]
-    assert aps["event"] == "update"
-    assert json.loads(aps["content-state"]["props"])["activeCount"] == 1
+    update = sent(transport, "activity")[-1]
+    assert update.type == "activity_update"
+    assert update.handle == "activity-handle"
+    assert update.stale_date == update.timestamp + 600
+    assert device_keys.open(update.payload)["activeCount"] == 1
     finish(message)
     session.status = "idle"
     session.save()
     service.record_finished(message.id)
     while asyncio.run(service.process_one()):
         pass
-    activity_calls = [
-        call
-        for call in transport.send_apns.call_args_list
-        if call.kwargs.get("live_activity")
-    ]
-    assert activity_calls[-1].kwargs["payload"]["aps"]["event"] == "end"
-    ended = activity_calls[-1].kwargs["payload"]["aps"]
-    assert ended["dismissal-date"] == ended["timestamp"]
+    ended = sent(transport, "activity")[-1]
+    assert ended.type == "activity_end"
+    assert ended.dismissal_date == ended.timestamp
+    assert device_keys.open(ended.payload)["activeCount"] == 0
+    assert len(ended.payload) == len(update.payload)
     device.refresh_from_db()
-    assert device.encrypted_activity_token == ""
+    assert device.encrypted_activity_handle == ""
 
 
 @pytest.mark.django_db(transaction=True)
-def test_invalid_provider_token_disables_only_rejected_destination(setup, device):
+def test_rejected_handle_disables_only_that_destination(setup, device):
     finish(setup[4])
     NotificationService().record_finished(setup[4].id)
     service = NotificationService(
-        providers=providers(DeliveryResult("invalid", "apns_unregistered"))
+        proxy=proxy(DeliveryResult("invalid", "proxy_410_unregistered"))
     )
     asyncio.run(service.process_one())
     device.refresh_from_db()
     assert not device.notifications_enabled
-    assert not device.encrypted_push_token
+    assert not device.encrypted_push_handle
+    assert device.encryption_key
 
 
 @pytest.mark.django_db(transaction=True)
-def test_membership_revocation_and_expired_jobs_never_reach_provider(setup, device):
+def test_undecryptable_stored_keys_fail_without_retrying(setup, device):
     finish(setup[4])
     NotificationService().record_finished(setup[4].id)
-    service = NotificationService(providers=providers())
+    MobileDevice.objects.filter(id=device.id).update(encryption_key="BAAA")
+    transport = proxy()
+    asyncio.run(NotificationService(proxy=transport).process_one())
+    job = PushDelivery.objects.get(kind="alert")
+    assert (job.status, job.error_code) == ("failed", "invalid_destination")
+    assert not transport.send.called
+
+
+@pytest.mark.django_db(transaction=True)
+def test_membership_revocation_and_expired_jobs_never_reach_the_proxy(setup, device):
+    finish(setup[4])
+    NotificationService().record_finished(setup[4].id)
+    service = NotificationService(proxy=proxy())
     Membership.objects.filter(user=setup[1]).delete()
     asyncio.run(service.process_one())
-    assert not service.providers.send_apns.called
+    assert not service.proxy.send.called
     assert PushDelivery.objects.get(kind="alert").error_code == "registration_expired"
     PushDelivery.objects.all().update(
         status="pending", created_at=timezone.now() - timedelta(minutes=16)
@@ -413,37 +500,42 @@ def test_membership_revocation_and_expired_jobs_never_reach_provider(setup, devi
 
 
 @pytest.mark.django_db(transaction=True)
-def test_android_alert_keeps_direct_fcm_navigation_data(setup):
+def test_android_alert_uses_the_same_encrypted_contract(setup, device_keys):
     org, user, _, session, message = setup
     NotificationService().register(
         user,
         org.id,
         uuid.uuid4(),
-        DeviceRegistrationIn(
+        registration(
+            device_keys,
             platform="android",
-            app_id="com.opencuria.mobile.dev",
-            push_token="fcm-device",
-            notifications_enabled=True,
+            push_handle="android-handle",
+            live_activities_enabled=False,
         ),
     )
     finish(message)
-    service = NotificationService(providers=providers())
+    service = NotificationService(proxy=proxy())
     service.record_finished(message.id)
     asyncio.run(service.process_one())
-    data = service.providers.send_fcm.call_args.kwargs["data"]
+    (alert,) = sent(service.proxy)
+    assert alert.handle == "android-handle"
+    data = device_keys.open(alert.payload)["data"]
     assert data["sessionId"] == str(session.id)
     assert data["organizationId"] == str(org.id)
-    assert not service.providers.send_apns.called
 
 
-def test_new_opt_in_does_not_replay_earlier_completions(setup, device):
+def test_new_opt_in_does_not_replay_earlier_completions(setup, device, device_keys):
     org, user, _, _, message = setup
     finish(message)
     service = NotificationService()
-    off = DeviceRegistrationIn(platform="ios", app_id="com.opencuria.mobile.dev")
+    off = DeviceRegistrationIn(platform="ios")
     service.register(user, org.id, device.id, off)
-    on = off.model_copy(update={"notifications_enabled": True, "push_token": "ab" * 32})
-    service.register(user, org.id, device.id, on)
+    service.register(
+        user,
+        org.id,
+        device.id,
+        registration(device_keys, live_activities_enabled=False),
+    )
     service.record_finished(message.id)
     assert not PushDelivery.objects.exists()
 

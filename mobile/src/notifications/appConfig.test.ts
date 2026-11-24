@@ -48,3 +48,23 @@ describe("home screen widget configuration", () => {
     ]);
   });
 });
+
+describe("push proxy configuration", () => {
+  it.each(["development", "production"])(
+    "builds the %s app for the public OpenCuria push proxy",
+    (variant) => {
+      vi.stubEnv("APP_VARIANT", variant);
+      const config = appConfig({ config: {} } as ConfigContext);
+      const group = `group.${config.ios?.bundleIdentifier}`;
+      expect(config.extra?.pushProxyUrl).toBe("https://push.opencuria.dev");
+      expect(config.plugins).toContainEqual([
+        "./plugins/withNotificationServiceExtension",
+        { groupIdentifier: group },
+      ]);
+      expect(config.plugins).toContainEqual([
+        "expo-widgets",
+        expect.objectContaining({ groupIdentifier: group }),
+      ]);
+    },
+  );
+});

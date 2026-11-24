@@ -5,14 +5,14 @@ import type {
   NativeFormSection,
 } from "../../ui/NativeForm.types";
 import { useNotifications } from "../../notifications/NotificationContext";
+import { availabilityMessage } from "../../notifications/pushProxy";
 import { errorRows } from "../../ui/formStates";
 import { SettingsPage } from "../SettingsPage";
 
 /** Push notifications and, on iOS, Live Activities; permission is only asked on opt-in. */
 export function NotificationsPage(): React.JSX.Element {
   const { controller, state } = useNotifications();
-  const configured =
-    state.capabilities?.[Platform.OS === "ios" ? "ios" : "android"];
+  const configured = state.availability === "available";
   const live = Platform.OS === "ios" && Boolean(controller?.live.available);
   const rows: NativeFormRow[] = [
     {
@@ -41,7 +41,7 @@ export function NotificationsPage(): React.JSX.Element {
             value: state.liveActivities,
             disabled: !(
               state.ready &&
-              (state.capabilities?.live_activities || state.liveActivities) &&
+              (configured || state.liveActivities) &&
               !state.busy
             ),
             onChange: (value: boolean) =>
@@ -53,10 +53,13 @@ export function NotificationsPage(): React.JSX.Element {
   const sections: NativeFormSection[] = [
     {
       id: "notifications",
-      footer:
-        state.ready && state.capabilities && !configured
-          ? "This server has not set up mobile notifications yet."
-          : undefined,
+      footer: state.ready
+        ? (availabilityMessage(
+            state.availability,
+            state.capabilities,
+            controller?.proxy.url ?? "",
+          ) ?? undefined)
+        : undefined,
       rows,
     },
     ...(state.notifications && !state.permissionGranted

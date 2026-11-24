@@ -25,6 +25,7 @@ const mockNotificationState: NotificationState = {
   liveActivities: false,
   permissionGranted: false,
   capabilities: null,
+  availability: null,
   error: null,
   target: null,
 };

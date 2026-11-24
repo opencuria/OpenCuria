@@ -7,6 +7,12 @@ import type { NotificationPreferences } from "./storage";
 import type { NativeNotifications } from "./native";
 import type { LiveActivities, LiveActivityHandle } from "./liveActivity";
 import type { NotificationTarget } from "./target";
+import {
+  availabilityMessage,
+  pushAvailability,
+  type PushAvailability,
+  type PushProxy,
+} from "./pushProxy";
 
 export interface NotificationState {
   ready: boolean;
@@ -15,9 +21,14 @@ export interface NotificationState {
   liveActivities: boolean;
   permissionGranted: boolean;
   capabilities: PushCapabilities | null;
+  /** Whether this server sends through the push proxy built into the app. */
+  availability: PushAvailability | null;
   error: string | null;
   target: NotificationTarget | null;
 }
+
+/** Proxy handles are cached per process: the proxy sees each token once. */
+const MAX_CACHED_HANDLES = 8;
 
 export interface PreferenceStorage {
   load(): Promise<NotificationPreferences>;
@@ -33,10 +44,16 @@ export class NotificationController {
     liveActivities: false,
     permissionGranted: false,
     capabilities: null,
+    availability: null,
     error: null,
     target: null,
   };
   private listeners = new Set<() => void>();
+  private handles = new Map<string, string>();
+  private destination: {
+    serverKey: string;
+    environment: "sandbox" | "production";
+  } | null = null;
   private preferences: NotificationPreferences | null = null;
   private cleanup: Array<() => void> = [];
   private activity: LiveActivityHandle | null = null;
@@ -54,6 +71,7 @@ export class NotificationController {
     private readonly storage: PreferenceStorage,
     readonly native: NativeNotifications,
     readonly live: LiveActivities,
+    readonly proxy: PushProxy,
   ) {}
 
   subscribe = (listener: () => void): (() => void) => {
@@ -185,6 +203,10 @@ export class NotificationController {
           liveActivities: false,
         };
         await this.storage.save(this.preferences);
+        // Pushes still in flight for this account become undecryptable.
+        await this.native
+          .deleteKeys(this.preferences.deviceId)
+          .catch(() => undefined);
       }
       await this.native.reset();
       await this.endActivities();
@@ -216,7 +238,8 @@ export class NotificationController {
     if (!preferences || this.disposed || this.revoking) return;
     const capabilities = await this.client.notifications.capabilities();
     if (this.disposed || this.revoking) return;
-    this.patch({ capabilities });
+    const availability = pushAvailability(capabilities, this.proxy.url);
+    this.patch({ capabilities, availability });
     const permission = this.native.available
       ? await this.native.permission(requestPermission)
       : false;
@@ -225,39 +248,49 @@ export class NotificationController {
       throw new Error(
         "Allow OpenCuria notifications in your device settings to receive agent updates.",
       );
-    if (enabling === "notifications" && !capabilities[this.native.platform])
-      throw new Error(
-        "This server has not configured push notifications for this device.",
-      );
-    if (enabling === "liveActivities" && !capabilities.live_activities)
-      throw new Error("This server has not configured Live Activities.");
+    const unavailable = availabilityMessage(
+      availability,
+      capabilities,
+      this.proxy.url,
+    );
+    if (enabling && unavailable) throw new Error(unavailable);
     if (enabling === "liveActivities" && !this.live.available)
       throw new Error(
         "Live Activities are unavailable in this build or on this device.",
       );
-    const notifications =
-      preferences.notifications &&
-      permission &&
-      capabilities[this.native.platform];
+    const usable = availability === "available";
+    const notifications = preferences.notifications && permission && usable;
     const liveEnabled =
-      preferences.liveActivities &&
-      this.live.available &&
-      capabilities.live_activities;
+      preferences.liveActivities && this.live.available && usable;
     const token = notifications ? await this.native.token() : "";
     if (notifications) this.deviceToken = token;
     const environment =
       notifications || liveEnabled
         ? await this.native.environment()
         : "production";
+    const keys =
+      notifications || liveEnabled
+        ? await this.native.keys(preferences.deviceId)
+        : null;
+    this.destination = usable
+      ? { serverKey: capabilities.server_key ?? "", environment }
+      : null;
+    const handle = notifications ? await this.handle("alert", token) : "";
     if (this.disposed || this.revoking) return;
-    await this.client.notifications.registerDevice(preferences.deviceId, {
-      platform: this.native.platform,
-      app_id: this.native.appId,
-      apns_environment: environment,
-      push_token: token,
-      notifications_enabled: notifications,
-      live_activities_enabled: liveEnabled,
-    });
+    try {
+      await this.client.notifications.registerDevice(preferences.deviceId, {
+        platform: this.native.platform,
+        push_handle: handle,
+        encryption_key: keys?.publicKey ?? "",
+        auth_secret: keys?.authSecret ?? "",
+        notifications_enabled: notifications,
+        live_activities_enabled: liveEnabled,
+      });
+    } catch (cause) {
+      // A rejected registration may mean a stale handle; ask the proxy again.
+      this.handles.clear();
+      throw cause;
+    }
     if (this.disposed || this.revoking) return;
     if (!liveEnabled) {
       await this.endActivities();
@@ -268,6 +301,38 @@ export class NotificationController {
     );
     if (this.disposed || this.revoking) return;
     await this.reconcileActivity(snapshot);
+  }
+
+  /** The proxy handle for a native token and the current server key. */
+  private async handle(
+    kind: "alert" | "activity",
+    token: string,
+  ): Promise<string> {
+    const destination = this.destination;
+    if (!destination?.serverKey)
+      throw new Error("This server has turned off mobile notifications.");
+    const key = [
+      kind,
+      destination.environment,
+      destination.serverKey,
+      token,
+    ].join(" ");
+    const cached = this.handles.get(key);
+    if (cached) return cached;
+    const handle = await this.proxy.register({
+      platform: this.native.platform,
+      app_id: this.native.appId,
+      environment: destination.environment,
+      kind,
+      token,
+      server_key: destination.serverKey,
+    });
+    this.handles.set(key, handle);
+    for (const old of this.handles.keys()) {
+      if (this.handles.size <= MAX_CACHED_HANDLES) break;
+      this.handles.delete(old);
+    }
+    return handle;
   }
 
   private async reconcileActivity(
@@ -320,10 +385,12 @@ export class NotificationController {
       token === this.activityToken
     )
       return;
+    const handle = await this.handle("activity", token);
+    if (this.disposed || this.revoking || this.activity?.id !== id) return;
     await this.client.notifications.registerActivity(
       this.preferences.deviceId,
       id,
-      token,
+      handle,
     );
     if (!this.disposed && this.activity?.id === id) this.activityToken = token;
   }

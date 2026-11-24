@@ -32,7 +32,12 @@ setup_python_component() {
     cd "$component_dir"
     source .venv/bin/activate
     python -m pip install --upgrade pip
-    pip install -r requirements.txt
+    # Images install requirements.txt; tests and lint may need more.
+    if [[ -f requirements-dev.txt ]]; then
+      pip install -r requirements-dev.txt
+    else
+      pip install -r requirements.txt
+    fi
   )
 }
 
@@ -94,6 +99,7 @@ install_system_deps() {
 install_system_deps
 setup_python_component backend
 setup_python_component runner
+setup_python_component push-proxy
 setup_node_component .
 run_backend_migrations
 

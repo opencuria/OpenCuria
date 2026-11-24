@@ -1,11 +1,17 @@
-"""Disposable organizations, devices and signing keys for native delivery tests."""
+"""Disposable organizations, devices and device keys for native delivery tests."""
 
+import base64
 import json
+import os
 import uuid
+from dataclasses import dataclass
 
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from apps.accounts.auth_backends import DjangoJWTBackend
 from apps.accounts.models import User
@@ -16,46 +22,87 @@ from apps.runners.models import Runner, Workspace
 from ..schemas import DeviceRegistrationIn
 from ..services import NotificationService
 
+PROXY_URL = "https://push.example.test"
 
-@pytest.fixture(scope="session")
-def push_keys():
-    """Generate local test keys; these are never production provider credentials."""
 
-    def pem(key):
-        return key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        ).decode()
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
-    return {
-        "apns": {
-            "team_id": "TEAM123456",
-            "key_id": "KEY1234567",
-            "private_key": pem(ec.generate_private_key(ec.SECP256R1())),
-        },
-        "fcm": {
-            "project_id": "opencuria-test",
-            "client_email": "push@opencuria-test.iam.gserviceaccount.com",
-            "private_key": pem(
-                rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            ),
-        },
-    }
+
+def unb64url(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+@dataclass(frozen=True)
+class DeviceKeys:
+    """What the app keeps in its keychain: an RFC 8291 key pair and auth secret."""
+
+    private_key: ec.EllipticCurvePrivateKey
+    auth: bytes
+
+    @property
+    def public(self) -> str:
+        return b64url(
+            self.private_key.public_key().public_bytes(
+                serialization.Encoding.X962,
+                serialization.PublicFormat.UncompressedPoint,
+            )
+        )
+
+    @property
+    def auth_secret(self) -> str:
+        return b64url(self.auth)
+
+    def decrypt(self, payload: str) -> bytes:
+        """Decrypt like the app's extensions do; fails for any other receiver."""
+        body = unb64url(payload)
+        salt, idlen = body[:16], body[20]
+        sender = body[21 : 21 + idlen]
+        ciphertext = body[21 + idlen :]
+        shared = self.private_key.exchange(
+            ec.ECDH(),
+            ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), sender),
+        )
+
+        def hkdf(salt, ikm, info, length):
+            return HKDF(SHA256(), length, salt, info).derive(ikm)
+
+        receiver = unb64url(self.public)
+        ikm = hkdf(self.auth, shared, b"WebPush: info\x00" + receiver + sender, 32)
+        key = hkdf(salt, ikm, b"Content-Encoding: aes128gcm\x00", 16)
+        nonce = hkdf(salt, ikm, b"Content-Encoding: nonce\x00", 12)
+        record = AESGCM(key).decrypt(nonce, ciphertext, None).rstrip(b"\x00")
+        assert record.endswith(b"\x02")
+        return record[:-1]
+
+    def open(self, payload: str) -> dict:
+        return json.loads(self.decrypt(payload))
 
 
 @pytest.fixture
-def push_settings(settings, push_keys, tmp_path):
-    """Enable both providers exclusively through hosting key files."""
-    apns_key = tmp_path / "apns.p8"
-    apns_key.write_text(push_keys["apns"]["private_key"], encoding="utf-8")
-    fcm_account = tmp_path / "firebase.json"
-    fcm_account.write_text(json.dumps(push_keys["fcm"]), encoding="utf-8")
-    settings.APNS_TEAM_ID = push_keys["apns"]["team_id"]
-    settings.APNS_KEY_ID = push_keys["apns"]["key_id"]
-    settings.APNS_PRIVATE_KEY_FILE = str(apns_key)
-    settings.FCM_SERVICE_ACCOUNT_FILE = str(fcm_account)
+def device_keys() -> DeviceKeys:
+    return DeviceKeys(ec.generate_private_key(ec.SECP256R1()), os.urandom(16))
+
+
+@pytest.fixture
+def push_settings(settings):
+    """Route mobile push through a (mocked) push proxy."""
+    settings.PUSH_PROXY_URL = PROXY_URL
     return settings
+
+
+def registration(keys: DeviceKeys, **overrides) -> DeviceRegistrationIn:
+    """An iOS installation that opted into notifications and Live Activities."""
+    fields = {
+        "platform": "ios",
+        "push_handle": "alert-handle",
+        "encryption_key": keys.public,
+        "auth_secret": keys.auth_secret,
+        "notifications_enabled": True,
+        "live_activities_enabled": True,
+        **overrides,
+    }
+    return DeviceRegistrationIn(**fields)
 
 
 @pytest.fixture
@@ -94,18 +141,8 @@ def headers(setup):
 
 
 @pytest.fixture
-def device(setup):
+def device(setup, device_keys):
     org, user, *_ = setup
     return NotificationService().register(
-        user,
-        org.id,
-        uuid.uuid4(),
-        DeviceRegistrationIn(
-            platform="ios",
-            app_id="com.opencuria.mobile.dev",
-            apns_environment="sandbox",
-            push_token="ab" * 32,
-            notifications_enabled=True,
-            live_activities_enabled=True,
-        ),
+        user, org.id, uuid.uuid4(), registration(device_keys)
     )

@@ -16,6 +16,11 @@ on Android (`@expo/ui`, native menus, native navigation and text editing).
   [`modules/opencuria-app-runtime`](modules/opencuria-app-runtime/README.md).
 - Scheduled tasks, push notifications, iOS Live Activities and every webapp setting.
   MCP OAuth connections finish in the browser.
+- Push notifications and Live Activities arrive only through the push proxy fixed in
+  `app.config.ts` (`PUSH_PROXY_URL`, [`push-proxy/`](../push-proxy/README.md)) and are
+  decrypted on the device ([`modules/opencuria-push`](modules/opencuria-push/README.md)).
+  A server must use the same proxy. Builds with their own bundle IDs and push
+  credentials set their own proxy there.
 - Dictation as in the webapp: the microphone takes Send's place while the draft
   is empty. Recordings are saved on the device first (`src/voice/`), wait there
   through lost connections and restarts, and their text goes to the draft of
@@ -69,8 +74,10 @@ hosts; public hosts need `https://`.
   queue from `@opencuria/chat-core/voiceTranscriptions`).
 - `src/scheduledTasks/`, `src/notifications/`, `src/widgets/`, `src/offline/`,
   `src/platform/` (secure storage, pickers, uploads, media cache).
-- `modules/`: local Expo modules (app runtime, terminal, highlighter, PDF, toolbar).
-- `plugins/`: local config plugins (app extensions take the app's version and build number).
+- `modules/`: local Expo modules (app runtime, terminal, highlighter, PDF, toolbar,
+  push decryption keys).
+- `plugins/`: local config plugins (app extensions take the app's version and build
+  number; the iOS notification service extension).
 
 ## Checks
 
@@ -87,4 +94,7 @@ npm run export -w mobile    # JS bundle for both platforms, not a signed build
 `.github/workflows/testflight-dev.yml` uploads `dev` nightly when the app changed,
 or on demand (Actions → TestFlight (dev) → Run workflow). It uses the `production`
 profile of `eas.json` with credentials and build numbers stored on EAS; the
-secrets it needs are listed at the top of the workflow.
+secrets it needs are listed at the top of the workflow. Every app extension needs
+a provisioning profile on EAS (`<bundle id>.ExpoWidgetsTarget`,
+`<bundle id>.NotificationService`, both in the app group); create missing ones once
+with an interactive `eas build -p ios` or `eas credentials`.

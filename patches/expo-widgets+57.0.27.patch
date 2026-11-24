@@ -1,0 +1,29 @@
+diff --git a/node_modules/expo-widgets/ios/Widgets/Utils.swift b/node_modules/expo-widgets/ios/Widgets/Utils.swift
+index 2b4c044..524fb03 100644
+--- a/node_modules/expo-widgets/ios/Widgets/Utils.swift
++++ b/node_modules/expo-widgets/ios/Widgets/Utils.swift
+@@ -42,9 +42,23 @@ public func evaluateLayout(
+   }
+ }
+ 
++// OpenCuria: pushed Live Activity updates carry end-to-end encrypted props.
++// OpenCuriaPushPayloadDecoder (OpenCuriaPushCrypto.swift, compiled into the
++// widget extension) decrypts them; without it, props pass through unchanged.
++private func decodeLiveActivityProps(_ props: String) -> String {
++  let selector = NSSelectorFromString("decodeLiveActivityProps:")
++  guard let decoder = NSClassFromString("OpenCuriaPushPayloadDecoder"),
++        let method = class_getClassMethod(decoder, selector) else {
++    return props
++  }
++  typealias Decode = @convention(c) (AnyClass, Selector, NSString) -> NSString?
++  let decode = unsafeBitCast(method_getImplementation(method), to: Decode.self)
++  return decode(decoder, selector, props as NSString).map { $0 as String } ?? props
++}
++
+ func getLiveActivityNodes(forName name: String, props: String = "{}", environment: [String: Any]) -> [String: Any] {
+   let layout = WidgetsStorage.getString(forKey: "__expo_widgets_live_activity_\(name)_layout") ?? ""
+-  let propsData = props.data(using: .utf8)
++  let propsData = decodeLiveActivityProps(props).data(using: .utf8)
+   let propsDict = propsData.flatMap { try? JSONSerialization.jsonObject(with: $0, options: []) as? [String: Any] } ?? [:]
+ 
+   switch evaluateWidgetLayout(layout: layout, props: propsDict, environment: environment) {

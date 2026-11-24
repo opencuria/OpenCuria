@@ -1,4 +1,4 @@
-"""Execution-worker-owned delivery loop; queue state and leases remain in the database."""
+"""Execution-worker delivery loop; queue state and leases stay in the database."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import time
 
 import structlog
 
-from .providers import PushProviders
+from .proxy import PushProxyClient
 from .services import NotificationService
 
 log = structlog.get_logger(__name__)
@@ -26,7 +26,7 @@ class NotificationWorker:
         if self._task is not None:
             return
         if self.service is None:
-            self.service = NotificationService(providers=PushProviders())
+            self.service = NotificationService(proxy=PushProxyClient())
         self._task = asyncio.create_task(self._run(), name="mobile-notifications")
 
     async def stop(self) -> None:
@@ -36,8 +36,8 @@ class NotificationWorker:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
-        if self.service and self.service.providers:
-            await self.service.providers.close()
+        if self.service and self.service.proxy:
+            await self.service.proxy.close()
 
     async def _run(self) -> None:
         last_repair = 0.0

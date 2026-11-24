@@ -1,0 +1,39 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.opencuriapush'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.opencuriapush"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+/**
+ * Another Expo module, as a source project or, when Expo links it prebuilt,
+ * as its local Maven artifact. The app itself ships the module at runtime.
+ */
+def expoModule = { String name, String artifactId ->
+  def source = rootProject.findProject(":${name}")
+  if (source != null) {
+    return source
+  }
+  def version = providers.exec {
+    workingDir(projectDir)
+    commandLine("node", "--print", "require('${name}/package.json').version")
+  }.standardOutput.asText.get().trim()
+  return "host.exp.exponent:${artifactId}:${version}"
+}
+
+dependencies {
+  // PushMessagingService extends expo-notifications' FCM service and hands it
+  // the decrypted notification; same Firebase Messaging as expo-notifications.
+  compileOnly expoModule('expo-notifications', 'expo.modules.notifications')
+  implementation 'com.google.firebase:firebase-messaging:25.0.1'
+  testImplementation 'junit:junit:4.13.2'
+}

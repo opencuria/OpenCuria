@@ -1,4 +1,4 @@
-"""Verify removal of populated organization push configuration and secrets."""
+"""Verify the push migrations against populated old data."""
 
 import os
 import subprocess
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 
-def test_push_migration_purges_old_secrets_and_preserves_devices(tmp_path):
+def test_push_migrations_purge_old_secrets_then_direct_registrations(tmp_path):
     script = r"""
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
@@ -75,8 +75,11 @@ device = Device.objects.create(
 delivery = Delivery.objects.create(device=device, event_key="queued", kind="alert")
 
 executor = MigrationExecutor(connection)
-executor.migrate(executor.loader.graph.leaf_nodes())
-new = executor.loader.project_state(executor.loader.graph.leaf_nodes()).apps
+before_proxy = [
+    node for node in executor.loader.graph.leaf_nodes() if node[0] != "notifications"
+] + [("notifications", "0005_remove_pushconfiguration")]
+executor.migrate(before_proxy)
+new = executor.loader.project_state(before_proxy).apps
 Service = new.get_model("credentials", "CredentialService")
 Credential = new.get_model("credentials", "Credential")
 assert not Service.objects.filter(pk__in=[row.pk for row in retired]).exists()
@@ -99,6 +102,22 @@ Delivery = new.get_model("notifications", "PushDelivery")
 assert Delivery.objects.filter(pk=delivery.pk).exists()
 assert "notifications_pushconfiguration" not in connection.introspection.table_names()
 assert "server_secret" not in dict(Service._meta.get_field("credential_type").choices)
+
+# Direct APNs/FCM tokens are useless with the push proxy: devices register again.
+executor = MigrationExecutor(connection)
+executor.migrate(executor.loader.graph.leaf_nodes())
+latest = executor.loader.project_state(executor.loader.graph.leaf_nodes()).apps
+assert not latest.get_model("notifications", "MobileDevice").objects.exists()
+assert not latest.get_model("notifications", "PushDelivery").objects.exists()
+with connection.cursor() as cursor:
+    columns = {
+        column.name
+        for column in connection.introspection.get_table_description(
+            cursor, "notifications_mobiledevice"
+        )
+    }
+assert "encrypted_push_token" not in columns and "app_id" not in columns
+assert {"encrypted_push_handle", "encryption_key", "encrypted_auth_secret"} <= columns
 """
     subprocess.run(
         [sys.executable, "manage.py", "shell", "-c", script],
@@ -107,10 +126,7 @@ assert "server_secret" not in dict(Service._meta.get_field("credential_type").ch
             **os.environ,
             "DJANGO_SETTINGS_MODULE": "config.settings.development",
             "SQLITE_PATH": str(tmp_path / "push-migration.sqlite3"),
-            "APNS_TEAM_ID": "",
-            "APNS_KEY_ID": "",
-            "APNS_PRIVATE_KEY_FILE": "",
-            "FCM_SERVICE_ACCOUNT_FILE": "",
+            "PUSH_PROXY_URL": "",
         },
         check=True,
         capture_output=True,

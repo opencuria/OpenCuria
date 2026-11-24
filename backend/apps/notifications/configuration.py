@@ -1,118 +1,124 @@
-"""Instance-wide push settings supplied exclusively by the hosting environment."""
+"""Push proxy endpoint and this server's VAPID identity.
+
+Mobile push leaves this server only through the push proxy (PUSH_PROXY_URL);
+the backend holds no APNs or FCM credentials. The identity key is derived
+from DJANGO_SECRET_KEY, so API and execution processes share it without
+extra state; rotating the secret key makes devices register again.
+"""
 
 from __future__ import annotations
 
+import base64
+import time
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
+from urllib.parse import urlsplit
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+import jwt
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+# Order of the P-256 group.
+_P256_ORDER = int(
+    "FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551", 16
+)
+_IDENTITY_INFO = b"opencuria push proxy vapid key v1"
+VAPID_TOKEN_LIFETIME = 12 * 60 * 60
 
 
-class APNsConfig(BaseModel):
-    """Apple token-signing configuration, never exposed to clients."""
-
-    model_config = ConfigDict(frozen=True)
-
-    team_id: str = Field(pattern=r"^[A-Z0-9]{10}$")
-    key_id: str = Field(pattern=r"^[A-Z0-9]{10}$")
-    private_key: SecretStr
+def b64url(data: bytes) -> str:
+    """Unpadded base64url, the encoding of every key on the proxy protocol."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
-class FCMConfig(BaseModel):
-    """Service-account fields used by the fixed Google OAuth flow."""
+@dataclass(frozen=True)
+class ServerIdentity:
+    """The key the proxy binds this server's device handles to."""
 
-    model_config = ConfigDict(frozen=True)
+    private_key: ec.EllipticCurvePrivateKey
+    public_key: str
 
-    project_id: str = Field(pattern=r"^[a-z][a-z0-9-]{4,61}[a-z0-9]$")
-    client_email: str = Field(pattern=r"^[^\s@]+@[^\s@]+\.iam\.gserviceaccount\.com$")
-    private_key: SecretStr
+    def authorization(self, audience: str, now: int | None = None) -> tuple[str, int]:
+        """Return a VAPID (RFC 8292) Authorization header and its expiry."""
+        expires = int(time.time() if now is None else now) + VAPID_TOKEN_LIFETIME
+        token = jwt.encode(
+            {"aud": audience, "exp": expires}, self.private_key, algorithm="ES256"
+        )
+        return f"vapid t={token}, k={self.public_key}", expires
 
 
 @dataclass(frozen=True)
 class PushSettings:
-    """One provider configuration shared by every organization on this server."""
+    """Where pushes go; `proxy_url` None turns mobile push off."""
 
-    apns: APNsConfig | None
-    fcm: FCMConfig | None
+    proxy_url: str | None
+    identity: ServerIdentity
 
-    def capabilities(self) -> dict[str, bool]:
-        """Expose availability without provider account details or secrets."""
+    @property
+    def enabled(self) -> bool:
+        """Whether devices may register for notifications."""
+        return self.proxy_url is not None
+
+    @property
+    def audience(self) -> str:
+        """The proxy origin VAPID tokens are issued for."""
+        return self.proxy_url or ""
+
+    def capabilities(self) -> dict[str, str | None]:
+        """What the app needs to register with the same proxy for this server."""
         return {
-            "ios": self.apns is not None,
-            "android": self.fcm is not None,
-            "live_activities": self.apns is not None,
+            "proxy_url": self.proxy_url,
+            "server_key": self.identity.public_key if self.enabled else None,
         }
 
 
 def get_push_settings() -> PushSettings:
-    """Load hosting key files once at startup; unset providers stay disabled."""
-    return _load_settings(
-        settings.APNS_TEAM_ID,
-        settings.APNS_KEY_ID,
-        settings.APNS_PRIVATE_KEY_FILE,
-        settings.FCM_SERVICE_ACCOUNT_FILE,
+    """Validate the proxy URL and derive the identity once per process."""
+    return _load(settings.PUSH_PROXY_URL, settings.SECRET_KEY)
+
+
+@lru_cache(maxsize=4)
+def _load(proxy_url: str, secret_key: str) -> PushSettings:
+    return PushSettings(
+        proxy_url=_proxy_url(proxy_url), identity=_derive_identity(secret_key)
     )
 
 
-@lru_cache(maxsize=1)
-def _load_settings(
-    team_id: str, key_id: str, apns_key_file: str, fcm_account_file: str
-) -> PushSettings:
-    apns = None
-    if any((team_id, key_id, apns_key_file)):
-        if not all((team_id, key_id, apns_key_file)):
-            raise ImproperlyConfigured(
-                "APNS_TEAM_ID, APNS_KEY_ID and APNS_PRIVATE_KEY_FILE "
-                "must be set together"
-            )
-        private_key = _read_secret_file(apns_key_file, "APNS_PRIVATE_KEY_FILE")
-        try:
-            apns = APNsConfig(team_id=team_id, key_id=key_id, private_key=private_key)
-            _validate_key(apns)
-        except Exception:
-            raise ImproperlyConfigured(
-                "Invalid APNs configuration: check APNS_TEAM_ID, APNS_KEY_ID "
-                "and APNS_PRIVATE_KEY_FILE"
-            ) from None
-
-    fcm = None
-    if fcm_account_file:
-        account_json = _read_secret_file(fcm_account_file, "FCM_SERVICE_ACCOUNT_FILE")
-        try:
-            fcm = FCMConfig.model_validate_json(account_json)
-            _validate_key(fcm)
-        except Exception:
-            raise ImproperlyConfigured(
-                "Invalid FCM_SERVICE_ACCOUNT_FILE JSON or private key"
-            ) from None
-
-    return PushSettings(apns=apns, fcm=fcm)
-
-
-def _read_secret_file(path: str, name: str) -> str:
-    if not Path(path).is_absolute():
-        raise ImproperlyConfigured(f"{name} must be an absolute file path")
-    try:
-        return Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+def _proxy_url(value: str) -> str | None:
+    value = value.strip().rstrip("/")
+    if not value:
+        return None
+    parts = urlsplit(value)
+    loopback = parts.hostname in {"localhost", "127.0.0.1", "::1"}
+    if (
+        parts.scheme not in {"https", "http"}
+        or (parts.scheme == "http" and not loopback)
+        or not parts.hostname
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or parts.username
+    ):
         raise ImproperlyConfigured(
-            f"{name} must point to a readable UTF-8 file"
-        ) from None
+            "PUSH_PROXY_URL must be the push proxy's https:// origin, "
+            "e.g. https://push.opencuria.dev, or empty to turn mobile push off"
+        )
+    # The proxy compares the VAPID audience with its own lower-case origin.
+    return f"{parts.scheme}://{parts.netloc.lower()}"
 
 
-def _validate_key(config: APNsConfig | FCMConfig) -> None:
-    key = serialization.load_pem_private_key(
-        config.private_key.get_secret_value().encode(), password=None
+def _derive_identity(secret_key: str) -> ServerIdentity:
+    # 48 bytes reduced modulo the group order keeps the bias negligible
+    # (FIPS 186-5 A.2.1).
+    seed = HKDF(
+        algorithm=hashes.SHA256(), length=48, salt=None, info=_IDENTITY_INFO
+    ).derive(secret_key.encode())
+    scalar = int.from_bytes(seed, "big") % (_P256_ORDER - 1) + 1
+    private_key = ec.derive_private_key(scalar, ec.SECP256R1())
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
     )
-    if isinstance(config, APNsConfig):
-        if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(
-            key.curve, ec.SECP256R1
-        ):
-            raise ValueError("APNs requires a P-256 EC key")
-    elif not isinstance(key, rsa.RSAPrivateKey):
-        raise ValueError("FCM requires an RSA key")
+    return ServerIdentity(private_key=private_key, public_key=b64url(public_key))

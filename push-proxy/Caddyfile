@@ -1,0 +1,8 @@
+# TLS for the push proxy (compose.yml, profile "tls"): Let's Encrypt for
+# PUSH_PROXY_DOMAIN, which must point at this host with ports 80 and 443 open.
+{$PUSH_PROXY_DOMAIN} {
+	request_body {
+		max_size 64KB
+	}
+	reverse_proxy push-proxy:8080
+}

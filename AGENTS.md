@@ -11,6 +11,8 @@ OpenCuria provisions, manages and monitors AI coding agents.
 - `runner/` (Python, asyncio): exec daemon for QEMU/KVM workspaces (lifecycle, exec,
   files, terminal, desktop, Git RPC). No agent logic.
 - `webapp/` (Vue 3) and `mobile/` (Expo, React Native): clients.
+- `push-proxy/` (Python, Starlette): stateless relay to APNs/FCM, the only way
+  mobile pushes leave a server. It relays ciphertext only; keep it content-blind.
 - `packages/chat-core/`, `packages/client/`: shared chat rules and REST/Socket.IO client.
 
 Flow: client → REST + Socket.IO `/frontend` → backend → `harness:*` RPC → runner → workspace.
@@ -72,6 +74,7 @@ failure path). Run the checks relevant to your change:
 ```bash
 cd backend && .venv/bin/pytest -q
 cd runner && .venv/bin/pytest -q
+cd push-proxy && .venv/bin/pytest -q
 npm run type-check
 npm run test
 sudo scripts/test-install.sh   # install.sh, against stubs in a private namespace

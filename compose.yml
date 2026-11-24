@@ -51,10 +51,8 @@ services:
       EXECUTION_PROCESS_LOCK_PATH: /var/lib/opencuria/backend/process.lock
       MEDIA_ROOT: /var/lib/opencuria/backend/media
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
-      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
-      APNS_KEY_ID: ${APNS_KEY_ID:-}
-      APNS_PRIVATE_KEY_FILE: ${APNS_PRIVATE_KEY_FILE:-}
-      FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
+      # End-to-end encrypted push proxy for the mobile app; empty turns push off.
+      PUSH_PROXY_URL: ${PUSH_PROXY_URL-https://push.opencuria.dev}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
       DB_NAME: ${DB_NAME:-opencuria}
       DB_USER: ${DB_USER:-opencuria}
@@ -72,7 +70,6 @@ services:
         is required}
     volumes: &backend_volumes
     - backend-runtime:/var/lib/opencuria/backend
-    - ./secrets/push:/run/secrets:ro
     ports:
     - ${BACKEND_PORT:-127.0.0.1:8000}:8000
     networks: &id002

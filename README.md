@@ -16,6 +16,7 @@ dashboard, a mobile app and runners that execute agents in QEMU/KVM virtual mach
 - `webapp/`: Vue dashboard
 - `mobile/`: native Expo iOS/Android client ([guide](./mobile/README.md))
 - `runner/`: executes QEMU/KVM workspaces ([guide](./runner/README.md))
+- `push-proxy/`: end-to-end encrypted relay for mobile push ([guide](./push-proxy/README.md))
 - `packages/`: shared chat rules, API client and the Computer Use runtime
 
 Agents run on the built-in harness, the pinned Claude Code CLI or the pinned Codex
@@ -112,14 +113,16 @@ For a local runner, point `RUNNER_BACKEND_URL` at this backend and run
 - **Upgrades:** deploy matching backend and runner versions (the installer does);
   the backend migrates on start. Keep the runner's `RUNNER_STATE_DIR` with its disks
   and snapshots; never share or delete it.
-- **Push notifications:** put `apns.p8` and/or `firebase.json` into
-  `/opt/opencuria/secrets/push/` (mounted at `/run/secrets/`) and set `APNS_TEAM_ID`,
-  `APNS_KEY_ID`, `APNS_PRIVATE_KEY_FILE=/run/secrets/apns.p8` and/or
-  `FCM_SERVICE_ACCOUNT_FILE=/run/secrets/firebase.json` in `.env`.
+- **Push notifications:** the server sends mobile notifications and Live
+  Activities only through the push proxy in `PUSH_PROXY_URL` (`.env`, default
+  `https://push.opencuria.dev`, the proxy of the published app). Messages are
+  end-to-end encrypted for each device; the proxy sees only which server sends to
+  which device and when. An empty value turns push off. Apps you build yourself
+  need your own proxy, see [push-proxy/README.md](push-proxy/README.md).
 - **MCP OAuth** needs an `https://` `PUBLIC_URL`.
 
-CI publishes multi-arch images `ghcr.io/opencuria/backend` and
-`ghcr.io/opencuria/webapp` from `main`.
+CI publishes multi-arch images `ghcr.io/opencuria/backend`,
+`ghcr.io/opencuria/webapp` and `ghcr.io/opencuria/push-proxy` from `main`.
 
 ## License
 

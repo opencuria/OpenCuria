@@ -16,7 +16,7 @@ from apps.accounts.models import User
 from apps.organizations.models import Membership, Organization
 
 from ..models import MobileDevice, PushDelivery
-from ..providers import DeliveryResult
+from ..proxy import DeliveryResult
 from ..services import NotificationService
 from ..worker import NotificationWorker
 
@@ -62,7 +62,7 @@ def test_enqueue_requires_active_owner_membership_and_recent_registration(
     _, user, _, _, message = setup
     now = timezone.now()
     monkeypatch.setattr(timezone, "now", lambda: now)
-    MobileDevice.objects.filter(id=device.id).update(encrypted_activity_token="token")
+    MobileDevice.objects.filter(id=device.id).update(encrypted_activity_handle="handle")
     change_recipient(user, device, state, now)
     message.completed_at = now
     message.save(update_fields=["completed_at"])
@@ -87,10 +87,8 @@ def test_delivery_rechecks_recipient_after_enqueue(
     monkeypatch.setattr(timezone, "now", lambda: now)
     message.completed_at = now
     message.save(update_fields=["completed_at"])
-    transport = SimpleNamespace(
-        send_apns=AsyncMock(return_value=DeliveryResult("sent"))
-    )
-    service = NotificationService(providers=transport)
+    transport = SimpleNamespace(send=AsyncMock(return_value=DeliveryResult("sent")))
+    service = NotificationService(proxy=transport)
     service.record_finished(message.id)
     job = PushDelivery.objects.get(kind="alert")
     change_recipient(user, device, state, now)
@@ -102,7 +100,7 @@ def test_delivery_rechecks_recipient_after_enqueue(
         if eligible
         else DeliveryResult("failed", "registration_expired")
     )
-    assert transport.send_apns.call_count == int(eligible)
+    assert transport.send.call_count == int(eligible)
 
 
 def test_activity_without_owner_does_not_enqueue_notifications(
@@ -143,16 +141,15 @@ def test_worker_preserves_heartbeat_selection_and_retention_boundaries(
         },
         "android": {"platform": "android"},
         "disabled": {"live_activities_enabled": False},
-        "no_token": {"encrypted_activity_token": ""},
+        "no_handle": {"encrypted_activity_handle": ""},
     }.items():
         devices[name] = MobileDevice.objects.create(
             organization=org,
             user=user,
-            app_id="com.opencuria.mobile.dev",
             **{
                 "platform": "ios",
                 "live_activities_enabled": True,
-                "encrypted_activity_token": "token",
+                "encrypted_activity_handle": "handle",
                 "last_seen_at": now,
                 **fields,
             },

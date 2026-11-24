@@ -1,17 +1,16 @@
-"""Native notification policy and recoverable delivery."""
+"""Native notification policy and recoverable, end-to-end encrypted delivery."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 import uuid
 from datetime import datetime, timedelta
 
-import httpx
 import structlog
 from asgiref.sync import sync_to_async
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
 
 from apps.accounts.models import User
 from apps.harness.conversation_activity_service import (
@@ -23,8 +22,9 @@ from common.exceptions import AuthenticationError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, hash_token
 
 from .configuration import get_push_settings
+from .encryption import ACTIVITY_PADDED_SIZE, ALERT_PADDED_SIZE, encrypt
 from .models import MobileDevice, PushDelivery
-from .providers import DeliveryResult, PushProviders
+from .proxy import DeliveryResult, ProxyMessage, PushProxyClient
 from .repositories import NotificationRepository
 from .schemas import ActivityRegistrationIn, DeviceRegistrationIn
 
@@ -50,13 +50,18 @@ def activity_row(session: ConversationActivity, phase: str) -> dict:
         )
         return clean[:limit] or fallback
 
+    # Bounded so three rows always fit the padded Live Activity ciphertext.
     return {
         "sessionId": str(session.id),
         "workspaceId": str(session.workspace_id),
-        "title": title(session.title, 100, "Conversation"),
-        "workspaceName": title(session.workspace_name, 80, "Workspace"),
+        "title": title(session.title, 60, "Conversation"),
+        "workspaceName": title(session.workspace_name, 40, "Workspace"),
         "phase": phase,
     }
+
+
+def _json(value: dict) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 class NotificationService:
@@ -68,16 +73,16 @@ class NotificationService:
         repository: type[NotificationRepository] | None = None,
         activity: ConversationActivityService | None = None,
         organizations: OrganizationService | None = None,
-        providers: PushProviders | None = None,
+        proxy: PushProxyClient | None = None,
     ) -> None:
         self.repo = repository or NotificationRepository
         self.activity = activity or ConversationActivityService()
         self.organizations = organizations or OrganizationService()
-        self.providers = providers
+        self.proxy = proxy
         self.push_settings = get_push_settings()
 
-    def capabilities(self, user: User, org_id: uuid.UUID) -> dict[str, bool]:
-        """Return server-wide availability to authenticated organization members."""
+    def capabilities(self, user: User, org_id: uuid.UUID) -> dict[str, str | None]:
+        """Tell members which push proxy and server key devices register with."""
         self.organizations.require_membership(user, org_id)
         return self.push_settings.capabilities()
 
@@ -89,28 +94,29 @@ class NotificationService:
         data: DeviceRegistrationIn,
     ) -> MobileDevice:
         """Save opt-in without granting access to another user's runs."""
-        capabilities = self.capabilities(user, org_id)
-        if data.notifications_enabled and not capabilities[data.platform]:
-            raise ValueError("Push notifications are not configured for this platform")
-        if data.live_activities_enabled and (
-            data.platform != "ios" or not capabilities["live_activities"]
-        ):
-            raise ValueError("Live Activities are not configured for this platform")
-        if data.platform == "ios" and data.push_token:
-            try:
-                bytes.fromhex(data.push_token)
-            except ValueError:
-                raise ValueError("Invalid APNs device token") from None
-        if data.notifications_enabled and not data.push_token:
-            raise ValueError("A push token is required to enable notifications")
-        fields = data.model_dump(exclude={"push_token"})
-        fields.update(
-            encrypted_push_token=encrypt_value(data.push_token)
-            if data.push_token
-            else "",
-            push_token_hash=hash_token(data.push_token) if data.push_token else "",
+        self.organizations.require_membership(user, org_id)
+        enabled = data.notifications_enabled or data.live_activities_enabled
+        if enabled and not self.push_settings.enabled:
+            raise ValueError("Mobile notifications are turned off on this server")
+        if data.live_activities_enabled and data.platform != "ios":
+            raise ValueError("Live Activities are only available on iOS")
+        if data.notifications_enabled and not data.push_handle:
+            raise ValueError("A push handle is required to enable notifications")
+        if enabled and not (data.encryption_key and data.auth_secret):
+            raise ValueError("An encryption key is required to enable notifications")
+        handle = data.push_handle if data.notifications_enabled else ""
+        return self.repo.register(
+            device_id,
+            user.id,
+            org_id,
+            platform=data.platform,
+            notifications_enabled=data.notifications_enabled,
+            live_activities_enabled=data.live_activities_enabled,
+            encrypted_push_handle=encrypt_value(handle) if handle else "",
+            push_handle_hash=hash_token(data.push_handle) if data.push_handle else "",
+            encryption_key=data.encryption_key if enabled else "",
+            encrypted_auth_secret=encrypt_value(data.auth_secret) if enabled else "",
         )
-        return self.repo.register(device_id, user.id, org_id, **fields)
 
     def register_activity(
         self,
@@ -125,7 +131,7 @@ class NotificationService:
         if device.platform != "ios" or not device.live_activities_enabled:
             raise ValueError("Live Activities are disabled for this device")
         self.repo.update_activity(
-            device, data.activity_id, encrypt_value(data.push_token)
+            device, data.activity_id, encrypt_value(data.push_handle)
         )
         self.repo.enqueue(
             device,
@@ -288,7 +294,7 @@ class NotificationService:
                 continue
             if device.notifications_enabled and phase in ALERT_LABELS:
                 self.repo.enqueue(device, event_key, "alert", payload)
-            if device.live_activities_enabled and device.encrypted_activity_token:
+            if device.live_activities_enabled and device.encrypted_activity_handle:
                 self.repo.enqueue(device, event_key, "activity", payload)
 
     def _snapshot(self, device: MobileDevice, fallback: dict | None = None) -> dict:
@@ -307,7 +313,7 @@ class NotificationService:
         }
 
     async def deliver(self, job: PushDelivery) -> DeliveryResult:
-        """Revalidate authorization and preferences immediately before provider I/O."""
+        """Revalidate authorization and preferences immediately before proxy I/O."""
         device = await sync_to_async(self.repo.current_device)(job.device_id)
         if device is None:
             return DeliveryResult("failed", "registration_revoked")
@@ -326,49 +332,15 @@ class NotificationService:
                 or source[0].organization_id != device.organization_id
             ):
                 return DeliveryResult("failed", "conversation_unavailable")
-        if not self.push_settings.capabilities()[device.platform]:
-            return DeliveryResult("failed", "provider_not_configured")
-        if self.providers is None:
-            raise RuntimeError("A push provider client is required for delivery")
+        if not self.push_settings.enabled:
+            return DeliveryResult("failed", "proxy_disabled")
+        if self.proxy is None:
+            raise RuntimeError("A push proxy client is required for delivery")
+        if not device.encryption_key or not device.encrypted_auth_secret:
+            return DeliveryResult("failed", "encryption_key_missing")
         if job.kind == "activity":
-            if (
-                not device.live_activities_enabled
-                or not device.encrypted_activity_token
-            ):
-                return DeliveryResult("failed", "activity_disabled")
-            snapshot = await sync_to_async(self._snapshot)(
-                device, job.payload.get("row")
-            )
-
-            now = int(timezone.now().timestamp())
-            ending = snapshot["activeCount"] == 0
-            aps = {
-                "timestamp": now,
-                "event": "end" if ending else "update",
-                "content-state": {
-                    "name": "OpenCuriaAgentActivity",
-                    "props": json.dumps(
-                        snapshot, ensure_ascii=False, separators=(",", ":")
-                    ),
-                },
-                "stale-date": now + 10 * 60,
-            }
-            if ending:
-                aps["dismissal-date"] = now
-            result = await self.providers.send_apns(
-                token=decrypt_value(device.encrypted_activity_token),
-                app_id=device.app_id,
-                environment=device.apns_environment,
-                payload={"aps": aps},
-                collapse_id="opencuria-agent-activity",
-                live_activity=True,
-            )
-            if result.status == "invalid" or ending and result.status == "sent":
-                await sync_to_async(self.repo.clear_activity)(
-                    device.id, device.encrypted_activity_token
-                )
-            return result
-        if not device.notifications_enabled or not device.encrypted_push_token:
+            return await self._deliver_activity(job, device)
+        if not device.notifications_enabled or not device.encrypted_push_handle:
             return DeliveryResult("failed", "notifications_disabled")
         phase = job.payload["phase"]
         # Suppress a gate that was answered on another device before delivery.
@@ -382,49 +354,70 @@ class NotificationService:
                 job.payload["workspace_id"],
             ):
                 return DeliveryResult("failed", "attention_resolved")
-        title = ALERT_LABELS[phase]
         row = job.payload["row"]
-        body = f"{row['title']} · {row['workspaceName']}"
-        data = {
-            "type": "opencuria.agent-activity",
-            "deviceId": str(device.id),
-            "organizationId": str(device.organization_id),
-            "workspaceId": job.payload["workspace_id"],
-            "sessionId": job.payload["session_id"],
-            "phase": phase,
+        # Opaque to the proxy; replaces a repeated delivery of the same event.
+        collapse_id = salted_hmac("opencuria.push.collapse", job.event_key).hexdigest()
+        plaintext = {
+            "title": ALERT_LABELS[phase],
+            "body": f"{row['title']} · {row['workspaceName']}",
+            "thread": job.payload["session_id"],
+            "tag": collapse_id[:32],
+            "data": {
+                "type": "opencuria.agent-activity",
+                "deviceId": str(device.id),
+                "organizationId": str(device.organization_id),
+                "workspaceId": job.payload["workspace_id"],
+                "sessionId": job.payload["session_id"],
+                "phase": phase,
+            },
         }
-        collapse_id = hashlib.sha256(job.event_key.encode()).hexdigest()
-        token = decrypt_value(device.encrypted_push_token)
-        if device.platform == "ios":
-            result = await self.providers.send_apns(
-                token=token,
-                app_id=device.app_id,
-                environment=device.apns_environment,
-                collapse_id=collapse_id,
-                payload={
-                    "aps": {
-                        "alert": {"title": title, "body": body},
-                        "sound": "default",
-                        "thread-id": job.payload["session_id"],
-                    },
-                    # Expo iOS reads custom remote-notification data from body.
-                    "body": data,
-                },
+        result = await self.proxy.send(
+            ProxyMessage(
+                handle=decrypt_value(device.encrypted_push_handle),
+                type="alert",
+                payload=self._seal(device, _json(plaintext), ALERT_PADDED_SIZE),
+                collapse_id=collapse_id[:32],
             )
-        else:
-            result = await self.providers.send_fcm(
-                token=token,
-                title=title,
-                body=body,
-                data=data,
-                collapse_id=collapse_id,
-                app_id=device.app_id,
-            )
+        )
         if result.status == "invalid":
-            await sync_to_async(self.repo.clear_push_token)(
-                device.id, device.encrypted_push_token
+            await sync_to_async(self.repo.clear_push_handle)(
+                device.id, device.encrypted_push_handle
             )
         return result
+
+    async def _deliver_activity(
+        self, job: PushDelivery, device: MobileDevice
+    ) -> DeliveryResult:
+        if not device.live_activities_enabled or not device.encrypted_activity_handle:
+            return DeliveryResult("failed", "activity_disabled")
+        snapshot = await sync_to_async(self._snapshot)(device, job.payload.get("row"))
+        now = int(timezone.now().timestamp())
+        ending = snapshot["activeCount"] == 0
+        result = await self.proxy.send(
+            ProxyMessage(
+                handle=decrypt_value(device.encrypted_activity_handle),
+                type="activity_end" if ending else "activity_update",
+                payload=self._seal(device, _json(snapshot), ACTIVITY_PADDED_SIZE),
+                timestamp=now,
+                stale_date=now + 10 * 60,
+                dismissal_date=now if ending else None,
+            )
+        )
+        if result.status == "invalid" or ending and result.status == "sent":
+            await sync_to_async(self.repo.clear_activity)(
+                device.id, device.encrypted_activity_handle
+            )
+        return result
+
+    @staticmethod
+    def _seal(device: MobileDevice, plaintext: bytes, padded_size: int) -> str:
+        """Encrypt for this installation only; the proxy relays ciphertext."""
+        return encrypt(
+            plaintext,
+            receiver_key=device.encryption_key,
+            auth_secret=decrypt_value(device.encrypted_auth_secret),
+            padded_size=padded_size,
+        )
 
     async def process_one(self) -> bool:
         """Attempt one leased delivery with bounded retries and bounded age."""
@@ -436,13 +429,11 @@ class NotificationService:
             return True
         try:
             result = await self.deliver(job)
-        except httpx.TransportError:
-            result = DeliveryResult("retry", "provider_unreachable")
         except (ValueError, AuthenticationError):
-            result = DeliveryResult("failed", "invalid_provider_configuration")
+            # Invalid stored keys or a message larger than its padded size.
+            result = DeliveryResult("failed", "invalid_destination")
         except Exception:
-            # Provider/JSON failures must not leak token-bearing request URLs,
-            # signing assertions or provider configuration into logs.
+            # Never log handles, keys or plaintext; the delivery ID is enough.
             log.error("mobile_push_delivery_failed", delivery_id=str(job.id))
             result = DeliveryResult("retry", "delivery_failed")
         retry = result.status == "retry" and job.attempts < 6

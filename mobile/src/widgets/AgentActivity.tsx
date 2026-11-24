@@ -21,7 +21,8 @@ function layout(
       row.phase === "waiting_for_approval" || row.phase === "waiting_for_input",
   );
   const row = attention ?? rows[0];
-  const stale = environment.isStale;
+  // Pushed updates the device cannot decrypt arrive as empty props.
+  const stale = environment.isStale || typeof props.activeCount !== "number";
   const finished = props.activeCount === 0;
   const failed = row?.phase === "error";
   const label = stale
@@ -113,7 +114,7 @@ function layout(
           foregroundStyle(color),
         ]}
       >
-        {finished ? "✓" : `${props.activeCount}`}
+        {finished ? "✓" : stale ? "–" : `${props.activeCount}`}
       </Text>
     ),
     minimal: <Image systemName={glyph} size={16} color={color} />,

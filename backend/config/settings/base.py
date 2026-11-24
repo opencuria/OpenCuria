@@ -24,12 +24,9 @@ MCP_OAUTH_FRONTEND_RETURN_URL = os.getenv(
     "MCP_OAUTH_FRONTEND_RETURN_URL", ""
 ).strip()
 
-# Hosting-owned push key files, validated and loaded at startup.
-# Leave all APNs values or the FCM path empty to disable that provider.
-APNS_TEAM_ID = os.getenv("APNS_TEAM_ID", "").strip()
-APNS_KEY_ID = os.getenv("APNS_KEY_ID", "").strip()
-APNS_PRIVATE_KEY_FILE = os.getenv("APNS_PRIVATE_KEY_FILE", "").strip()
-FCM_SERVICE_ACCOUNT_FILE = os.getenv("FCM_SERVICE_ACCOUNT_FILE", "").strip()
+# Mobile push goes only through this end-to-end encrypted push proxy; it must
+# match the proxy built into the mobile app. Empty turns mobile push off.
+PUSH_PROXY_URL = os.getenv("PUSH_PROXY_URL", "https://push.opencuria.dev").strip()
 
 DEBUG = False
 
@@ -213,7 +210,7 @@ LOGGING = {
         "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
     },
     "loggers": {
-        # APNs destinations contain private device tokens in their URL paths.
+        # Keep HTTP client internals (URLs, headers) out of the logs.
         "httpx": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "httpcore": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "hpack": {"handlers": ["console"], "level": "WARNING", "propagate": False},

@@ -1,4 +1,5 @@
 import { AppState, Linking, Platform } from "react-native";
+import { requireOptionalNativeModule } from "expo";
 import * as Device from "expo-device";
 import * as Application from "expo-application";
 import * as Notifications from "expo-notifications";
@@ -27,6 +28,25 @@ Notifications.setNotificationHandler({
   },
 });
 
+/** RFC 8291 receiver key and auth secret, both unpadded base64url. */
+export interface PushKeys {
+  publicKey: string;
+  authSecret: string;
+}
+
+/**
+ * Keys live in the shared keychain (iOS: app group, read by the notification
+ * service and Live Activity extensions) or the Android Keystore; the private
+ * key never reaches JavaScript.
+ */
+interface OpenCuriaPushModule {
+  getKeys(id: string): Promise<PushKeys>;
+  deleteKeys(id: string): Promise<void>;
+}
+
+const pushKeys =
+  requireOptionalNativeModule<OpenCuriaPushModule>("OpenCuriaPush");
+
 export interface NativeNotifications {
   platform: "ios" | "android";
   appId: string;
@@ -35,13 +55,16 @@ export interface NativeNotifications {
   isActive(): boolean;
   permission(request: boolean): Promise<boolean>;
   token(): Promise<string>;
+  /** This installation's decryption keys for one account; created once. */
+  keys(id: string): Promise<PushKeys>;
+  deleteKeys(id: string): Promise<void>;
   reset(): Promise<void>;
   onToken(listener: (token: string) => void): () => void;
   onResponse(listener: (target: NotificationTarget) => void): () => void;
   onActivity(listener: () => void): () => void;
 }
 
-/** Native tokens go directly to APNs/FCM; no Expo project or relay is required. */
+/** Native tokens only ever go to the push proxy, which returns opaque handles. */
 export const nativeNotifications: NativeNotifications = {
   platform: Platform.OS === "ios" ? "ios" : "android",
   appId: Application.applicationId ?? "",
@@ -86,6 +109,16 @@ export const nativeNotifications: NativeNotifications = {
     if (typeof value.data !== "string" || !value.data.trim())
       throw new Error("This device could not register for push notifications.");
     return value.data;
+  },
+  async keys(id) {
+    if (!pushKeys)
+      throw new Error(
+        "This build cannot decrypt notifications. Update OpenCuria.",
+      );
+    return pushKeys.getKeys(id);
+  },
+  async deleteKeys(id) {
+    await pushKeys?.deleteKeys(id);
   },
   async reset() {
     await Promise.allSettled([

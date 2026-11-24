@@ -1,0 +1,19 @@
+[project]
+name = "opencuria-push-proxy"
+version = "0.1.0"
+description = "End-to-end encrypted APNs/FCM relay for OpenCuria installations"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only" }
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["push_proxy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

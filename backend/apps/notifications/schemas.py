@@ -1,4 +1,4 @@
-"""Public native-device contracts; no provider token is ever echoed."""
+"""Public native-device contracts; handles and secrets are never echoed."""
 
 from __future__ import annotations
 
@@ -8,43 +8,48 @@ from typing import Literal
 from ninja import Schema
 from pydantic import Field, field_validator
 
-APP_IDS = {"com.opencuria.mobile", "com.opencuria.mobile.dev"}
+from .encryption import decode_b64url, validate_receiver_key
+
+_HANDLE = r"^[A-Za-z0-9_-]+$"
 
 
 class DeviceRegistrationIn(Schema):
+    """Opt-ins plus this installation's push proxy handle and encryption key."""
+
     platform: Literal["ios", "android"]
-    app_id: str
-    apns_environment: Literal["sandbox", "production"] = "production"
-    push_token: str = Field(default="", max_length=4096)
+    push_handle: str = Field(default="", max_length=8192, pattern=r"^[A-Za-z0-9_-]*$")
+    encryption_key: str = Field(default="", max_length=100)
+    auth_secret: str = Field(default="", max_length=32)
     notifications_enabled: bool = False
     live_activities_enabled: bool = False
 
-    @field_validator("app_id")
+    @field_validator("encryption_key")
     @classmethod
-    def validate_app_id(cls, value: str) -> str:
-        """Do not allow clients to send pushes to arbitrary applications."""
-        if value not in APP_IDS:
-            raise ValueError("Unsupported application identifier")
+    def validate_encryption_key(cls, value: str) -> str:
+        """Only valid P-256 receiver keys can be encrypted to."""
+        if value:
+            validate_receiver_key(value)
         return value
 
-    @field_validator("push_token")
+    @field_validator("auth_secret")
     @classmethod
-    def validate_token(cls, value: str) -> str:
-        """Provider tokens are opaque, printable, whitespace-free values."""
-        if any(ord(char) < 33 or ord(char) > 126 for char in value):
-            raise ValueError("Invalid push token")
+    def validate_auth_secret(cls, value: str) -> str:
+        """RFC 8291 auth secrets are 16 random bytes."""
+        if value and len(decode_b64url(value)) != 16:
+            raise ValueError("The auth secret must be 16 bytes")
         return value
 
 
 class ActivityRegistrationIn(Schema):
     activity_id: str = Field(min_length=1, max_length=255)
-    push_token: str = Field(min_length=32, max_length=512, pattern=r"^[a-fA-F0-9]+$")
+    push_handle: str = Field(min_length=1, max_length=8192, pattern=_HANDLE)
 
 
 class PushCapabilitiesOut(Schema):
-    ios: bool
-    android: bool
-    live_activities: bool
+    """The push proxy this server uses and the key it signs with (null: off)."""
+
+    proxy_url: str | None
+    server_key: str | None
 
 
 class DeviceOut(Schema):

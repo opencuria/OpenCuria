@@ -6,11 +6,18 @@ import React, {
   useRef,
   useSyncExternalStore,
 } from "react";
+import Constants from "expo-constants";
 import { useSession } from "../screens/SessionContext";
 import { NotificationController, type NotificationState } from "./controller";
 import { nativeNotifications } from "./native";
 import { liveActivities } from "./liveActivity";
+import { createPushProxy } from "./pushProxy";
 import { NotificationStorage } from "./storage";
+
+/** Fixed at build time in app.config.ts; must match the server's PUSH_PROXY_URL. */
+const pushProxy = createPushProxy(
+  String(Constants.expoConfig?.extra?.pushProxyUrl ?? ""),
+);
 
 const empty: NotificationState = {
   ready: false,
@@ -19,6 +26,7 @@ const empty: NotificationState = {
   liveActivities: false,
   permissionGranted: false,
   capabilities: null,
+  availability: null,
   error: null,
   target: null,
 };
@@ -49,6 +57,7 @@ export function NotificationProvider({
       new NotificationStorage(scope),
       nativeNotifications,
       liveActivities,
+      pushProxy,
     );
   }, [client, user?.id, session?.organizationId, scope, offline]);
   const state = useSyncExternalStore(

@@ -1,4 +1,4 @@
-"""JWT-only mobile registration and server-wide push capabilities."""
+"""JWT-only mobile registration and the server's push proxy settings."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ ERRORS = {400: ErrorOut, 403: ErrorOut, 404: ErrorOut}
     "/capabilities/", response={200: PushCapabilitiesOut, **ERRORS}
 )
 def capabilities(request: HttpRequest) -> Any:
-    """Tell native settings which providers this server has configured."""
+    """Tell the app which push proxy and server key to register with."""
     try:
         return NotificationService().capabilities(
             request.user, get_organization_id(request)
@@ -53,7 +53,7 @@ def capabilities(request: HttpRequest) -> Any:
 def register_device(
     request: HttpRequest, device_id: uuid.UUID, payload: DeviceRegistrationIn
 ) -> Any:
-    """Save this installation's opt-in and current native token."""
+    """Save this installation's opt-in, proxy handle and encryption key."""
     try:
         return NotificationService().register(
             request.user, get_organization_id(request), device_id, payload
@@ -80,7 +80,7 @@ def unregister_device(request: HttpRequest, device_id: uuid.UUID) -> Any:
 def register_activity(
     request: HttpRequest, device_id: uuid.UUID, payload: ActivityRegistrationIn
 ) -> Any:
-    """Register a Live Activity token and immediately reconcile its current state."""
+    """Register a Live Activity handle and immediately reconcile its state."""
     try:
         NotificationService().register_activity(
             request.user, get_organization_id(request), device_id, payload

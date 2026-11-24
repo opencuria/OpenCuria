@@ -1227,9 +1227,9 @@ describe("mobile notification API", () => {
     }).create(fetch);
     const registration = {
       platform: "ios" as const,
-      app_id: "com.opencuria.mobile",
-      apns_environment: "production" as const,
-      push_token: "native-token",
+      push_handle: "proxy-handle",
+      encryption_key: "BPublicKey",
+      auth_secret: "auth",
       notifications_enabled: true,
       live_activities_enabled: true,
     };
@@ -1238,7 +1238,7 @@ describe("mobile notification API", () => {
     await client.notifications.registerActivity(
       "device/id",
       "activity-id",
-      "activity-token",
+      "activity-handle",
     );
     await client.notifications.activity("device/id");
     await client.notifications.unregisterDevice("device/id");
@@ -1252,7 +1252,7 @@ describe("mobile notification API", () => {
         method: "PUT",
         body: JSON.stringify({
           activity_id: "activity-id",
-          push_token: "activity-token",
+          push_handle: "activity-handle",
         }),
       },
     ]);

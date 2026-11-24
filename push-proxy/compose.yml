@@ -1,0 +1,72 @@
+# OpenCuria push proxy, deployed apart from the control plane: one proxy serves
+# every OpenCuria server whose users run the app it holds credentials for.
+# Copy .env.example to .env, put the provider keys into ./secrets/ (mounted at
+# /run/secrets) and run `docker compose up -d`.
+name: opencuria-push
+services:
+  push-proxy:
+    image: ghcr.io/opencuria/push-proxy:${PUSH_PROXY_TAG:-latest}
+    build: .
+    container_name: opencuria_push_proxy
+    restart: unless-stopped
+    environment:
+      PUSH_PROXY_PUBLIC_URL: https://${PUSH_PROXY_DOMAIN:?PUSH_PROXY_DOMAIN is required}
+      PUSH_PROXY_HANDLE_KEYS: ${PUSH_PROXY_HANDLE_KEYS:?PUSH_PROXY_HANDLE_KEYS is required}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_PRIVATE_KEY_FILE: ${APNS_PRIVATE_KEY_FILE:-}
+      APNS_APP_IDS: ${APNS_APP_IDS:-}
+      FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
+      FCM_APP_IDS: ${FCM_APP_IDS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Only the reverse proxy reaches this port; its X-Forwarded-For feeds
+      # the per-client registration limit.
+      FORWARDED_ALLOW_IPS: "*"
+    volumes:
+    - ./secrets:/run/secrets:ro
+    ports:
+    - ${PUSH_PROXY_PORT:-127.0.0.1:8080}:8080
+    read_only: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    networks:
+    - push-net
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+  caddy:
+    image: caddy:2-alpine
+    container_name: opencuria_push_caddy
+    restart: unless-stopped
+    profiles:
+    - tls
+    depends_on:
+      push-proxy:
+        condition: service_healthy
+    environment:
+      PUSH_PROXY_DOMAIN: ${PUSH_PROXY_DOMAIN}
+    ports:
+    - 80:80
+    - 443:443
+    - 443:443/udp
+    volumes:
+    - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    - caddy-data:/data
+    - caddy-config:/config
+    networks:
+    - push-net
+volumes:
+  caddy-data: null
+  caddy-config: null
+networks:
+  push-net:
+    driver: bridge

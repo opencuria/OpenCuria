@@ -472,6 +472,24 @@ test_fresh_full_install() {
   [[ "$(env_of /opt/opencuria/runner/.env RUNNER_BACKEND_URL)" == http://127.0.0.1:8000 ]] ||
     fail "runner does not use the local control plane"
   grep -q -- "--runner-name" "${FAKE}/bootstrap" || fail "bootstrap did not register the runner"
+  [[ "$(env_of /opt/opencuria/.env PUSH_PROXY_URL)" == https://push.opencuria.dev ]] ||
+    fail "push proxy URL missing from .env"
+  expect_no_path /opt/opencuria/secrets
+}
+
+test_update_adds_the_push_proxy_and_keeps_a_chosen_one() {
+  install_full
+  sed -i '/^PUSH_PROXY_URL=/d' /opt/opencuria/.env
+  run update
+  expect_status 0
+  [[ "$(env_of /opt/opencuria/.env PUSH_PROXY_URL)" == https://push.opencuria.dev ]] ||
+    fail "update did not add the push proxy URL"
+  sed -i 's|^PUSH_PROXY_URL=.*|PUSH_PROXY_URL=|' /opt/opencuria/.env
+  run update
+  expect_status 0
+  [[ "$(grep -c '^PUSH_PROXY_URL=' /opt/opencuria/.env)" -eq 1 &&
+    -z "$(env_of /opt/opencuria/.env PUSH_PROXY_URL)" ]] ||
+    fail "update replaced a deliberately empty push proxy URL"
 }
 
 test_rerun_without_terminal_updates_and_keeps_config() {

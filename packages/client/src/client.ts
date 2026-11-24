@@ -78,7 +78,7 @@ export interface OpenCuriaClient {
     registerActivity(
       id: string,
       activityId: string,
-      pushToken: string,
+      pushHandle: string,
       signal?: AbortSignal,
     ): Promise<void>;
     activity(id: string, signal?: AbortSignal): Promise<AgentActivitySnapshot>;
@@ -223,10 +223,10 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         ),
       unregisterDevice: (id, signal) =>
         api.delete<void>(`/notifications/devices/${segment(id)}/`, signal),
-      registerActivity: (id, activityId, pushToken, signal) =>
+      registerActivity: (id, activityId, pushHandle, signal) =>
         api.put<void>(
           `/notifications/devices/${segment(id)}/activity/`,
-          { activity_id: activityId, push_token: pushToken },
+          { activity_id: activityId, push_handle: pushHandle },
           signal,
         ),
       activity: (id, signal) =>

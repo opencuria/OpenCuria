@@ -771,6 +771,9 @@ ensure_docker() {
   start_docker 1
 }
 
+# The mobile app's end-to-end encrypted push proxy; empty turns push off.
+PUSH_PROXY_ENV="PUSH_PROXY_URL=https://push.opencuria.dev"
+
 write_server_env() {
   local env_file="${INSTALL_DIR}/.env"
   install -m 600 /dev/null "${env_file}"
@@ -784,19 +787,22 @@ DJANGO_ALLOWED_HOSTS=${DOMAIN},127.0.0.1
 DJANGO_SECRET_KEY=$(random_string 64)
 DB_PASSWORD=$(random_string 32)
 CREDENTIAL_ENCRYPTION_KEY=$(fernet_key)
+${PUSH_PROXY_ENV}
 EOF
 }
 
 install_control_plane() {
   step "Setting up the control plane in ${INSTALL_DIR}"
   install -d -m 755 "${INSTALL_DIR}"
-  install -d -m 700 "${INSTALL_DIR}/secrets" "${INSTALL_DIR}/secrets/push"
   install -m 644 "${SRC_DIR}/compose.yml" "${INSTALL_DIR}/compose.yml"
   install -m 644 "${SRC_DIR}/Caddyfile" "${INSTALL_DIR}/Caddyfile"
   if [[ "${SERVER_ENV}" -eq 0 ]]; then
     write_server_env
   else
     set_env_value "${INSTALL_DIR}/.env" OPENCURIA_TAG "${VERSION}"
+    # Older installs predate the push proxy; keep an explicit (even empty) value.
+    grep -q '^PUSH_PROXY_URL=' "${INSTALL_DIR}/.env" ||
+      printf '%s\n' "${PUSH_PROXY_ENV}" >>"${INSTALL_DIR}/.env"
   fi
   # Only a finished bootstrap marks the control plane as ready.
   [[ "${SERVER_READY}" -eq 1 ]] || rm -f "${INSTALL_DIR}/.bootstrapped"

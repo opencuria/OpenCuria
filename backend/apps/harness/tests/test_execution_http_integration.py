@@ -89,10 +89,7 @@ async def test_real_http_native_run_survives_api_restart_with_production_jobs(
             "CREDENTIAL_ENCRYPTION_KEY": Fernet.generate_key().decode(),
             "EXECUTION_PROCESS_LOCK_PATH": str(tmp_path / "execution.lock"),
             "TEST_STATE_DIR": str(tmp_path),
-            "APNS_TEAM_ID": "",
-            "APNS_KEY_ID": "",
-            "APNS_PRIVATE_KEY_FILE": "",
-            "FCM_SERVICE_ACCOUNT_FILE": "",
+            "PUSH_PROXY_URL": "",
         }
     )
     worker_code = textwrap.dedent("""

@@ -1,4 +1,4 @@
-"""Encrypted device destinations and a durable, bounded delivery outbox."""
+"""Push proxy destinations and a durable, bounded delivery outbox."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ from django.utils import timezone
 class MobileDevice(models.Model):
     """One installation, scoped to the signed-in user and organization.
 
-    IDs are random installation capabilities, not hardware identifiers. Provider
-    tokens are encrypted and are never returned through the public API.
+    IDs are random installation capabilities, not hardware identifiers. The
+    backend never sees native APNs/FCM tokens: it stores the push proxy's opaque
+    handles and the device's public encryption key. Handles and the auth secret
+    are encrypted at rest and never returned through the public API.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -24,24 +26,25 @@ class MobileDevice(models.Model):
     platform = models.CharField(
         max_length=7, choices=[("ios", "iOS"), ("android", "Android")]
     )
-    app_id = models.CharField(max_length=255)
-    apns_environment = models.CharField(max_length=10, default="production")
-    encrypted_push_token = models.TextField(blank=True, default="")
-    push_token_hash = models.CharField(
+    encrypted_push_handle = models.TextField(blank=True, default="")
+    push_handle_hash = models.CharField(
         max_length=64, blank=True, default="", db_index=True
     )
+    # RFC 8291 receiver key (public) and auth secret of this installation.
+    encryption_key = models.CharField(max_length=100, blank=True, default="")
+    encrypted_auth_secret = models.TextField(blank=True, default="")
     notifications_enabled = models.BooleanField(default=False)
     notifications_enabled_at = models.DateTimeField(null=True, blank=True)
     live_activities_enabled = models.BooleanField(default=False)
     activity_id = models.CharField(max_length=255, blank=True, default="")
-    encrypted_activity_token = models.TextField(blank=True, default="")
+    encrypted_activity_handle = models.TextField(blank=True, default="")
     activity_updated_at = models.DateTimeField(null=True, blank=True)
     last_seen_at = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
 
 
 class PushDelivery(models.Model):
-    """Idempotent work that survives process restarts and provider outages."""
+    """Idempotent work that survives process restarts and proxy outages."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     device = models.ForeignKey(MobileDevice, on_delete=models.CASCADE)
@@ -55,7 +58,7 @@ class PushDelivery(models.Model):
     available_at = models.DateTimeField(default=timezone.now, db_index=True)
     locked_until = models.DateTimeField(null=True, blank=True)
     claim_token = models.UUIDField(null=True, blank=True)
-    # Only bounded provider error codes; never response bodies or destinations.
+    # Only bounded proxy error codes; never response bodies or destinations.
     error_code = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
