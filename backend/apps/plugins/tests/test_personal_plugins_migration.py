@@ -137,3 +137,9 @@ def test_migrate_skills_reads_folded_frontmatter_descriptions():
     skill = PluginSkill.objects.get(id=skill_id)
     assert skill.body == "Run deploy."
     assert skill.description == "Use when deploying the app."
+
+
+def test_constraints_are_flushed_after_the_last_data_step():
+    """PostgreSQL needs FK events drained before the deferred index DDL."""
+    last = migration.Migration.operations[-1]
+    assert last.code is migration.flush_deferred_constraints

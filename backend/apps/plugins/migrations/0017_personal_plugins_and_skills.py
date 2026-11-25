@@ -180,6 +180,18 @@ def describe_builtin_skills(apps, schema_editor) -> None:
     )
 
 
+def flush_deferred_constraints(apps, schema_editor) -> None:
+    """Finish PostgreSQL FK trigger events before the deferred index DDL.
+
+    The data steps above write ``plugins_plugin`` rows; PostgreSQL refuses
+    the deferred ``CREATE INDEX`` for ``owner`` while their FK checks are
+    still pending in the same transaction.
+    """
+    if schema_editor.connection.vendor == "postgresql":
+        with schema_editor.connection.cursor() as cursor:
+            cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+
+
 class Migration(migrations.Migration):
     dependencies = [
         ("plugins", "0016_opencuria_plugin_apps"),
@@ -289,4 +301,5 @@ class Migration(migrations.Migration):
         migrations.RunPython(publish_org_plugins, migrations.RunPython.noop),
         migrations.RunPython(describe_builtin_skills, migrations.RunPython.noop),
         migrations.RunPython(migrate_skills, migrations.RunPython.noop),
+        migrations.RunPython(flush_deferred_constraints, migrations.RunPython.noop),
     ]
