@@ -41,8 +41,9 @@ data and draws the Android Apps widget.
   lifecycle (Android), so its dialogs, pickers and keyboard work over the app. The
   layer's touch mode decides who gets touches: `none` (hidden), `all` (sheet,
   pointer mode) or `regions` (only the recording bar; the app gets the rest).
-  Without OpenCuria's factory (iOS: an app delegate that is no
-  `ExpoReactNativeFactoryProvider`) the native menu with Close app and Reload shows.
+  iOS finds OpenCuria's factory through `ExpoReactNativeFactoryProvider` or the
+  template's `reactNativeFactory` property; without it the native menu with Close
+  app and Reload shows.
 - **Recordings** (`AppRecorder`): while observed, touches on the window are reported
   with the control under the finger (role, text, `testID`, bounds), and frames of
   the app's content are captured as JPEG (unchanged pixels and texts are skipped).

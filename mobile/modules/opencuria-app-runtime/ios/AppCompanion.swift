@@ -84,8 +84,30 @@ final class AppCompanionHost {
   /// OpenCuria's own React Native factory, which draws the companion (main thread).
   private static var factory: RCTReactNativeFactory? {
     MainActor.assumeIsolated {
-      (UIApplication.shared.delegate as? ExpoReactNativeFactoryProvider)?.reactNativeFactory
+      guard let delegate = UIApplication.shared.delegate else { return nil }
+      if let provider = delegate as? ExpoReactNativeFactoryProvider,
+        let factory = provider.reactNativeFactory {
+        return factory
+      }
+      return storedFactory(of: delegate)
     }
+  }
+
+  /**
+   Expo's app delegate template keeps the factory in `reactNativeFactory`
+   without declaring `ExpoReactNativeFactoryProvider`; read that property.
+   */
+  static func storedFactory(of delegate: Any) -> RCTReactNativeFactory? {
+    var mirror: Mirror? = Mirror(reflecting: delegate)
+    while let current = mirror {
+      for child in current.children where child.label == "reactNativeFactory" {
+        if let factory = child.value as? RCTReactNativeFactory {
+          return factory
+        }
+      }
+      mirror = current.superclassMirror
+    }
+    return nil
   }
 
   var isAvailable: Bool {
