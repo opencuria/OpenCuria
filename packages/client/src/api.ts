@@ -95,6 +95,17 @@ function safeApiPath(path: string): string {
   return path;
 }
 
+/** The first schema error of a 422, which Django Ninja lists as Pydantic errors. */
+function validationDetail(detail: unknown): string | null {
+  const first: unknown = Array.isArray(detail) ? detail[0] : null;
+  if (!first || typeof first !== "object") return null;
+  const { loc, msg } = first as { loc?: unknown; msg?: unknown };
+  if (typeof msg !== "string" || !msg) return null;
+  // `["body", "payload", "pointers", 0, "t_ms"]` names `pointers.0.t_ms`.
+  const field = Array.isArray(loc) ? loc.slice(loc[0] === "body" ? 2 : 1) : [];
+  return field.length ? `${field.join(".")}: ${msg}` : msg;
+}
+
 function errorPayload(data: unknown): { detail: string; code: string } {
   const payload =
     data && typeof data === "object" ? (data as Record<string, unknown>) : {};
@@ -103,7 +114,7 @@ function errorPayload(data: unknown): { detail: string; code: string } {
       ? payload.detail
       : typeof payload.message === "string"
         ? payload.message
-        : "Unknown error";
+        : (validationDetail(payload.detail) ?? "Unknown error");
   const code =
     typeof payload.code === "string" && payload.code ? payload.code : "error";
   return { detail, code };

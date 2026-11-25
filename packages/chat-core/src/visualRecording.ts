@@ -430,8 +430,10 @@ export function visualRecordingInput(input: {
 } {
   const { transcript, result } = input;
   const duration = Math.max(1, Math.round(input.durationMs));
+  // The server takes whole milliseconds; native clocks (iOS) report fractions.
   const within = <T extends { t_ms: number }>(items: readonly T[]) =>
     items
+      .map((item) => ({ ...item, t_ms: Math.round(item.t_ms) }))
       .filter((item) => item.t_ms >= 0 && item.t_ms <= duration)
       .sort((a, b) => a.t_ms - b.t_ms);
   const frames = within(result.frames).slice(0, VISUAL_MAX_FRAMES);

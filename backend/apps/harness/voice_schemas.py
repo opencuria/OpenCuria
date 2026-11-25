@@ -7,11 +7,12 @@ backend requests). Limits match `@opencuria/chat-core/visualRecording`.
 
 from __future__ import annotations
 
+import math
 import uuid
-from typing import Literal
+from typing import Annotated, Literal
 
 from ninja import Schema
-from pydantic import Field, model_validator
+from pydantic import BeforeValidator, Field, model_validator
 
 MAX_DURATION_MS = 600_000
 # Ten minutes at the requested 64 kbit/s uses about 4.8 MB; leave codec headroom.
@@ -22,6 +23,19 @@ MAX_FRAMES = 1201
 MAX_APP_EVENTS = 2000
 MAX_FRAME_TEXTS = 40
 MAX_SHORT_TEXT = 120
+
+
+def _whole_ms(value: object) -> object:
+    """Round finite fractional milliseconds; leave everything else to `int`."""
+    if isinstance(value, float) and math.isfinite(value):
+        return round(value)
+    return value
+
+
+# Recording-relative time. Native clocks (iOS) report fractions of a millisecond.
+RecordingMs = Annotated[
+    int, BeforeValidator(_whole_ms), Field(ge=0, le=MAX_DURATION_MS)
+]
 
 
 class VoiceModel(Schema):
@@ -113,7 +127,7 @@ class VoiceElement(Schema):
 class VoicePointer(Schema):
     """One sampled position or discrete pointer event."""
 
-    t_ms: int = Field(ge=0, le=MAX_DURATION_MS)
+    t_ms: RecordingMs
     event: Literal["move", "down", "up", "leave"]
     x: float | None = Field(default=None, allow_inf_nan=False)
     y: float | None = Field(default=None, allow_inf_nan=False)
@@ -126,7 +140,7 @@ class VoicePointer(Schema):
 class VoiceFrame(Schema):
     """A desktop or app frame captured at the given recording-relative time."""
 
-    t_ms: int = Field(ge=0, le=MAX_DURATION_MS)
+    t_ms: RecordingMs
     path: str = Field(min_length=1, max_length=2048)
     # Visible texts of an app screen, in reading order.
     texts: list[str] = Field(default_factory=list, max_length=MAX_FRAME_TEXTS)
@@ -142,7 +156,7 @@ class VoiceFrame(Schema):
 class VoiceAppEvent(Schema):
     """A log line, error or backend request an open app reported."""
 
-    t_ms: int = Field(ge=0, le=MAX_DURATION_MS)
+    t_ms: RecordingMs
     kind: Literal["log", "error", "network"]
     level: Literal["debug", "info", "warn", "error"] | None = None
     message: str = Field(default="", max_length=1000)

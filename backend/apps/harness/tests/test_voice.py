@@ -515,6 +515,54 @@ def test_invalid_app_recordings(app_recording: dict, change: str) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+def test_fractional_app_recording_times_are_saved_whole(
+    harness_workspace, monkeypatch, app_recording
+) -> None:
+    """iOS reports sub-millisecond times; the API stores whole milliseconds."""
+    app_recording["app"]["platform"] = "ios"
+    app_recording["frames"][1]["t_ms"] = 2399.6
+    app_recording["pointers"][0]["t_ms"] = 900.4
+    app_recording["pointers"][1]["t_ms"] = 1000.25
+    app_recording["events"][0]["t_ms"] = 2550.7
+    service = SimpleNamespace(save_recording=AsyncMock(return_value="/workspace/t.md"))
+    monkeypatch.setattr("apps.harness.voice_api.VoiceService", lambda: service)
+    token = "voice-fractional-key"
+    APIKey.objects.create(
+        user=harness_workspace.created_by,
+        name="voice",
+        key_hash=hash_token(token),
+        key_prefix=token[:12],
+        permissions=[
+            APIKeyPermission.HARNESS_RUN.value,
+            APIKeyPermission.TERMINAL_ACCESS.value,
+        ],
+    )
+    response = Client().post(
+        f"/api/v1/workspaces/{harness_workspace.id}/voice/recordings/",
+        data=json.dumps(app_recording),
+        content_type="application/json",
+        HTTP_X_API_KEY=token,
+        HTTP_X_ORGANIZATION_ID=str(harness_workspace.runner.organization_id),
+    )
+    assert response.status_code == 200, response.content
+    payload = service.save_recording.await_args.args[1]
+    assert [frame.t_ms for frame in payload.frames] == [0, 2400]
+    assert [pointer.t_ms for pointer in payload.pointers] == [900, 1000, 2500, 2600]
+    assert [event.t_ms for event in payload.events] == [2551, 2700]
+    validate_recording(payload)
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), -0.6, 600_000.6])
+def test_recording_times_must_be_finite_and_bounded(
+    recording: dict, value: float
+) -> None:
+    """Rounding never admits non-finite or out-of-range times."""
+    recording["pointers"][0]["t_ms"] = value
+    with pytest.raises(ValidationError):
+        VoiceRecordingIn(**recording)
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     "permission,endpoint,status",
     [

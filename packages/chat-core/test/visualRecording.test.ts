@@ -206,4 +206,24 @@ describe("visual recordings", () => {
     expect(input.app?.name).toBe("Todo Demo");
     expect(input.cleanup_warning).toBe("");
   });
+
+  it("sends whole milliseconds for sub-millisecond native times", () => {
+    const input = visualRecordingInput({
+      recordingId: ID,
+      durationMs: 1_000,
+      transcript: { text: "", segments: [], timing: "approximate" },
+      result: {
+        pointers: [
+          { t_ms: 400.6, event: "down", x: 1, y: 1, target: frame(0) },
+          { t_ms: 999.7, event: "up", x: 1, y: 1, target: frame(0) },
+          { t_ms: 1_000.6, event: "up", x: 1, y: 1, target: frame(0) },
+        ],
+        frames: [{ t_ms: 0.4, path: frame(0).path }],
+        events: [{ t_ms: 12.5, kind: "log", message: "Added" }],
+      },
+    });
+    expect(input.frames.map((item) => item.t_ms)).toEqual([0]);
+    expect(input.pointers.map((item) => item.t_ms)).toEqual([401, 1_000]);
+    expect(input.events.map((item) => item.t_ms)).toEqual([13]);
+  });
 });
