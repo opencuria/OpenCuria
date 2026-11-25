@@ -8,7 +8,7 @@ import React, {
 } from "react";
 import {
   ActivityIndicator,
-  Pressable,
+  Platform,
   StyleSheet,
   Text,
   View,
@@ -24,12 +24,15 @@ import Animated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { runOnJS } from "react-native-worklets";
-import { Check, Hand, Pointer, X } from "lucide-react-native";
+import { Check, X } from "lucide-react-native";
 import { formatVoiceDuration } from "@opencuria/chat-core/voiceInput";
 import { RecordingLight, VoiceWaveform } from "../../components/ComposerVoice";
 import { ComposerAction } from "../../ui/ComposerAction";
+import { ComposerSurface } from "../../ui/ComposerSurface";
 import { lightTapHaptic } from "../../ui/haptics";
+import { NativeSegmentedPicker } from "../../ui/selection";
 import { useTheme } from "../../ui/theme";
+import { ToastSurface } from "../../ui/ToastSurface";
 import type { CompanionRegion } from "./companionNative";
 import type {
   AppRecordingMeterStore,
@@ -37,9 +40,27 @@ import type {
   AppRecordingPhase,
 } from "./useAppRecording";
 
+/** The composer's toolbar row (44) in its surface padding (6). */
 const BAR_HEIGHT = 56;
 const EDGE = 12;
 const MAX_WIDTH = 440;
+const MODES_WIDTH = 128;
+const MODES: Array<{
+  value: AppRecordingMode;
+  label: string;
+  accessibilityLabel: string;
+}> = [
+  {
+    value: "use",
+    label: "Use",
+    accessibilityLabel: "Use: the app gets your taps",
+  },
+  {
+    value: "point",
+    label: "Point",
+    accessibilityLabel: "Point: show something without tapping it",
+  },
+];
 
 /**
  * Where the bar rests on a screen: its region, known before it renders, so
@@ -79,10 +100,10 @@ export interface RecordingBarProps {
 }
 
 /**
- * Floats over the app while a recording runs: time and level, Use (the app
- * gets every touch) or Point (touches only show something), discard and
- * done. It rests at the top and can be dragged to the bottom (and back)
- * when it covers the app's controls.
+ * Floats over the app while a recording runs, in the chat composer's liquid
+ * glass: time and level, Use (the app gets every touch) or Point (touches
+ * only show something), discard and done. It rests at the top and can be
+ * dragged to the bottom (and back) when it covers the app's controls.
  */
 export function RecordingBar({
   phase,
@@ -157,8 +178,8 @@ export function RecordingBar({
     transform: [{ translateY: y.value }],
   }));
 
-  const choose = (next: AppRecordingMode) => {
-    if (next === mode) return;
+  const choose = (next: string) => {
+    if (next === mode || (next !== "use" && next !== "point")) return;
     lightTapHaptic();
     onModeChange(next);
   };
@@ -177,201 +198,125 @@ export function RecordingBar({
           style={[
             styles.hint,
             atTop ? { top: BAR_HEIGHT + 8 } : { bottom: BAR_HEIGHT + 8 },
-            { backgroundColor: theme.text },
           ]}
         >
-          <Text style={[styles.hintText, { color: theme.background }]}>
-            Use the app and talk. Switch to Point to show something without
-            tapping it.
-          </Text>
+          <ToastSurface>
+            <Text style={[styles.hintText, { color: theme.text }]}>
+              Use the app and talk. Switch to Point to show something without
+              tapping it.
+            </Text>
+          </ToastSurface>
         </Animated.View>
       ) : null}
       <View
         style={[
-          styles.bar,
-          { backgroundColor: theme.raised, borderColor: theme.separator },
+          styles.float,
+          Platform.OS === "android" && { backgroundColor: theme.surfaceMuted },
         ]}
       >
-        <GestureDetector gesture={drag}>
-          <View
-            style={styles.meter}
-            accessible
-            accessibilityRole="text"
-            accessibilityLabel={
-              live
-                ? `Recording, ${formatVoiceDuration(elapsedMs)}`
-                : phase === "finishing"
-                  ? "Saving recording"
-                  : "Starting microphone"
-            }
-            accessibilityLiveRegion="polite"
-          >
-            <RecordingLight active={live} />
-            {phase === "finishing" ? (
-              <ActivityIndicator size="small" color={theme.mutedText} />
-            ) : (
-              <Text
-                testID="companion-recording-elapsed"
-                style={[styles.elapsed, { color: theme.text }]}
+        <ComposerSurface>
+          <View style={styles.bar}>
+            <GestureDetector gesture={drag}>
+              <View
+                style={styles.meter}
+                accessible
+                accessibilityRole="text"
+                accessibilityLabel={
+                  live
+                    ? `Recording, ${formatVoiceDuration(elapsedMs)}`
+                    : phase === "finishing"
+                      ? "Saving recording"
+                      : "Starting microphone"
+                }
+                accessibilityLiveRegion="polite"
               >
-                {formatVoiceDuration(elapsedMs)}
-              </Text>
-            )}
-            <View style={styles.wave}>
-              <VoiceWaveform levels={levels} color={theme.mutedText} />
+                <RecordingLight active={live} />
+                {phase === "finishing" ? (
+                  <ActivityIndicator size="small" color={theme.mutedText} />
+                ) : (
+                  <Text
+                    testID="companion-recording-elapsed"
+                    style={[styles.elapsed, { color: theme.text }]}
+                  >
+                    {formatVoiceDuration(elapsedMs)}
+                  </Text>
+                )}
+                <View style={styles.wave}>
+                  <VoiceWaveform levels={levels} color={theme.mutedText} />
+                </View>
+              </View>
+            </GestureDetector>
+            <View style={styles.modes}>
+              <NativeSegmentedPicker
+                label="Recording mode"
+                value={mode}
+                options={MODES}
+                onChange={choose}
+                testID="companion-mode"
+              />
             </View>
+            <ComposerAction
+              label="Discard recording"
+              icon={X}
+              disabled={phase === "finishing"}
+              onPress={onCancel}
+              testID="companion-recording-cancel"
+            />
+            <ComposerAction
+              label="Done"
+              icon={Check}
+              primary
+              disabled={!live}
+              onPress={onFinish}
+              testID="companion-recording-done"
+            />
           </View>
-        </GestureDetector>
-        <View
-          style={[styles.modes, { backgroundColor: theme.controlFill }]}
-          accessibilityRole="radiogroup"
-        >
-          <ModeOption
-            label="Use"
-            hint="The app gets your taps"
-            icon={Hand}
-            selected={mode === "use"}
-            onPress={() => choose("use")}
-            testID="companion-mode-use"
-          />
-          <ModeOption
-            label="Point"
-            hint="Show something without tapping it"
-            icon={Pointer}
-            selected={mode === "point"}
-            onPress={() => choose("point")}
-            testID="companion-mode-point"
-          />
-        </View>
-        <ComposerAction
-          label="Discard recording"
-          icon={X}
-          disabled={phase === "finishing"}
-          onPress={onCancel}
-          testID="companion-recording-cancel"
-        />
-        <ComposerAction
-          label="Done"
-          icon={Check}
-          primary
-          disabled={!live}
-          onPress={onFinish}
-          testID="companion-recording-done"
-        />
+        </ComposerSurface>
       </View>
     </Animated.View>
   );
 }
 
-function ModeOption({
-  label,
-  hint,
-  icon: Icon,
-  selected,
-  onPress,
-  testID,
-}: {
-  label: string;
-  hint: string;
-  icon: typeof Hand;
-  selected: boolean;
-  onPress: () => void;
-  testID: string;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  return (
-    <Pressable
-      accessibilityRole="radio"
-      accessibilityLabel={label}
-      accessibilityHint={hint}
-      accessibilityState={{ selected }}
-      // A segment switches on touch, not on release: the next finger on the
-      // app must already go where the bar says.
-      onPressIn={onPress}
-      hitSlop={4}
-      testID={testID}
-      style={[
-        styles.mode,
-        selected && {
-          backgroundColor: theme.background,
-          shadowColor: "#000",
-          shadowOpacity: 0.12,
-          shadowRadius: 3,
-          shadowOffset: { width: 0, height: 1 },
-          elevation: 2,
-        },
-      ]}
-    >
-      <Icon
-        size={16}
-        strokeWidth={2.2}
-        color={selected ? theme.text : theme.mutedText}
-      />
-      <Text
-        style={[
-          styles.modeLabel,
-          { color: selected ? theme.text : theme.mutedText },
-        ]}
-      >
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
   root: { position: "absolute", top: 0, height: BAR_HEIGHT },
-  bar: {
-    height: BAR_HEIGHT,
+  // Lifts the glass off the app below it.
+  float: {
     borderRadius: BAR_HEIGHT / 2,
     borderCurve: "continuous",
-    borderWidth: StyleSheet.hairlineWidth,
+    shadowColor: "#000",
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
+  bar: {
+    minHeight: 44,
     flexDirection: "row",
     alignItems: "center",
-    paddingStart: 14,
-    paddingEnd: 6,
     gap: 4,
-    shadowColor: "#000",
-    shadowOpacity: 0.22,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 12,
   },
   meter: {
     flex: 1,
     minWidth: 0,
-    height: BAR_HEIGHT,
+    height: 44,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+    paddingStart: 10,
   },
   elapsed: {
     fontSize: 15,
-    fontWeight: "600",
+    fontWeight: "500",
     fontVariant: ["tabular-nums"],
   },
   wave: { flex: 1, minWidth: 0, overflow: "hidden" },
-  modes: {
-    flexDirection: "row",
-    borderRadius: 18,
-    padding: 2,
-    height: 36,
-  },
-  mode: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    paddingHorizontal: 10,
-    borderRadius: 16,
-  },
-  modeLabel: { fontSize: 13, fontWeight: "600" },
-  hint: {
-    position: "absolute",
-    left: 8,
-    right: 8,
-    borderRadius: 14,
+  modes: { width: MODES_WIDTH, justifyContent: "center" },
+  hint: { position: "absolute", left: 8, right: 8 },
+  hintText: {
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: "center",
     paddingHorizontal: 14,
     paddingVertical: 9,
   },
-  hintText: { fontSize: 13, lineHeight: 18, textAlign: "center" },
 });

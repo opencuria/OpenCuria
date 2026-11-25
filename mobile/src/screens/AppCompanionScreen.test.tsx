@@ -1,4 +1,5 @@
 import React from "react";
+import { BackHandler } from "react-native";
 import {
   act,
   fireEvent,
@@ -147,9 +148,17 @@ jest.mock("../state/useWorkspaceChat", () => ({
   },
 }));
 jest.mock("../components/WorkspaceChatView", () => ({
-  WorkspaceChatView: () => {
+  WorkspaceChatView: ({ sheets }: { sheets?: boolean }) => {
     const { Text } = require("react-native");
-    return <Text testID="workspace-chat">chat</Text>;
+    return (
+      <Text testID="workspace-chat">
+        {sheets === false ? "chat" : "sheets"}
+      </Text>
+    );
+  },
+  WorkspaceChatSheets: () => {
+    const { View } = require("react-native");
+    return <View testID="workspace-chat-sheets" />;
   },
 }));
 
@@ -212,18 +221,65 @@ describe("AppCompanionScreen", () => {
     expect(mockNative.setCompanionTouchMode).toHaveBeenLastCalledWith("all");
   });
 
-  it("lists only the workspace's chats, newest first, and switches between them", async () => {
+  it("goes back from the chat to the workspace's chats, newest first, and switches between them", async () => {
     renderCompanion();
-    fireEvent.press(await screen.findByTestId("companion-title"));
+    await screen.findByTestId("workspace-chat");
+    fireEvent.press(screen.getByTestId("companion-chat-back"));
     const list = await screen.findByTestId("companion-chat-list");
     expect(list).toBeTruthy();
+    expect(screen.getByText("Chats")).toBeTruthy();
     expect(screen.queryByText("Another workspace")).toBeNull();
-    expect(screen.getByTestId("companion-chats-back")).toBeTruthy();
+    const rows = ["chat-2", "chat-1"].map((id) => screen.getByTestId(id));
+    expect(rows).toHaveLength(2);
     fireEvent.press(screen.getByTestId("chat-1"));
     expect(mockChat.openConversation).toHaveBeenCalledWith(conversations[0]);
     await waitFor(() =>
       expect(screen.queryByTestId("companion-chat-list")).toBeNull(),
     );
+    expect(screen.getByTestId("workspace-chat")).toBeTruthy();
+  });
+
+  it("keeps the chat's sheets (rename, model, file) available while the chat list shows", async () => {
+    renderCompanion();
+    await screen.findByTestId("workspace-chat");
+    // The chat page leaves its sheets to the companion.
+    expect(screen.getByTestId("workspace-chat")).toHaveTextContent("chat");
+    fireEvent.press(screen.getByTestId("companion-chat-back"));
+    await screen.findByTestId("companion-chat-list");
+    expect(screen.queryByTestId("workspace-chat")).toBeNull();
+    expect(screen.getByTestId("workspace-chat-sheets")).toBeTruthy();
+  });
+
+  it("starts a new chat from the chat list and from the chat's menu", async () => {
+    renderCompanion();
+    await screen.findByTestId("workspace-chat");
+    fireEvent.press(screen.getByTestId("companion-menu"));
+    fireEvent.press(await screen.findByLabelText("New chat"));
+    expect(mockChat.newChat).toHaveBeenCalledTimes(1);
+    fireEvent.press(screen.getByTestId("companion-chat-back"));
+    fireEvent.press(await screen.findByTestId("companion-chats-new"));
+    expect(mockChat.newChat).toHaveBeenCalledTimes(2);
+    expect(await screen.findByTestId("workspace-chat")).toBeTruthy();
+  });
+
+  it("follows the pages on Android Back: chat, chat list, then away", async () => {
+    const listen = jest.spyOn(BackHandler, "addEventListener");
+    const pressBack = () =>
+      act(() => {
+        const handler = listen.mock.calls.at(-1)![1];
+        expect(handler()).toBe(true);
+      });
+    renderCompanion();
+    await screen.findByTestId("workspace-chat");
+    pressBack();
+    expect(await screen.findByTestId("companion-chat-list")).toBeTruthy();
+    pressBack();
+    // The sheet slides away and hands every touch back to the app.
+    await waitFor(() =>
+      expect(mockNative.setCompanionTouchMode).toHaveBeenLastCalledWith("none"),
+    );
+    expect(mockNative.closeOpenAppFromCompanion).not.toHaveBeenCalled();
+    listen.mockRestore();
   });
 
   it("records into the chat on screen and hands every other touch to the app", async () => {

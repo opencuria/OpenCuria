@@ -11,12 +11,14 @@ import Animated, {
   Easing,
   interpolate,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withSpring,
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { runOnJS } from "react-native-worklets";
+import { HiddenBottomContext } from "../../ui/chromeInset";
 import { useTheme } from "../../ui/theme";
 
 export type SheetDetent = "half" | "full";
@@ -41,6 +43,15 @@ const DISMISS_VELOCITY = 1100;
 const CORNER_RADIUS = Platform.OS === "ios" ? 28 : 24;
 /** Gap above the sheet at full height, below the status bar. */
 const TOP_GAP = 8;
+/** Strip above the navigation bar that holds the grabber. */
+const GRABBER_STRIP = Platform.OS === "ios" ? 12 : 16;
+/**
+ * Sheet surface below the screen's edge. Pulled past full height, the sheet
+ * gives a little (never into the status bar) and shows no gap beneath.
+ */
+const BOTTOM_BLEED = TOP_GAP * 2;
+/** Vertical travel before a drag on the header moves the sheet. */
+const DRAG_SLOP = 6;
 
 export interface SheetGeometry {
   full: number;
@@ -59,6 +70,20 @@ export function sheetGeometry(
   return { full, half };
 }
 
+/**
+ * How far the sheet's content, always laid out at full height, reaches below
+ * the screen at `offset` (0 at full height). Between half and full height it
+ * is the offset itself, so the composer docked to the content's bottom stays
+ * on the screen's edge. Below half height the composer leaves with the sheet.
+ */
+export function sheetHiddenBottom(
+  offset: number,
+  geometry: SheetGeometry,
+): number {
+  "worklet";
+  return Math.min(offset, geometry.full - geometry.half);
+}
+
 export interface CompanionSheetProps {
   /** Shown, or slid away below the screen. */
   open: boolean;
@@ -68,16 +93,21 @@ export interface CompanionSheetProps {
   onDismiss: () => void;
   /** The sheet finished sliding away. */
   onHidden: () => void;
-  /** Grabber area: the header, which also drags the sheet. */
-  header: React.ReactNode;
+  /**
+   * Height of the content's navigation bar below the grabber; the grabber
+   * and the bar drag the sheet, everything below scrolls.
+   */
+  barHeight: number;
   children: React.ReactNode;
   testID?: string;
 }
 
 /**
  * A bottom sheet over an open app in two heights: half, with the app visible
- * above, and full. Dragging the header moves it; the content is laid out once
- * per height, so the chat inside never re-measures while the sheet moves.
+ * above, and full. The grabber and the content's navigation bar drag it. The
+ * content is laid out once at full height and only moves: at half height its
+ * lower part rests below the screen (`HiddenBottomContext`), so the docked
+ * composer stays put while the sheet grows or shrinks.
  */
 export function CompanionSheet({
   open,
@@ -85,7 +115,7 @@ export function CompanionSheet({
   onDetentChange,
   onDismiss,
   onHidden,
-  header,
+  barHeight,
   children,
   testID,
 }: CompanionSheetProps): React.JSX.Element {
@@ -107,6 +137,10 @@ export function CompanionSheet({
     latest.current.onDetentChange(next);
   const dismiss = () => latest.current.onDismiss();
   const hiddenNow = () => latest.current.onHidden();
+  const hiddenBottom = useDerivedValue(
+    () => sheetHiddenBottom(offset.value, geometry),
+    [geometry],
+  );
 
   // Opening slides in from below; closing slides away and reports it.
   const positions = useRef({ rest, hidden });
@@ -134,10 +168,32 @@ export function CompanionSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, offset]);
 
+  // Only the grabber and the navigation bar drag the sheet; their buttons
+  // keep their taps, and touches below go to the content.
+  const dragZone = GRABBER_STRIP + barHeight;
+  const touchStart = useSharedValue({ x: 0, y: 0 });
   const pan = useMemo(
     () =>
       Gesture.Pan()
-        .activeOffsetY([-6, 6])
+        .manualActivation(true)
+        .onTouchesDown((event, manager) => {
+          "worklet";
+          const touch = event.allTouches[0];
+          if (!touch || event.numberOfTouches > 1 || touch.y > dragZone) {
+            manager.fail();
+            return;
+          }
+          touchStart.value = { x: touch.absoluteX, y: touch.absoluteY };
+        })
+        .onTouchesMove((event, manager) => {
+          "worklet";
+          const touch = event.allTouches[0];
+          if (!touch) return;
+          const dx = Math.abs(touch.absoluteX - touchStart.value.x);
+          const dy = Math.abs(touch.absoluteY - touchStart.value.y);
+          if (dx > DRAG_SLOP * 2 && dx > dy) manager.fail();
+          else if (dy > DRAG_SLOP) manager.activate();
+        })
         .onStart(() => {
           "worklet";
           start.value = offset.value;
@@ -146,7 +202,8 @@ export function CompanionSheet({
           "worklet";
           const next = start.value + event.translationY;
           // A little give above full height, none past the screen's bottom.
-          offset.value = next < 0 ? next / 4 : Math.min(next, hidden);
+          offset.value =
+            next < 0 ? Math.max(-TOP_GAP, next / 4) : Math.min(next, hidden);
         })
         .onEnd((event) => {
           "worklet";
@@ -179,7 +236,7 @@ export function CompanionSheet({
         }),
     // Callbacks read the latest props through a ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hidden, restHalf, offset, start],
+    [dragZone, hidden, restHalf, offset, start, touchStart],
   );
 
   // A detent chosen by the screen (e.g. the keyboard opening) animates too.
@@ -222,29 +279,24 @@ export function CompanionSheet({
           styles.sheet,
           {
             top: windowHeight - geometry.full,
-            height: geometry.full,
+            height: geometry.full + BOTTOM_BLEED,
             backgroundColor: theme.background,
           },
           sheetStyle,
         ]}
       >
-        <View
-          style={{
-            height: detent === "full" ? geometry.full : geometry.half,
-          }}
-        >
+        <HiddenBottomContext.Provider value={hiddenBottom}>
           <GestureDetector gesture={pan}>
-            <View collapsable={false}>
-              <View style={styles.grabberArea}>
+            <View collapsable={false} style={{ height: geometry.full }}>
+              <View style={styles.grabberStrip}>
                 <View
                   style={[styles.grabber, { backgroundColor: theme.border }]}
                 />
               </View>
-              {header}
+              <View style={styles.content}>{children}</View>
             </View>
           </GestureDetector>
-          <View style={styles.content}>{children}</View>
-        </View>
+        </HiddenBottomContext.Provider>
       </Animated.View>
     </View>
   );
@@ -266,7 +318,11 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: -2 },
     elevation: 24,
   },
-  grabberArea: { alignItems: "center", paddingTop: 8, paddingBottom: 4 },
+  grabberStrip: {
+    height: GRABBER_STRIP,
+    alignItems: "center",
+    paddingTop: Platform.OS === "ios" ? 5 : 8,
+  },
   grabber: { width: 36, height: 5, borderRadius: 3 },
   content: { flex: 1 },
 });

@@ -35,6 +35,14 @@ export interface WorkspaceChatViewProps {
   reconnecting?: boolean;
   /** Message of the offline notice. */
   offlineMessage?: string;
+  /** More status banners below the header, e.g. the app companion's. */
+  notices?: React.ReactNode;
+  /**
+   * Renders the chat's sheets (model, rename, file). False when the host
+   * renders `WorkspaceChatSheets` itself, so they also open while this view
+   * is not on screen (e.g. renaming from a chat list beside it).
+   */
+  sheets?: boolean;
   /** Changes when the session changes; resets the transcript. */
   scopeKey: string;
 }
@@ -56,11 +64,11 @@ export function WorkspaceChatView({
   onRetryConnection,
   reconnecting = false,
   offlineMessage = "You’re offline. Saved chats and installed apps still open.",
+  notices,
+  sheets = true,
   scopeKey,
 }: WorkspaceChatViewProps): React.JSX.Element {
-  const insets = useSafeAreaInsets();
   const {
-    client,
     controller,
     offline,
     activeEdit,
@@ -191,6 +199,7 @@ export function WorkspaceChatView({
                 />
               </View>
             ) : null}
+            {notices ? <View style={styles.notice}>{notices}</View> : null}
           </ChromeOverlay>
         }
       >
@@ -244,6 +253,25 @@ export function WorkspaceChatView({
         />
       </ChatLayout>
 
+      {sheets ? (
+        <WorkspaceChatSheets chat={chat} onOpenSettings={onOpenSettings} />
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The chat's sheets: model choice, renaming and the file viewer. Part of
+ * `WorkspaceChatView`, or rendered by a host that shows other pages beside it.
+ */
+export function WorkspaceChatSheets({
+  chat,
+  onOpenSettings,
+}: Pick<WorkspaceChatViewProps, "chat" | "onOpenSettings">): React.JSX.Element {
+  const insets = useSafeAreaInsets();
+  const { client } = chat;
+  return (
+    <>
       <ModelSheet
         visible={chat.sheet === "settings"}
         onClose={() => chat.closeSheet("settings")}

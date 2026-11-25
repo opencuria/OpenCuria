@@ -2,21 +2,19 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   BackHandler,
-  Image,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   View,
   useWindowDimensions,
 } from "react-native";
-import Animated, { SlideInLeft, SlideOutLeft } from "react-native-reanimated";
+import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   KeyboardController,
   KeyboardEvents,
 } from "react-native-keyboard-controller";
-import { ChevronDown, Ellipsis, SquarePen } from "lucide-react-native";
+import { CircleDot, SquarePen } from "lucide-react-native";
 import type { HarnessConversation } from "@opencuria/client";
 import { PublishedAppCard } from "../apps/PublishedAppCard";
 import { appScope } from "../apps/appPresentation";
@@ -25,10 +23,7 @@ import {
   CompanionSheet,
   type SheetDetent,
 } from "../apps/companion/CompanionSheet";
-import {
-  CompanionChatList,
-  CompanionChatListHeader,
-} from "../apps/companion/CompanionChatList";
+import { CompanionChatList } from "../apps/companion/CompanionChatList";
 import { PointerOverlay } from "../apps/companion/PointerOverlay";
 import {
   RecordingBar,
@@ -52,11 +47,15 @@ import {
   rememberCompanionChat,
 } from "../apps/companion/companionMemory";
 import { useAppRecording } from "../apps/companion/useAppRecording";
-import { WorkspaceChatView } from "../components/WorkspaceChatView";
-import { ChromeInsetContext } from "../ui/chromeInset";
-import { ComposerAction } from "../ui/ComposerAction";
-import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
+import {
+  WorkspaceChatSheets,
+  WorkspaceChatView,
+} from "../components/WorkspaceChatView";
+import { useChromeTopInset, useHiddenBottom } from "../ui/chromeInset";
+import type { NativeMenuAction } from "../ui/NativeMenu";
 import { Banner } from "../ui/primitives";
+import { SheetStack } from "../ui/SheetStack";
+import type { SheetPage, SheetPageMenu } from "../ui/SheetStack.types";
 import { statusColor } from "../ui/statusColors";
 import { useTheme } from "../ui/theme";
 import { showToast } from "../ui/toast";
@@ -80,6 +79,8 @@ export interface AppCompanionProps {
 }
 
 const OFFLINE_SHEETS = new Set(["chats"]);
+/** The navigation bar before its first measurement. */
+const DEFAULT_BAR_HEIGHT = Platform.OS === "ios" ? 44 : 60;
 const TRIGGERS: Array<{
   id: CompanionMenuTrigger;
   title: string;
@@ -122,7 +123,26 @@ function useCompanionSheet(initiallyOpen: boolean) {
     setOpen(false);
   }, []);
   const hidden = useCallback(() => setShown(false), []);
-  return { open, shown, detent, setDetent, show, hide, hidden };
+  /** The user dragged the sheet; the keyboard needs its full height. */
+  const dragged = useCallback((next: SheetDetent) => {
+    if (next === "half")
+      void KeyboardController.dismiss().catch(() => undefined);
+    setDetent(next);
+  }, []);
+  /** The drag area below the grabber follows the measured bar. */
+  const [barHeight, setBarHeight] = useState(DEFAULT_BAR_HEIGHT);
+  return {
+    open,
+    shown,
+    detent,
+    setDetent,
+    dragged,
+    show,
+    hide,
+    hidden,
+    barHeight,
+    setBarHeight,
+  };
 }
 
 /**
@@ -207,14 +227,12 @@ type SheetState = ReturnType<typeof useCompanionSheet>;
 function CompanionShell({
   appName,
   versionName,
-  iconUri,
   sheet,
   message,
 }: AppCompanionProps & {
   sheet: SheetState;
   message: string | null;
 }): React.JSX.Element {
-  const { theme } = useTheme();
   useCompanionLayer(sheet.shown, null);
   useBackClose(sheet.shown ? () => (sheet.hide(), true) : null);
   const triggers = useMenuTriggers();
@@ -225,46 +243,47 @@ function CompanionShell({
       onDetentChange={() => undefined}
       onDismiss={sheet.hide}
       onHidden={sheet.hidden}
+      barHeight={sheet.barHeight}
       testID="companion-sheet"
-      header={
-        <View style={styles.header}>
-          <AppIcon uri={iconUri} />
-          <View style={styles.titleButton}>
-            <Text
-              numberOfLines={1}
-              style={[styles.title, { color: theme.text }]}
-            >
-              {appName}
-            </Text>
-            {versionName ? (
-              <Text
-                numberOfLines={1}
-                style={[styles.subtitle, { color: theme.mutedText }]}
-              >
-                Version {versionName}
-              </Text>
-            ) : null}
-          </View>
-          <AppMenu
-            triggers={triggers.value}
-            onTriggers={triggers.set}
-            chatActions={[]}
-            onChatAction={() => undefined}
-            onReload={sheet.hide}
-          />
-        </View>
-      }
     >
-      <View style={styles.shell}>
-        {message ? (
-          <Text style={[styles.shellText, { color: theme.mutedText }]}>
-            {message}
-          </Text>
-        ) : (
-          <ActivityIndicator color={theme.mutedText} />
-        )}
-      </View>
+      <SheetStack
+        root={{
+          title: appName,
+          subtitle: versionName ? `Version ${versionName}` : undefined,
+          testID: "companion-app",
+          menu: appMenu({
+            triggers: triggers.value,
+            onTriggers: triggers.set,
+            onReload: sheet.hide,
+          }),
+          children: <ShellMessage message={message} />,
+        }}
+        detailShown={false}
+        onDetailShownChange={() => undefined}
+        onBarHeight={sheet.setBarHeight}
+      />
     </CompanionSheet>
+  );
+}
+
+/** Centered in what the sheet shows of itself, below its bar. */
+function ShellMessage({ message }: { message: string | null }) {
+  const { theme } = useTheme();
+  const top = useChromeTopInset();
+  const hiddenBottom = useHiddenBottom();
+  const visible = useAnimatedStyle(() => ({
+    paddingBottom: Math.max(0, hiddenBottom.value),
+  }));
+  return (
+    <Animated.View style={[styles.shell, { paddingTop: top }, visible]}>
+      {message ? (
+        <Text style={[styles.shellText, { color: theme.mutedText }]}>
+          {message}
+        </Text>
+      ) : (
+        <ActivityIndicator color={theme.mutedText} />
+      )}
+    </Animated.View>
   );
 }
 
@@ -272,7 +291,6 @@ function CompanionWorkspace({
   appId,
   appName,
   versionName,
-  iconUri,
   account,
   workspaceId,
   initialSessionId,
@@ -352,14 +370,16 @@ function CompanionWorkspace({
     sheet.shown && !barShown,
     recordingActive ? { mode: recording.state.mode, region } : null,
   );
+  // Android Back follows the pages: from the chat to the chat list, from
+  // there out of the sheet.
   useBackClose(
-    page === "chats"
-      ? () => (setPage("chat"), true)
-      : sheet.shown
-        ? () => (sheet.hide(), true)
-        : recordingActive && recording.state.mode === "point"
-          ? () => (recording.setMode("use"), true)
-          : null,
+    sheet.shown
+      ? page === "chat"
+        ? () => (setPage("chats"), true)
+        : () => (sheet.hide(), true)
+      : recordingActive && recording.state.mode === "point"
+        ? () => (recording.setMode("use"), true)
+        : null,
   );
 
   /**
@@ -410,11 +430,17 @@ function CompanionWorkspace({
       ? "New chat"
       : " ";
   const subtitle = [appName, chat.workspace?.name].filter(Boolean).join(" · ");
-  const openChats = () => {
-    void KeyboardController.dismiss().catch(() => undefined);
-    setPage("chats");
+  const newChat = () => {
+    setPage("chat");
+    chat.newChat();
   };
   const chatActions: NativeMenuAction[] = [
+    {
+      id: "new",
+      title: "New chat",
+      symbol: "square.and.pencil",
+      disabled: !chat.ready,
+    },
     ...(chat.chat.activeSession && !chat.offline
       ? [
           {
@@ -438,7 +464,8 @@ function CompanionWorkspace({
       : []),
   ];
   const chatAction = (id: string) => {
-    if (id === "rename" && chat.chat.activeSession)
+    if (id === "new") newChat();
+    else if (id === "rename" && chat.chat.activeSession)
       chat.rename(chat.chat.activeSession);
     else if (id === "delete" && chat.activeConversation)
       chat.confirmDelete(chat.activeConversation);
@@ -447,6 +474,101 @@ function CompanionWorkspace({
     if (action === "rename") chat.rename(row);
     else if (action === "read") void chat.markConversation(row);
     else chat.confirmDelete(row);
+  };
+
+  const chatsPage: SheetPage = {
+    title: "Chats",
+    subtitle: chat.workspace?.name,
+    testID: "companion-chats",
+    actions: [
+      {
+        id: "new",
+        label: "New chat",
+        symbol: "square.and.pencil",
+        icon: SquarePen,
+        disabled: !chat.ready,
+        onPress: newChat,
+        testID: "companion-chats-new",
+      },
+    ],
+    children: (
+      <CompanionChatList
+        conversations={conversations}
+        activeSessionId={activeSessionId}
+        offline={chat.offline}
+        actionsDisabled={chat.isTransitioning}
+        onSelect={(row) => {
+          setPage("chat");
+          chat.openConversation(row);
+        }}
+        onAction={listAction}
+      />
+    ),
+  };
+  const recordingBusy = starting || recordingActive;
+  const chatPage: SheetPage = {
+    title,
+    subtitle,
+    testID: "companion-chat",
+    actions: [
+      {
+        id: "record",
+        label: "Record",
+        accessibilityHint:
+          "Talk while you use the app; taps, screens and logs are recorded for the agent",
+        symbol: "record.circle",
+        icon: CircleDot,
+        // Its one color is the recording red.
+        tint: statusColor("critical", theme),
+        disabled:
+          recordingBusy ||
+          chat.offline ||
+          !chat.navigationReady ||
+          Boolean(chat.voice?.recording),
+        standalone: true,
+        onPress: () => void startRecording(),
+        testID: "companion-record",
+      },
+    ],
+    menu: appMenu({
+      triggers: triggers.value,
+      onTriggers: triggers.set,
+      chatActions,
+      onChatAction: chatAction,
+      onReload: sheet.hide,
+    }),
+    children: (
+      <WorkspaceChatView
+        chat={chat}
+        // The chat list renames chats too, while this page is not mounted.
+        sheets={false}
+        scopeKey={`${account}:${workspaceId}`}
+        renderPublishedApp={renderPublishedApp}
+        onOpenSettings={askForSettings}
+        onRetryConnection={() => void retry()}
+        reconnecting={reconnecting}
+        offlineMessage="You’re offline. Saved chats of this workspace still open."
+        emptyText={
+          chat.offline
+            ? conversations.length
+              ? "Open a saved chat from the chat list."
+              : "No chats of this workspace are saved on this device."
+            : undefined
+        }
+        notices={
+          recording.state.notice ? (
+            <Banner
+              tone={
+                recording.state.notice.tone === "error" ? "error" : "neutral"
+              }
+              message={recording.state.notice.message}
+              onDismiss={recording.dismissNotice}
+              testID="companion-recording-notice"
+            />
+          ) : null
+        }
+      />
+    ),
   };
 
   return (
@@ -467,150 +589,25 @@ function CompanionWorkspace({
       <CompanionSheet
         open={sheet.open}
         detent={sheet.detent}
-        onDetentChange={sheet.setDetent}
+        onDetentChange={sheet.dragged}
         onDismiss={sheet.hide}
         onHidden={sheet.hidden}
+        barHeight={sheet.barHeight}
         testID="companion-sheet"
-        header={
-          page === "chats" ? (
-            <CompanionChatListHeader
-              workspaceName={chat.workspace?.name ?? ""}
-              canCreate={chat.ready}
-              onBack={() => setPage("chat")}
-              onCreate={() => {
-                setPage("chat");
-                chat.newChat();
-              }}
-            />
-          ) : (
-            <View style={styles.header}>
-              <Pressable
-                style={styles.titleButton}
-                onPress={openChats}
-                accessibilityRole="button"
-                accessibilityLabel={`Chats. ${title.trim() || "New chat"}`}
-                accessibilityHint="Shows every chat of the app's workspace"
-                testID="companion-title"
-              >
-                <View style={styles.titleRow}>
-                  <Text
-                    numberOfLines={1}
-                    style={[
-                      styles.title,
-                      styles.titleText,
-                      { color: theme.text },
-                    ]}
-                  >
-                    {title}
-                  </Text>
-                  <ChevronDown
-                    size={16}
-                    strokeWidth={2.4}
-                    color={theme.mutedText}
-                  />
-                </View>
-                <Text
-                  numberOfLines={1}
-                  style={[styles.subtitle, { color: theme.mutedText }]}
-                >
-                  {subtitle}
-                </Text>
-              </Pressable>
-              <RecordButton
-                busy={starting || recordingActive}
-                disabled={
-                  chat.offline ||
-                  !chat.navigationReady ||
-                  Boolean(chat.voice?.recording)
-                }
-                onPress={() => void startRecording()}
-              />
-              <ComposerAction
-                label="New chat"
-                icon={SquarePen}
-                disabled={!chat.ready}
-                onPress={() => {
-                  setPage("chat");
-                  chat.newChat();
-                }}
-                testID="companion-new-chat"
-              />
-              <AppMenu
-                triggers={triggers.value}
-                onTriggers={triggers.set}
-                chatActions={chatActions}
-                onChatAction={chatAction}
-                onReload={sheet.hide}
-              />
-            </View>
-          )
-        }
       >
-        {recording.state.notice ? (
-          <View style={styles.notice}>
-            <Banner
-              tone={
-                recording.state.notice.tone === "error" ? "error" : "neutral"
-              }
-              message={recording.state.notice.message}
-              onDismiss={recording.dismissNotice}
-              testID="companion-recording-notice"
-            />
-          </View>
-        ) : null}
-        <ChromeInsetContext.Provider value={0}>
-          <View style={styles.body}>
-            <WorkspaceChatView
-              chat={chat}
-              scopeKey={`${account}:${workspaceId}`}
-              renderPublishedApp={renderPublishedApp}
-              onOpenSettings={askForSettings}
-              onRetryConnection={() => void retry()}
-              reconnecting={reconnecting}
-              offlineMessage="You’re offline. Saved chats of this workspace still open."
-              emptyText={
-                chat.offline
-                  ? conversations.length
-                    ? "Open a saved chat from the chat list."
-                    : "No chats of this workspace are saved on this device."
-                  : undefined
-              }
-            />
-            {page === "chats" ? (
-              <Animated.View
-                entering={SlideInLeft.duration(220)}
-                exiting={SlideOutLeft.duration(180)}
-                style={[
-                  StyleSheet.absoluteFill,
-                  { backgroundColor: theme.background },
-                ]}
-              >
-                <CompanionChatList
-                  conversations={conversations}
-                  activeSessionId={activeSessionId}
-                  offline={chat.offline}
-                  actionsDisabled={chat.isTransitioning}
-                  onSelect={(row) => {
-                    setPage("chat");
-                    chat.openConversation(row);
-                  }}
-                  onAction={listAction}
-                />
-              </Animated.View>
-            ) : null}
-            {/* The transcript fades out beneath the header. */}
-            <View
-              pointerEvents="none"
-              style={[
-                styles.fade,
-                {
-                  experimental_backgroundImage: `linear-gradient(to bottom, ${theme.background} 0%, ${theme.background}00 100%)`,
-                },
-              ]}
-            />
-          </View>
-        </ChromeInsetContext.Provider>
+        <SheetStack
+          root={chatsPage}
+          detail={chatPage}
+          detailShown={page === "chat"}
+          onDetailShownChange={(shown) => {
+            if (!shown)
+              void KeyboardController.dismiss().catch(() => undefined);
+            setPage(shown ? "chat" : "chats");
+          }}
+          onBarHeight={sheet.setBarHeight}
+        />
       </CompanionSheet>
+      <WorkspaceChatSheets chat={chat} onOpenSettings={askForSettings} />
     </View>
   );
 }
@@ -662,160 +659,68 @@ function useBackClose(handler: (() => boolean) | null): void {
   }, [handler]);
 }
 
-function AppIcon({ uri }: { uri?: string | null }): React.JSX.Element {
-  const { theme } = useTheme();
-  return uri ? (
-    <Image
-      source={{ uri }}
-      style={styles.icon}
-      accessibilityIgnoresInvertColors
-    />
-  ) : (
-    <View style={[styles.icon, { backgroundColor: theme.controlFill }]} />
-  );
-}
-
-/** "Record": talk while using the app; its one color is the recording red. */
-function RecordButton({
-  busy,
-  disabled,
-  onPress,
-}: {
-  busy: boolean;
-  disabled: boolean;
-  onPress: () => void;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  const inactive = busy || disabled;
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel="Record"
-      accessibilityHint="Talk while you use the app; taps, screens and logs are recorded for the agent"
-      accessibilityState={{ disabled: inactive, busy }}
-      disabled={inactive}
-      onPress={onPress}
-      hitSlop={4}
-      testID="companion-record"
-      style={({ pressed }) => [
-        styles.record,
-        {
-          backgroundColor: theme.controlFill,
-          opacity: disabled && !busy ? 0.45 : pressed ? 0.7 : 1,
-        },
-      ]}
-    >
-      {busy ? (
-        <ActivityIndicator size="small" color={theme.mutedText} />
-      ) : (
-        <View
-          style={[
-            styles.recordDot,
-            { backgroundColor: statusColor("critical", theme) },
-          ]}
-        />
-      )}
-      <Text style={[styles.recordText, { color: theme.text }]}>Record</Text>
-    </Pressable>
-  );
-}
-
-/** Reload and Close app, chat actions, and the ways that open the companion. */
-function AppMenu({
+/**
+ * Chat actions, Reload and Close app, and the ways that open the companion,
+ * as groups of the overflow menu.
+ */
+function appMenu({
   triggers,
   onTriggers,
-  chatActions,
-  onChatAction,
+  chatActions = [],
+  onChatAction = () => undefined,
   onReload,
 }: {
-  onReload: () => void;
   triggers: CompanionMenuTriggers;
   onTriggers: (triggers: CompanionMenuTriggers) => void;
-  chatActions: NativeMenuAction[];
-  onChatAction: (id: string) => void;
-}): React.JSX.Element {
-  const { theme } = useTheme();
+  chatActions?: NativeMenuAction[];
+  onChatAction?: (id: string) => void;
+  onReload: () => void;
+}): SheetPageMenu {
   const enabled = TRIGGERS.filter((item) => triggers[item.id]).length;
-  const actions: NativeMenuAction[] = [
-    { id: "reload", title: "Reload app", symbol: "arrow.clockwise" },
-    { id: "close", title: "Close app", symbol: "xmark.circle" },
-    ...chatActions,
-    ...TRIGGERS.map((item) => ({
-      id: `trigger:${item.id}`,
-      title: item.title,
-      symbol: item.symbol,
-      selected: triggers[item.id],
-      // The last way stays on, so the companion can always be opened.
-      disabled: triggers[item.id] && enabled === 1,
-    })),
-  ];
-  return (
-    <NativeMenu
-      label="App"
-      accessibilityLabel="More"
-      actions={actions}
-      onSelect={(id) => {
-        if (id === "reload") {
-          // The app starts over in view.
-          onReload();
-          void reloadOpenApp();
-        } else if (id === "close") void closeOpenAppFromCompanion();
-        else if (id.startsWith("trigger:")) {
-          const trigger = id.slice("trigger:".length) as CompanionMenuTrigger;
-          void setMenuTrigger(trigger, !triggers[trigger]).then(onTriggers);
-        } else onChatAction(id);
-      }}
-      style={styles.menu}
-      testID="companion-menu"
-    >
-      <View style={styles.menuIcon}>
-        <Ellipsis color={theme.text} size={22} />
-      </View>
-    </NativeMenu>
-  );
+  return {
+    label: "More",
+    testID: "companion-menu",
+    sections: [
+      { id: "chat", actions: chatActions },
+      {
+        id: "app",
+        actions: [
+          { id: "reload", title: "Reload app", symbol: "arrow.clockwise" },
+          { id: "close", title: "Close app", symbol: "xmark.circle" },
+        ],
+      },
+      {
+        id: "triggers",
+        actions: TRIGGERS.map((item) => ({
+          id: `trigger:${item.id}`,
+          title: item.title,
+          symbol: item.symbol,
+          selected: triggers[item.id],
+          // The last way stays on, so the companion can always be opened.
+          disabled: triggers[item.id] && enabled === 1,
+        })),
+      },
+    ],
+    onSelect: (id) => {
+      if (id === "reload") {
+        // The app starts over in view.
+        onReload();
+        void reloadOpenApp();
+      } else if (id === "close") void closeOpenAppFromCompanion();
+      else if (id.startsWith("trigger:")) {
+        const trigger = id.slice("trigger:".length) as CompanionMenuTrigger;
+        void setMenuTrigger(trigger, !triggers[trigger]).then(onTriggers);
+      } else onChatAction(id);
+    },
+  };
 }
 
 const styles = StyleSheet.create({
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingStart: 20,
-    paddingEnd: 6,
-    paddingBottom: 6,
-    gap: 6,
-  },
-  icon: { width: 34, height: 34, borderRadius: 9 },
-  titleButton: { flex: 1, minWidth: 0, paddingStart: 4, paddingVertical: 2 },
-  titleRow: { flexDirection: "row", alignItems: "center", gap: 3 },
-  title: { fontSize: 17, fontWeight: "600" },
-  titleText: { flexShrink: 1 },
-  subtitle: { fontSize: 13, marginTop: 1 },
-  record: {
-    height: 36,
-    borderRadius: 18,
-    paddingHorizontal: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 7,
-  },
-  recordDot: { width: 10, height: 10, borderRadius: 5 },
-  recordText: { fontSize: 15, fontWeight: "600" },
-  menu: { width: 44, height: 44 },
-  menuIcon: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  notice: { paddingHorizontal: 12, paddingBottom: 6 },
-  body: { flex: 1 },
-  fade: { position: "absolute", top: 0, left: 0, right: 0, height: 16 },
   shell: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 32,
-    paddingBottom: 48,
   },
   shellText: { fontSize: 15, lineHeight: 21, textAlign: "center" },
 });

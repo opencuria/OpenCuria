@@ -23,6 +23,7 @@ import {
   type GestureResponderEvent,
 } from "react-native";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
+import Reanimated, { useAnimatedStyle } from "react-native-reanimated";
 import type {
   LegendListRef,
   OnViewableItemsChangedInfo,
@@ -77,7 +78,7 @@ import {
   messagePublishedApps,
   type PublishedAppReference,
 } from "@opencuria/chat-core/publishedApps";
-import { useChromeTopInset } from "../ui/chromeInset";
+import { useChromeTopInset, useHiddenBottom } from "../ui/chromeInset";
 import { useChatLayout } from "./ChatLayout";
 import {
   END_SLOP,
@@ -533,6 +534,7 @@ function JumpToLatest({
 }): React.JSX.Element {
   const { theme } = useTheme();
   const { dockOffset, dockTranslateY } = useChatLayout();
+  const lift = useHiddenBottomLift(1);
   const appearance = useRef(new Animated.Value(visible ? 1 : 0)).current;
   useEffect(() => {
     Animated.spring(appearance, {
@@ -561,22 +563,39 @@ function JumpToLatest({
     [appearance, dockOffset, dockTranslateY],
   );
   return (
-    <Animated.View
-      pointerEvents={visible ? "box-none" : "none"}
-      accessibilityElementsHidden={!visible}
-      importantForAccessibility={visible ? "auto" : "no-hide-descendants"}
-      style={style}
+    <Reanimated.View
+      pointerEvents="box-none"
+      style={[StyleSheet.absoluteFill, lift]}
     >
-      <IconButton
-        icon={<ArrowDown size={20} color={theme.text} />}
-        symbol="arrow.down"
-        tone="floating"
-        label="Scroll to latest message"
-        onPress={onPress}
-        testID="chat-scroll-to-latest"
-      />
-    </Animated.View>
+      <Animated.View
+        pointerEvents={visible ? "box-none" : "none"}
+        accessibilityElementsHidden={!visible}
+        importantForAccessibility={visible ? "auto" : "no-hide-descendants"}
+        style={style}
+      >
+        <IconButton
+          icon={<ArrowDown size={20} color={theme.text} />}
+          symbol="arrow.down"
+          tone="floating"
+          label="Scroll to latest message"
+          onPress={onPress}
+          testID="chat-scroll-to-latest"
+        />
+      </Animated.View>
+    </Reanimated.View>
   );
+}
+
+/**
+ * Raises content by a share of the layout's part below the visible area
+ * (`HiddenBottomContext`), on the UI thread: 1 keeps it above the docked
+ * composer, ½ centers it in what remains visible.
+ */
+function useHiddenBottomLift(share: number) {
+  const hiddenBottom = useHiddenBottom();
+  return useAnimatedStyle(() => ({
+    transform: [{ translateY: -hiddenBottom.value * share }],
+  }));
 }
 
 /**
@@ -600,6 +619,7 @@ function EmptyTranscript({
 }): React.JSX.Element {
   const { theme } = useTheme();
   const { dockOffset, dockTranslateY, keyboardDismissMode } = useChatLayout();
+  const lift = useHiddenBottomLift(0.5);
   const centered = useMemo(
     () => ({
       transform: [
@@ -625,21 +645,23 @@ function EmptyTranscript({
       scrollEventThrottle={16}
       {...scrollHandlers}
     >
-      <Animated.View style={[centered, content ? styles.emptyFill : null]}>
-        {loading ? (
-          <ActivityIndicator
-            testID="chat-loading"
-            accessibilityLabel="Loading chat"
-            color={theme.mutedText}
-          />
-        ) : (
-          (content ?? (
-            <Text style={[styles.emptyTitle, { color: theme.text }]}>
-              {text}
-            </Text>
-          ))
-        )}
-      </Animated.View>
+      <Reanimated.View style={[lift, content ? styles.emptyFill : null]}>
+        <Animated.View style={[centered, content ? styles.emptyFill : null]}>
+          {loading ? (
+            <ActivityIndicator
+              testID="chat-loading"
+              accessibilityLabel="Loading chat"
+              color={theme.mutedText}
+            />
+          ) : (
+            (content ?? (
+              <Text style={[styles.emptyTitle, { color: theme.text }]}>
+                {text}
+              </Text>
+            ))
+          )}
+        </Animated.View>
+      </Reanimated.View>
     </ScrollView>
   );
 }
