@@ -104,6 +104,20 @@ describe("sharedVoiceQueue", () => {
     expect(sharedVoiceQueue(ACCOUNT)).not.toBe(shared);
   });
 
+  it("sends a clip saved a little over the limit as long as the limit", async () => {
+    const connection = client();
+    const shared = sharedVoiceQueue(ACCOUNT);
+    const release = shared.acquire(port(CHAT, connection, vi.fn()));
+    await shared.queue.add(await clip("clip-long", { durationMs: 600_087 }));
+    await settle();
+    expect(connection.voice.transcribe).toHaveBeenCalledWith(
+      "ws-1",
+      expect.objectContaining({ duration_ms: 600_000 }),
+      expect.anything(),
+    );
+    release();
+  });
+
   it("references an app recording's timeline in the draft of its chat", async () => {
     attach.mockImplementation(async (_client, _files, _clip, transcript) => ({
       ...transcript,

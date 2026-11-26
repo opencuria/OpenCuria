@@ -15,6 +15,7 @@ import {
   KeyboardEvents,
 } from "react-native-keyboard-controller";
 import { CircleDot, SquarePen } from "lucide-react-native";
+import type { PointerMode } from "@opencuria/chat-core/visualRecording";
 import type { HarnessConversation } from "@opencuria/client";
 import { PublishedAppCard } from "../apps/PublishedAppCard";
 import { appScope } from "../apps/appPresentation";
@@ -24,11 +25,6 @@ import {
   type SheetDetent,
 } from "../apps/companion/CompanionSheet";
 import { CompanionChatList } from "../apps/companion/CompanionChatList";
-import { PointerOverlay } from "../apps/companion/PointerOverlay";
-import {
-  RecordingBar,
-  recordingBarRegion,
-} from "../apps/companion/RecordingBar";
 import {
   DEFAULT_MENU_TRIGGERS,
   closeOpenAppFromCompanion,
@@ -46,20 +42,29 @@ import {
   lastCompanionChat,
   rememberCompanionChat,
 } from "../apps/companion/companionMemory";
-import { useAppRecording } from "../apps/companion/useAppRecording";
+import { useAppSurface } from "../apps/companion/useAppSurface";
+import { PointerOverlay } from "../components/PointerOverlay";
+import { RecordingBar, recordingBarRegion } from "../components/RecordingBar";
+import { recordingHint } from "../components/RecordingOverlay";
 import {
   WorkspaceChatSheets,
   WorkspaceChatView,
 } from "../components/WorkspaceChatView";
 import { useChromeTopInset, useHiddenBottom } from "../ui/chromeInset";
 import type { NativeMenuAction } from "../ui/NativeMenu";
-import { Banner } from "../ui/primitives";
 import { SheetStack } from "../ui/SheetStack";
 import type { SheetPage, SheetPageMenu } from "../ui/SheetStack.types";
 import { statusColor } from "../ui/statusColors";
 import { useTheme } from "../ui/theme";
 import { showToast } from "../ui/toast";
 import { useWorkspaceChat } from "../state/useWorkspaceChat";
+import {
+  activeRecording,
+  cancelRecording,
+  finishRecording,
+  setRecordingMode,
+  useActiveRecording,
+} from "../voice/voiceRecording";
 import { useSession } from "./SessionContext";
 
 /** What the native runtime tells the companion about the open app. */
@@ -306,6 +311,8 @@ function CompanionWorkspace({
   const [page, setPage] = useState<"chat" | "chats">("chat");
   /** The recording bar rests at the top, where apps rarely put controls. */
   const [barAtTop, setBarAtTop] = useState(true);
+  /** Over the chat list it rests at the bottom, below the sheet's bar. */
+  const [sheetBarAtTop, setSheetBarAtTop] = useState(false);
   const triggers = useMenuTriggers();
   const [starting, setStarting] = useState(false);
   const askForSettings = useCallback(
@@ -322,19 +329,19 @@ function CompanionWorkspace({
     initialSessionId,
     offlineSheets: OFFLINE_SHEETS,
     onOpenSettings: askForSettings,
+    overApp: true,
   });
-  const recording = useAppRecording({
-    client: chat.client,
-    account,
-    app: {
-      app_id: appId,
-      name: appName,
-      ...(versionName ? { version: versionName } : {}),
-      platform: Platform.OS === "ios" ? "ios" : "android",
-    },
+  // One recording at a time, from Record or the composer's microphone.
+  const recording = useActiveRecording();
+  const recordingActive = recording !== null;
+  const recordingMode = recording?.mode ?? "use";
+  // The app is the surface a recording shows while the sheet is away.
+  useAppSurface(recordingActive && !sheet.open, {
+    app_id: appId,
+    name: appName,
+    ...(versionName ? { version: versionName } : {}),
+    platform: Platform.OS === "ios" ? "ios" : "android",
   });
-  const recordingPhase = recording.state.phase;
-  const recordingActive = recordingPhase !== "idle";
   const apps = useApps(chat.client, account, undefined, {
     offline: chat.offline,
   });
@@ -364,11 +371,13 @@ function CompanionWorkspace({
   const windowSize = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const region = recordingBarRegion(windowSize, insets, barAtTop);
-  // While a recording runs, the bar takes over as soon as the sheet leaves.
-  const barShown = recordingActive && !sheet.open;
+  // While a recording runs, the bar takes over wherever the composer is out
+  // of sight: over the app once the sheet leaves, and over the chat list.
+  const overApp = recordingActive && !sheet.open;
+  const barShown = overApp || (recordingActive && page === "chats");
   useCompanionLayer(
-    sheet.shown && !barShown,
-    recordingActive ? { mode: recording.state.mode, region } : null,
+    sheet.shown && !overApp,
+    recordingActive ? { mode: recordingMode, region } : null,
   );
   // Android Back follows the pages: from the chat to the chat list, from
   // there out of the sheet.
@@ -377,8 +386,8 @@ function CompanionWorkspace({
       ? page === "chat"
         ? () => (setPage("chats"), true)
         : () => (sheet.hide(), true)
-      : recordingActive && recording.state.mode === "point"
-        ? () => (recording.setMode("use"), true)
+      : recordingActive && recordingMode === "point"
+        ? () => (setRecordingMode("use"), true)
         : null,
   );
 
@@ -386,17 +395,17 @@ function CompanionWorkspace({
    * The layer switches right away, before React renders the new mode, so the
    * next touch already goes where the bar says.
    */
-  const changeMode = (mode: "use" | "point") => {
-    setCompanionTouchMode(mode === "point" ? "all" : "regions", [region]);
-    recording.setMode(mode);
+  const changeMode = (mode: PointerMode) => {
+    if (overApp)
+      setCompanionTouchMode(mode === "point" ? "all" : "regions", [region]);
+    setRecordingMode(mode);
   };
 
   const startRecording = async () => {
-    const scope = chat.draftScope;
-    if (!scope || starting || chat.voice?.recording) return;
+    if (!chat.draftScope || starting || recordingActive || !chat.voice) return;
     setStarting(true);
     try {
-      if (await recording.start(scope)) {
+      if (await chat.voice.record()) {
         setPage("chat");
         // The app takes touches while the sheet slides away.
         setCompanionTouchMode("regions", [region]);
@@ -406,15 +415,19 @@ function CompanionWorkspace({
       setStarting(false);
     }
   };
-  const finishRecording = () => {
-    void recording.finish();
+  /** Back to the chat, where the text arrives in the composer. */
+  const showChat = () => {
+    setPage("chat");
     sheet.setDetent("half");
     sheet.show();
   };
-  const cancelRecording = () => {
-    recording.cancel();
-    sheet.setDetent("half");
-    sheet.show();
+  const finish = () => {
+    finishRecording(false);
+    showChat();
+  };
+  const cancel = () => {
+    cancelRecording();
+    showChat();
   };
 
   const conversations = useMemo(
@@ -521,10 +534,7 @@ function CompanionWorkspace({
         // Its one color is the recording red.
         tint: statusColor("critical", theme),
         disabled:
-          recordingBusy ||
-          chat.offline ||
-          !chat.navigationReady ||
-          Boolean(chat.voice?.recording),
+          recordingBusy || chat.offline || !chat.navigationReady || !chat.voice,
         standalone: true,
         onPress: () => void startRecording(),
         testID: "companion-record",
@@ -555,36 +565,14 @@ function CompanionWorkspace({
               : "No chats of this workspace are saved on this device."
             : undefined
         }
-        notices={
-          recording.state.notice ? (
-            <Banner
-              tone={
-                recording.state.notice.tone === "error" ? "error" : "neutral"
-              }
-              message={recording.state.notice.message}
-              onDismiss={recording.dismissNotice}
-              testID="companion-recording-notice"
-            />
-          ) : null
-        }
       />
     ),
   };
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-      {barShown && recording.state.mode === "point" ? <PointerOverlay /> : null}
-      {barShown ? (
-        <RecordingBar
-          phase={recordingPhase}
-          meter={recording.meter}
-          mode={recording.state.mode}
-          onModeChange={changeMode}
-          onCancel={cancelRecording}
-          onFinish={finishRecording}
-          atTop={barAtTop}
-          onAtTopChange={setBarAtTop}
-        />
+      {overApp && recordingMode === "point" ? (
+        <PointerOverlay testID="companion-pointer-overlay" />
       ) : null}
       <CompanionSheet
         open={sheet.open}
@@ -607,6 +595,22 @@ function CompanionWorkspace({
           onBarHeight={sheet.setBarHeight}
         />
       </CompanionSheet>
+      {/* Above the sheet and its scrim: over the chat list it stays usable. */}
+      {barShown && recording && activeRecording() ? (
+        <RecordingBar
+          phase={recording.phase}
+          meter={activeRecording()!.meter}
+          mode={recordingMode}
+          modes={overApp}
+          onModeChange={changeMode}
+          onCancel={cancel}
+          onFinish={finish}
+          // Over the sheet it rests at the bottom, clear of the sheet's bar.
+          atTop={overApp ? barAtTop : sheetBarAtTop}
+          onAtTopChange={overApp ? setBarAtTop : setSheetBarAtTop}
+          hint={recordingHint({ kind: "app", pointable: true })}
+        />
+      ) : null}
       <WorkspaceChatSheets chat={chat} onOpenSettings={askForSettings} />
     </View>
   );

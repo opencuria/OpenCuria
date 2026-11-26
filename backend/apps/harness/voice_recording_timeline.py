@@ -1,8 +1,9 @@
 """Readable timeline of a pointing or app recording, the entry point for agents.
 
-Every spoken phrase carries its interval; pointers, taps, screens and app
-events follow in time order, each naming the frame image it refers to. The
-JSON files next to it keep the complete data.
+Every spoken phrase carries its interval; pointers, taps, screens, shown
+images and file lines, and app events follow in time order, each naming the
+frame, image or file it refers to. The JSON files next to it keep the
+complete data.
 """
 
 from __future__ import annotations
@@ -17,10 +18,14 @@ from .voice_schemas import (
     VoiceFrame,
     VoicePointer,
     VoiceRecordingIn,
+    VoiceTarget,
+    VoiceView,
 )
 
 # A press that moved less than this (frame pixels) is a tap, not a swipe.
 _TAP_SLOP = 24
+# On an image, at least this share of its longer side.
+_IMAGE_SLOP = 0.02
 # A press held this long is a long press.
 _LONG_PRESS_MS = 600
 # Hovering pointers (webapp) get at most one line per this interval.
@@ -85,16 +90,37 @@ def _describe_element(element: VoiceElement | None) -> str:
     return " ".join(parts)
 
 
+def _line(pointer: VoicePointer) -> str:
+    """``line 17`` (with its column when known) of a file pointer."""
+    column = f", column {round(pointer.x or 0) + 1}" if pointer.x else ""
+    return f"line {round(pointer.y or 0) + 1}{column}"
+
+
 def _where(pointer: VoicePointer, root: str) -> str:
     target = pointer.target
     if target is None:
         return ""
-    surface = _frame_name(target.path, root) if target.kind != "image" else target.path
+    if target.kind == "file":
+        return f"{_line(pointer)} of {target.path}"
+    surface = target.path if target.kind == "image" else _frame_name(target.path, root)
     return f"at {_point(pointer.x, pointer.y)} on {surface}"
 
 
+def _moved(start: VoicePointer, end: VoicePointer) -> bool:
+    """A press that went somewhere else: another line, or beyond the slop."""
+    target = end.target
+    if target is None:
+        return False
+    if target.kind == "file":
+        return round(end.y or 0) != round(start.y or 0)
+    slop = _TAP_SLOP
+    if target.kind == "image":
+        slop = max(slop, round(_IMAGE_SLOP * max(target.width, target.height)))
+    return math.dist((start.x or 0, start.y or 0), (end.x or 0, end.y or 0)) >= slop
+
+
 def _press_lines(pointers: list[VoicePointer], root: str) -> list[_Line]:
-    """Taps, long presses and swipes of an app recording."""
+    """Taps, long presses, pointing and swipes of a finger (mobile)."""
     lines: list[_Line] = []
     start: VoicePointer | None = None
     last: VoicePointer | None = None
@@ -103,11 +129,7 @@ def _press_lines(pointers: list[VoicePointer], root: str) -> list[_Line]:
         if start is None:
             return
         end = end or last or start
-        moved = (
-            math.dist((start.x or 0, start.y or 0), (end.x or 0, end.y or 0))
-            >= _TAP_SLOP
-            and end.target is not None
-        )
+        moved = _moved(start, end)
         held = end.t_ms - start.t_ms >= _LONG_PRESS_MS
         pointing = start.mode == "point"
         verb = (
@@ -115,10 +137,21 @@ def _press_lines(pointers: list[VoicePointer], root: str) -> list[_Line]:
             if moved
             else ("point" if pointing else ("long press" if held else "tap"))
         )
-        what = _describe_element(start.element)
-        text = f"{verb}  {what + '  ' if what else ''}{_where(start, root)}".rstrip()
-        if moved:
-            text += f" to {_point(end.x, end.y)}"
+        target = start.target
+        if target is not None and target.kind == "file":
+            text = f"{verb}  {_where(start, root)}"
+            if moved:
+                text += f" to {_line(end)}"
+            quoted = start.element.text if start.element else ""
+            if quoted:
+                text += f"  {_quoted(quoted)}"
+        else:
+            what = _describe_element(start.element)
+            text = (
+                f"{verb}  {what + '  ' if what else ''}{_where(start, root)}"
+            ).rstrip()
+            if moved:
+                text += f" to {_point(end.x, end.y)}"
         lines.append(_Line(start.t_ms, 2, text))
 
     for pointer in pointers:
@@ -161,6 +194,39 @@ def _hover_lines(pointers: list[VoicePointer], root: str) -> list[_Line]:
             lines.append(_Line(pointer.t_ms, 2, f"pointer  {_where(pointer, root)}"))
             previous_t = pointer.t_ms
         previous_surface = surface
+    return lines
+
+
+def _describe_view(target: VoiceTarget, view: VoiceView) -> str:
+    region = view.region
+    if target.kind == "file":
+        if region is None:
+            return f"{target.path}  (all {target.height} lines)"
+        lines = f"lines {region[1] + 1}–{region[1] + region[3]} of {target.height}"
+        if view.approximate:
+            return f"{target.path}  around {lines} (rendered preview)"
+        return f"{target.path}  {lines}"
+    size = f"{target.width}×{target.height}"
+    if region is None:
+        return f"{target.path} ({size})"
+    return (
+        f"{target.path} ({size}), visible {region[0]},{region[1]} "
+        f"{region[2]}×{region[3]}"
+    )
+
+
+def _view_lines(views: list[VoiceView]) -> list[_Line]:
+    """Images and files the user showed, and when they went back."""
+    lines: list[_Line] = []
+    previous: VoiceTarget | None = None
+    for view in views:
+        if view.target is None:
+            if previous is not None:
+                lines.append(_Line(view.t_ms, 0, f"closed  {previous.path}"))
+            previous = None
+            continue
+        lines.append(_Line(view.t_ms, 0, f"view  {_describe_view(view.target, view)}"))
+        previous = view.target
     return lines
 
 
@@ -212,10 +278,13 @@ def render_recording_timeline(
         else "approximate speech timing (the speech model returned none)"
     )
     surfaces = (
-        "Coordinates are pixels of the named frame (a screenshot of the app at "
-        "that moment)."
+        "Screen coordinates are pixels of the named frame (a screenshot of the "
+        "app at that moment)."
         if is_app
-        else "Coordinates are pixels of the named desktop frame or image."
+        else "Desktop coordinates are pixels of the named frame."
+    )
+    surfaces += (
+        " Image coordinates are pixels of the original image; file lines count from 1."
     )
     lines: list[_Line] = []
     for segment in payload.segments:
@@ -228,10 +297,18 @@ def render_recording_timeline(
             )
         )
     lines.extend(_frame_line(frame, root, is_app) for frame in payload.frames)
+    lines.extend(_view_lines(payload.views))
+    # Fingers (mobile) carry a mode; a hovering mouse (webapp) does not.
     lines.extend(
-        _press_lines(payload.pointers, root)
-        if is_app
-        else _hover_lines(payload.pointers, root)
+        _press_lines(
+            [pointer for pointer in payload.pointers if pointer.mode is not None],
+            root,
+        )
+    )
+    lines.extend(
+        _hover_lines(
+            [pointer for pointer in payload.pointers if pointer.mode is None], root
+        )
     )
     lines.extend(_event_line(event) for event in payload.events)
     lines.sort(key=lambda line: (line.t_ms, line.order))

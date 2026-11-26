@@ -1,24 +1,37 @@
 /**
  * Visual references synchronized with a voice recording, shared by the
- * webapp (workspace images and the desktop) and the native app companion
- * (the screen of an open app). Clients observe pointers and capture frames;
- * this module keeps the rules: limits, frame cadence, which pointer samples
- * are worth keeping, coordinates in frame pixels and the manifest the server
- * stores next to the transcript (`backend/apps/harness/voice_schemas.py`).
+ * webapp (workspace images and the desktop) and the mobile app (images, text
+ * files and the screen of an open app). Clients observe pointers and capture
+ * frames; this module keeps the rules: limits, frame cadence, which pointer
+ * samples are worth keeping, coordinates in target units and the manifest the
+ * server stores next to the transcript (`backend/apps/harness/voice_schemas.py`).
+ * `visualRecorder.ts` combines them into one recording session.
  */
-import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from "./voiceInput";
+import {
+  VOICE_MAX_DURATION_MS,
+  VOICE_MAX_POINTERS,
+  voiceRecordingDuration,
+} from "./voiceInput";
 
-/** What a pointer refers to: original image pixels or a recorded frame. */
+/**
+ * What a pointer refers to: original image pixels, a recorded frame's pixels
+ * or a text file. A file is a grid of characters: `width` is its longest
+ * line's length, `height` its number of lines, and a pointer's `x`/`y` are a
+ * zero-based column and line.
+ */
 export interface PointerTarget {
-  kind: "image" | "desktop" | "app";
+  kind: "image" | "desktop" | "app" | "file";
   path: string;
   width: number;
   height: number;
 }
 
-/** The control of an app under a finger, as its accessibility tree tells. */
+/**
+ * What lies under a finger: the control of an app, as its accessibility tree
+ * tells, or the line of a file (`role` `line`, `text` its content).
+ */
 export interface PointerElement {
-  /** E.g. `button`, `text`, `image`, `textfield`. */
+  /** E.g. `button`, `text`, `image`, `textfield`, `line`. */
   role?: string;
   /** Accessibility label. */
   label?: string;
@@ -82,10 +95,25 @@ export interface AppRecordingContext {
   platform: "android" | "ios";
 }
 
+/** `[x, y, width, height]` in target units (pixels; columns and lines). */
+export type TargetRegion = [number, number, number, number];
+
+/** What part of an image or file was on screen from `t_ms` on. */
+export interface RecordingView {
+  t_ms: number;
+  /** Null once the user went back from it, e.g. to the chat. */
+  target: PointerTarget | null;
+  /** The visible part; the whole target when absent. */
+  region?: TargetRegion;
+  /** Estimated from a rendered preview's scroll position (Markdown, tables). */
+  approximate?: boolean;
+}
+
 /** Everything visual a recording collected; null-free once finished. */
 export interface PointingResult {
   pointers: PointerSample[];
   frames: RecordingFrame[];
+  views?: RecordingView[];
   events?: AppRecordingEvent[];
   app?: AppRecordingContext;
 }
@@ -108,6 +136,19 @@ export interface RecordingTranscript {
 
 /** Shortest pause between two frames while something happens. */
 export const VISUAL_FRAME_INTERVAL_MS = 500;
+/**
+ * The same for an app's screen: frames follow its touches (each press and,
+ * this long after its release, the result), so the cadence only catches
+ * what the app changes by itself.
+ */
+export const VISUAL_APP_FRAME_INTERVAL_MS = 1_000;
+export const VISUAL_PRESS_RESULT_MS = 700;
+/**
+ * A press's own frame counts if it was captured this soon after the press;
+ * later it may already show the press's result, and the frame on screen
+ * before the press is the better reference.
+ */
+export const VISUAL_PRESS_FRAME_MS = 500;
 /** Every this long without speech or pointer activity doubles the pause. */
 export const VISUAL_IDLE_BACKOFF_STEP_MS = 5_000;
 export const VISUAL_MAX_FRAME_INTERVAL_MS = 30_000;
@@ -122,6 +163,10 @@ export const VISUAL_MAX_PENDING_UPLOADS = 8;
 export const VISUAL_MAX_FRAMES = 1200;
 /** Keep aligned with `VoiceRecordingIn.events` (server). */
 export const VISUAL_MAX_APP_EVENTS = 2000;
+/** Keep aligned with `VoiceRecordingIn.views` (server). */
+export const VISUAL_MAX_VIEWS = 1000;
+/** A view that changes again within this time (scrolling) is replaced. */
+export const VISUAL_VIEW_SETTLE_MS = 600;
 /** Visible texts kept per frame, and their length. */
 export const VISUAL_MAX_FRAME_TEXTS = 40;
 export const VISUAL_MAX_TEXT_LENGTH = 120;
@@ -147,30 +192,37 @@ export function recordingFramePath(recordingId: string, index: number): string {
 }
 
 /** Pause before the next frame after `idleMs` without activity. */
-export function frameCaptureInterval(idleMs: number): number {
+export function frameCaptureInterval(
+  idleMs: number,
+  base = VISUAL_FRAME_INTERVAL_MS,
+): number {
   const steps = Math.max(0, Math.floor(idleMs / VISUAL_IDLE_BACKOFF_STEP_MS));
   return Math.min(
     VISUAL_MAX_FRAME_INTERVAL_MS,
-    VISUAL_FRAME_INTERVAL_MS * 2 ** Math.min(steps, 16),
+    base * 2 ** Math.min(steps, 16),
   );
 }
 
 /**
  * When the next frame is due: soon after activity (speech, a pointer that
- * moved, a tap), ever less often while nothing happens.
+ * moved, a tap), ever less often while nothing happens. `base` is the
+ * shortest interval.
  */
 export class FrameCadence {
   private lastActivity: number;
   private next = -Infinity;
 
-  constructor(now: number) {
+  constructor(
+    now: number,
+    private readonly base = VISUAL_FRAME_INTERVAL_MS,
+  ) {
     this.lastActivity = now;
   }
 
   /** Something happened; a frame follows within the shortest interval. */
   activity(now: number): void {
     this.lastActivity = now;
-    this.next = Math.min(this.next, now + VISUAL_FRAME_INTERVAL_MS);
+    this.next = Math.min(this.next, now + this.base);
   }
 
   /** Whether a frame should be captured now. */
@@ -180,7 +232,12 @@ export class FrameCadence {
 
   /** A capture starts now; the next one waits for the current interval. */
   captured(now: number): void {
-    this.next = now + frameCaptureInterval(now - this.lastActivity);
+    this.next = now + frameCaptureInterval(now - this.lastActivity, this.base);
+  }
+
+  /** Capture no later than at `at`, e.g. to show a tap's result. */
+  dueBy(at: number): void {
+    this.next = Math.min(this.next, at);
   }
 
   /** Capture at the next opportunity, e.g. after the viewed surface changed. */
@@ -310,6 +367,141 @@ export function frameBounds(
   return [left, top, right - left, bottom - top];
 }
 
+export interface Size {
+  width: number;
+  height: number;
+}
+
+/** A rectangle in screen points: `x`/`y` its top left corner. */
+export interface Rect extends Size {
+  x: number;
+  y: number;
+}
+
+/**
+ * `box` scaled about its center, then moved by the offset: a zoomed and
+ * panned view as transforms draw it.
+ */
+export function zoomedRect(
+  box: Rect,
+  zoom: { scale: number; offsetX: number; offsetY: number },
+): Rect {
+  const width = box.width * zoom.scale;
+  const height = box.height * zoom.scale;
+  return {
+    x: box.x + (box.width - width) / 2 + zoom.offsetX,
+    y: box.y + (box.height - height) / 2 + zoom.offsetY,
+    width,
+    height,
+  };
+}
+
+/** Where an image of `natural` size shows inside `box`, fit to contain. */
+export function containedRect(box: Rect, natural: Size): Rect | null {
+  if (
+    box.width <= 0 ||
+    box.height <= 0 ||
+    natural.width <= 0 ||
+    natural.height <= 0
+  )
+    return null;
+  const fit = Math.min(box.width / natural.width, box.height / natural.height);
+  const width = natural.width * fit;
+  const height = natural.height * fit;
+  return {
+    x: box.x + (box.width - width) / 2,
+    y: box.y + (box.height - height) / 2,
+    width,
+    height,
+  };
+}
+
+/** The pixel of an image drawn into `rect` under a point; null outside. */
+export function imagePixel(
+  point: { x: number; y: number },
+  rect: Rect,
+  natural: Size,
+): { x: number; y: number } | null {
+  return framePoint(
+    { x: point.x - rect.x, y: point.y - rect.y },
+    rect,
+    natural,
+  );
+}
+
+/**
+ * The pixels of an image drawn into `rect` that a `viewport` (from 0,0)
+ * shows; undefined when it shows the whole image or none of it.
+ */
+export function visibleImageRegion(
+  rect: Rect,
+  viewport: Size,
+  natural: Size,
+): TargetRegion | undefined {
+  if (rect.width <= 0 || rect.height <= 0) return undefined;
+  const scaleX = natural.width / rect.width;
+  const scaleY = natural.height / rect.height;
+  const left = Math.max(0, Math.floor((0 - rect.x) * scaleX));
+  const top = Math.max(0, Math.floor((0 - rect.y) * scaleY));
+  const right = Math.min(
+    natural.width,
+    Math.ceil((viewport.width - rect.x) * scaleX),
+  );
+  const bottom = Math.min(
+    natural.height,
+    Math.ceil((viewport.height - rect.y) * scaleY),
+  );
+  if (right <= left || bottom <= top) return undefined;
+  if (
+    left === 0 &&
+    top === 0 &&
+    right === natural.width &&
+    bottom === natural.height
+  )
+    return undefined;
+  return [left, top, right - left, bottom - top];
+}
+
+/**
+ * The lines of a file a rendered preview (Markdown, a table) shows, estimated
+ * from its scroll position: `[0, first, width, count]` in file units, or
+ * undefined while it shows everything or is not measured.
+ */
+export function previewLines(
+  scroll: { offset: number; viewport: number; content: number },
+  lineCount: number,
+  width = Number.MAX_SAFE_INTEGER,
+): TargetRegion | undefined {
+  const { offset, viewport, content } = scroll;
+  if (content <= 0 || viewport <= 0 || lineCount <= 0) return undefined;
+  if (viewport >= content) return undefined;
+  const top = Math.min(1, Math.max(0, offset / content));
+  const bottom = Math.min(1, Math.max(top, (offset + viewport) / content));
+  const first = Math.min(lineCount - 1, Math.floor(top * lineCount));
+  const last = Math.min(
+    lineCount,
+    Math.max(first + 1, Math.ceil(bottom * lineCount)),
+  );
+  return [0, first, width, last - first];
+}
+
+/**
+ * A canonical path inside `/workspace`, which the server accepts as a
+ * recording's image or file: no `.`/`..` parts, backslashes or controls.
+ */
+export function isWorkspacePath(
+  path: string | null | undefined,
+): path is string {
+  return (
+    !!path &&
+    path.startsWith("/workspace/") &&
+    !/[\\\u0000-\u001f]/.test(path) &&
+    !path
+      .split("/")
+      .some((part, index) => index > 0 && ["", ".", ".."].includes(part))
+  );
+}
+
 function clip(value: unknown, length: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.replace(/\s+/g, " ").trim();
@@ -425,11 +617,12 @@ export function visualRecordingInput(input: {
   duration_ms: number;
   pointers: PointerSample[];
   frames: RecordingFrame[];
+  views: RecordingView[];
   events: AppRecordingEvent[];
   app?: AppRecordingContext;
 } {
   const { transcript, result } = input;
-  const duration = Math.max(1, Math.round(input.durationMs));
+  const duration = voiceRecordingDuration(input.durationMs);
   // The server takes whole milliseconds; native clocks (iOS) report fractions.
   const within = <T extends { t_ms: number }>(items: readonly T[]) =>
     items
@@ -438,11 +631,13 @@ export function visualRecordingInput(input: {
       .sort((a, b) => a.t_ms - b.t_ms);
   const frames = within(result.frames).slice(0, VISUAL_MAX_FRAMES);
   const framePaths = new Set(frames.map((frame) => frame.path));
-  // A pointer on a recorded surface needs its frame; images stand alone.
+  // A pointer on a recorded surface needs its frame; images and files
+  // stand alone.
   const pointers = within(result.pointers).filter(
     (pointer) =>
       !pointer.target ||
       pointer.target.kind === "image" ||
+      pointer.target.kind === "file" ||
       framePaths.has(pointer.target.path),
   );
   return {
@@ -459,6 +654,7 @@ export function visualRecordingInput(input: {
     duration_ms: duration,
     pointers,
     frames,
+    views: within(result.views ?? []).slice(0, VISUAL_MAX_VIEWS),
     events: within(result.events ?? []).slice(0, VISUAL_MAX_APP_EVENTS),
     ...(result.app ? { app: result.app } : {}),
   };

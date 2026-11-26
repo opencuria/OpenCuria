@@ -6,15 +6,21 @@ import {
   VISUAL_MAX_FRAME_INTERVAL_MS,
   VISUAL_MAX_FRAME_TEXTS,
   appRecordingEvent,
+  containedRect,
   frameAt,
   frameBounds,
   frameCaptureInterval,
   framePoint,
   frameTexts,
+  imagePixel,
+  isWorkspacePath,
   pointerElement,
+  previewLines,
   recordingFramePath,
   redactedUrl,
+  visibleImageRegion,
   visualRecordingInput,
+  zoomedRect,
   type PointerSample,
   type PointerTarget,
 } from "../src/visualRecording";
@@ -225,5 +231,86 @@ describe("visual recordings", () => {
     expect(input.frames.map((item) => item.t_ms)).toEqual([0]);
     expect(input.pointers.map((item) => item.t_ms)).toEqual([401, 1_000]);
     expect(input.events.map((item) => item.t_ms)).toEqual([13]);
+  });
+});
+
+describe("visual geometry", () => {
+  it("finds image pixels under a finger on a zoomed, contained picture", () => {
+    const page = { x: 0, y: 0, width: 400, height: 800 };
+    const natural = { width: 1600, height: 800 };
+    const rect = containedRect(page, natural)!;
+    expect(rect).toEqual({ x: 0, y: 300, width: 400, height: 200 });
+    expect(imagePixel({ x: 100, y: 350 }, rect, natural)).toEqual({
+      x: 400,
+      y: 200,
+    });
+    expect(imagePixel({ x: 100, y: 200 }, rect, natural)).toBeNull();
+    // Zoomed 2x about the center and moved right by 100 points.
+    const zoomed = zoomedRect(rect, { scale: 2, offsetX: 100, offsetY: 0 });
+    expect(zoomed).toEqual({ x: -100, y: 200, width: 800, height: 400 });
+    expect(imagePixel({ x: 300, y: 400 }, zoomed, natural)).toEqual({
+      x: 800,
+      y: 400,
+    });
+    expect(visibleImageRegion(zoomed, page, natural)).toEqual([
+      200, 0, 800, 800,
+    ]);
+    expect(visibleImageRegion(rect, page, natural)).toBeUndefined();
+    expect(containedRect(page, { width: 0, height: 10 })).toBeNull();
+  });
+
+  it("estimates the lines a scrolled preview shows", () => {
+    const scroll = { offset: 500, viewport: 250, content: 1000 };
+    expect(previewLines(scroll, 200, 80)).toEqual([0, 100, 80, 50]);
+    expect(previewLines({ ...scroll, offset: 900 }, 200)).toEqual([
+      0,
+      180,
+      Number.MAX_SAFE_INTEGER,
+      20,
+    ]);
+    // Everything fits, or nothing is measured yet.
+    expect(
+      previewLines({ offset: 0, viewport: 800, content: 600 }, 50),
+    ).toBeUndefined();
+    expect(
+      previewLines({ offset: 0, viewport: 0, content: 600 }, 50),
+    ).toBeUndefined();
+  });
+
+  it("accepts only canonical workspace paths", () => {
+    expect(isWorkspacePath("/workspace/src/app.ts")).toBe(true);
+    expect(isWorkspacePath("/workspace/../etc/passwd")).toBe(false);
+    expect(isWorkspacePath("/workspace/a//b")).toBe(false);
+    expect(isWorkspacePath("/tmp/a.png")).toBe(false);
+    expect(isWorkspacePath("/workspace/a\\b")).toBe(false);
+    expect(isWorkspacePath(undefined)).toBe(false);
+  });
+
+  it("keeps views and file pointers in the manifest", () => {
+    const target: PointerTarget = {
+      kind: "file",
+      path: "/workspace/src/app.ts",
+      width: 80,
+      height: 120,
+    };
+    const input = visualRecordingInput({
+      recordingId: ID,
+      durationMs: 3000,
+      transcript: { text: "Here", segments: [], timing: "approximate" },
+      result: {
+        pointers: [
+          { t_ms: 1200.4, event: "down", x: 3, y: 16, target, mode: "point" },
+        ],
+        frames: [],
+        views: [
+          { t_ms: 100, target, region: [0, 10, 80, 30] },
+          { t_ms: 5000, target: null },
+        ],
+      },
+    });
+    expect(input.pointers).toHaveLength(1);
+    expect(input.views).toEqual([
+      { t_ms: 100, target, region: [0, 10, 80, 30] },
+    ]);
   });
 });

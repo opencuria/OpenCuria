@@ -19,6 +19,8 @@ import {
   VISUAL_MAX_TOTAL_BYTES,
   VISUAL_SAMPLE_INTERVAL_MS,
   frameAt,
+  imagePixel,
+  isWorkspacePath,
   recordingFrameName,
   recordingFramesDirectory,
   type PointerSample,
@@ -59,22 +61,10 @@ export function imagePoint(
   clientX: number,
   clientY: number,
 ): { x: number; y: number } | null {
-  if (rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null
-  const x = (clientX - rect.left) / rect.width
-  const y = (clientY - rect.top) / rect.height
-  if (x < 0 || x >= 1 || y < 0 || y >= 1) return null
-  return {
-    x: Math.min(width - 1, Math.floor(x * width)),
-    y: Math.min(height - 1, Math.floor(y * height)),
-  }
-}
-
-function workspaceImagePath(path: string | undefined): path is string {
-  return (
-    !!path &&
-    path.startsWith('/workspace/') &&
-    !/[\\\u0000-\u001f]/.test(path) &&
-    !path.split('/').some((part, index) => index > 0 && ['', '.', '..'].includes(part))
+  return imagePixel(
+    { x: clientX, y: clientY },
+    { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+    { width, height },
   )
 }
 
@@ -318,7 +308,7 @@ export function startPointing(
     if (
       image &&
       image.dataset.voiceWorkspace === workspaceId &&
-      workspaceImagePath(image.dataset.voiceImagePath)
+      isWorkspacePath(image.dataset.voiceImagePath)
     ) {
       const point = imagePoint(
         image.getBoundingClientRect(),

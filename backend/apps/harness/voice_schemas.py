@@ -1,8 +1,9 @@
 """Bounded wire contracts for dictation and synchronized pointing recordings.
 
 Pointing recordings come from the webapp (workspace images, the desktop) and
-from the native app companion (the screen of an open app, its taps, logs and
-backend requests). Limits match `@opencuria/chat-core/visualRecording`.
+from the mobile app (workspace images and text files, the screen of an open
+app with its taps, logs and backend requests). Limits match
+`@opencuria/chat-core/visualRecording`.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ MAX_AUDIO_BYTES = 8 * 1024 * 1024
 MAX_AUDIO_BASE64_LENGTH = 4 * ((MAX_AUDIO_BYTES + 2) // 3)
 MAX_FRAMES = 1201
 MAX_APP_EVENTS = 2000
+MAX_VIEWS = 1000
 MAX_FRAME_TEXTS = 40
 MAX_SHORT_TEXT = 120
 
@@ -97,16 +99,29 @@ class VoiceTranscript(Schema):
 
 
 class VoiceTarget(Schema):
-    """Original image pixels or a recorded desktop or app frame's pixels."""
+    """Original image pixels, a recorded desktop or app frame, or a text file.
 
-    kind: Literal["image", "desktop", "app"]
+    A file is a grid of characters: ``width`` is its longest line's length,
+    ``height`` its number of lines; pointer ``x``/``y`` are a zero-based column
+    and line.
+    """
+
+    kind: Literal["image", "desktop", "app", "file"]
     path: str = Field(min_length=1, max_length=2048)
-    width: int = Field(ge=1, le=32768)
-    height: int = Field(ge=1, le=32768)
+    # Files: up to a million lines of up to a million characters.
+    width: int = Field(ge=1, le=1_000_000)
+    height: int = Field(ge=1, le=1_000_000)
+
+    @model_validator(mode="after")
+    def pixel_size(self) -> VoiceTarget:
+        """Images and frames stay within 32768 pixels per side."""
+        if self.kind != "file" and max(self.width, self.height) > 32768:
+            raise ValueError("Target is too large")
+        return self
 
 
 class VoiceElement(Schema):
-    """The app control under a finger, from the app's accessibility tree."""
+    """The app control under a finger, or a file's line (role ``line``)."""
 
     role: str = Field(default="", max_length=40)
     label: str = Field(default="", max_length=MAX_SHORT_TEXT)
@@ -132,7 +147,8 @@ class VoicePointer(Schema):
     x: float | None = Field(default=None, allow_inf_nan=False)
     y: float | None = Field(default=None, allow_inf_nan=False)
     target: VoiceTarget | None = None
-    # App recordings: the finger used the app, or only pointed at it.
+    # Touches (mobile): the finger used the surface, or only pointed at it.
+    # Without a mode the pointer is a hovering mouse (webapp).
     mode: Literal["use", "point"] | None = None
     element: VoiceElement | None = None
 
@@ -151,6 +167,18 @@ class VoiceFrame(Schema):
         if any(len(text) > MAX_SHORT_TEXT for text in self.texts):
             raise ValueError("Frame texts are too long")
         return self
+
+
+class VoiceView(Schema):
+    """What part of an image or file was on screen from ``t_ms`` on."""
+
+    t_ms: RecordingMs
+    # None once the user went back from it, e.g. to the chat.
+    target: VoiceTarget | None = None
+    # ``[x, y, width, height]`` in target units; the whole target when absent.
+    region: tuple[int, int, int, int] | None = None
+    # Estimated from a rendered preview's scroll position (Markdown, tables).
+    approximate: bool = False
 
 
 class VoiceAppEvent(Schema):
@@ -189,6 +217,7 @@ class VoiceRecordingIn(Schema):
     segments: list[VoiceSegment] = Field(max_length=3000)
     pointers: list[VoicePointer] = Field(max_length=12_000)
     frames: list[VoiceFrame] = Field(max_length=MAX_FRAMES)
+    views: list[VoiceView] = Field(default_factory=list, max_length=MAX_VIEWS)
     events: list[VoiceAppEvent] = Field(default_factory=list, max_length=MAX_APP_EVENTS)
     app: VoiceAppContext | None = None
 

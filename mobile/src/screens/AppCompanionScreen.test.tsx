@@ -56,25 +56,38 @@ jest.mock("../apps/useApps", () => ({
 }));
 
 const mockQuiet = { elapsedMs: 0, levels: [] };
+const mockMeter = {
+  subscribe: () => () => undefined,
+  getSnapshot: () => mockQuiet,
+};
+/** The one running recording (`voice/voiceRecording`), null while none. */
 const mockRecording = {
-  state: {
-    phase: "idle",
-    mode: "use",
-    notice: null,
-  } as Record<string, unknown>,
-  meter: {
-    subscribe: () => () => undefined,
-    getSnapshot: () => mockQuiet,
-  },
-  start: jest.fn(async () => true),
-  finish: jest.fn(async () => undefined),
+  state: null as Record<string, unknown> | null,
+  finish: jest.fn(),
   cancel: jest.fn(),
   setMode: jest.fn(),
-  dismissNotice: jest.fn(),
 };
-jest.mock("../apps/companion/useAppRecording", () => ({
-  useAppRecording: () => mockRecording,
+jest.mock("../voice/voiceRecording", () => ({
+  useActiveRecording: () => mockRecording.state,
+  activeRecording: () =>
+    mockRecording.state
+      ? { id: mockRecording.state.id, meter: mockMeter }
+      : null,
+  finishRecording: (send: boolean) => mockRecording.finish(send),
+  cancelRecording: () => mockRecording.cancel(),
+  setRecordingMode: (mode: string) => mockRecording.setMode(mode),
 }));
+const mockAppSurface = jest.fn();
+jest.mock("../apps/companion/useAppSurface", () => ({
+  useAppSurface: (shown: boolean, app: unknown) => mockAppSurface(shown, app),
+}));
+const RECORDING = {
+  id: "rec-1",
+  key: "ws-1|chat-2|native",
+  phase: "recording",
+  mode: "use",
+  surface: { kind: "app", pointable: true },
+};
 
 const conversations = [
   {
@@ -133,7 +146,7 @@ const mockChat = {
   ready: true,
   isTransitioning: false,
   actionBusy: false,
-  voice: undefined,
+  voice: { record: jest.fn(async () => true) } as Record<string, unknown>,
   newChat: jest.fn(),
   openConversation: jest.fn(),
   rename: jest.fn(),
@@ -197,14 +210,24 @@ function renderCompanion(
   );
 }
 
+function rerenderCompanion(view: ReturnType<typeof renderCompanion>) {
+  view.rerender(
+    <ThemeProvider>
+      <AppCompanionScreen
+        appId="app-1"
+        appName="Todo Demo"
+        versionName="1.0.2"
+        workspaceId="ws-1"
+        scope={ACCOUNT}
+      />
+    </ThemeProvider>,
+  );
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockOptions.length = 0;
-  mockRecording.state = {
-    phase: "idle",
-    mode: "use",
-    notice: null,
-  };
+  mockRecording.state = null;
 });
 
 describe("AppCompanionScreen", () => {
@@ -285,27 +308,72 @@ describe("AppCompanionScreen", () => {
   it("records into the chat on screen and hands every other touch to the app", async () => {
     const view = renderCompanion();
     fireEvent.press(await screen.findByTestId("companion-record"));
-    await waitFor(() =>
-      expect(mockRecording.start).toHaveBeenCalledWith(mockChat.draftScope),
-    );
+    await waitFor(() => expect(mockChat.voice.record).toHaveBeenCalled());
+    // Recordings over an app keep its sounds playing.
+    expect(mockOptions[0]).toMatchObject({ overApp: true });
     // The sheet slides away and the recording bar takes over at once.
-    mockRecording.state = { ...mockRecording.state, phase: "recording" };
-    view.rerender(
-      <ThemeProvider>
-        <AppCompanionScreen
-          appId="app-1"
-          appName="Todo Demo"
-          workspaceId="ws-1"
-          scope={ACCOUNT}
-        />
-      </ThemeProvider>,
-    );
-    expect(await screen.findByTestId("companion-recording-bar")).toBeTruthy();
+    mockRecording.state = RECORDING;
+    rerenderCompanion(view);
+    expect(await screen.findByTestId("recording-bar")).toBeTruthy();
+    expect(screen.getByTestId("recording-mode")).toBeTruthy();
+    // The app is what the recording shows now.
+    expect(mockAppSurface).toHaveBeenLastCalledWith(true, {
+      app_id: "app-1",
+      name: "Todo Demo",
+      version: "1.0.2",
+      platform: "ios",
+    });
     // Only the bar's own region stays with the companion.
     const [mode, regions] = mockNative.setCompanionTouchMode.mock.lastCall!;
     expect(mode).toBe("regions");
     expect(regions).toHaveLength(1);
     expect(regions[0]).toHaveLength(4);
+    // Point: the companion takes every touch and shows the laser pointer.
+    fireEvent.press(
+      screen.getByLabelText("Point: show something without tapping it"),
+    );
+    expect(mockRecording.setMode).toHaveBeenCalledWith("point");
+    expect(mockNative.setCompanionTouchMode).toHaveBeenLastCalledWith("all", [
+      regions[0],
+    ]);
+    mockRecording.state = { ...RECORDING, mode: "point" };
+    rerenderCompanion(view);
+    expect(screen.getByTestId("companion-pointer-overlay")).toBeTruthy();
+    // Done brings the chat back, where the text arrives.
+    fireEvent.press(screen.getByTestId("recording-done"));
+    expect(mockRecording.finish).toHaveBeenCalledWith(false);
+  });
+
+  it("shows the bar over the chat list, where the composer is out of sight", async () => {
+    mockRecording.state = RECORDING;
+    renderCompanion();
+    await screen.findByTestId("workspace-chat");
+    // In the chat the composer shows the recording; no bar.
+    expect(screen.queryByTestId("recording-bar")).toBeNull();
+    // The sheet covers the app: the app is not what the recording shows.
+    expect(mockAppSurface).toHaveBeenLastCalledWith(false, expect.anything());
+    fireEvent.press(screen.getByTestId("companion-chat-back"));
+    expect(await screen.findByTestId("recording-bar")).toBeTruthy();
+    // Nothing to point at in the chat list.
+    expect(screen.queryByTestId("recording-mode")).toBeNull();
+    // Drawn after the sheet, so its scrim never covers the bar.
+    const order: string[] = [];
+    const walk = (node: unknown): void => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) return node.forEach(walk);
+      const element = node as {
+        props?: { testID?: string };
+        children?: unknown;
+      };
+      if (element.props?.testID) order.push(element.props.testID);
+      walk(element.children);
+    };
+    walk(screen.toJSON());
+    expect(order.indexOf("recording-bar")).toBeGreaterThan(
+      order.indexOf("companion-sheet"),
+    );
+    fireEvent.press(screen.getByTestId("recording-cancel"));
+    expect(mockRecording.cancel).toHaveBeenCalled();
   });
 
   it("offers Reload and Close app and keeps the last way to open it on", async () => {

@@ -10,6 +10,7 @@ import type { MediaCache } from "../platform";
 import { IconButton } from "../ui/controls";
 import { NativeSegmentedPicker } from "../ui/selection";
 import { ToastHost } from "../ui/ToastHost";
+import { RecordingOverlay } from "../components/RecordingOverlay";
 import { useTheme } from "../ui/theme";
 import { TOOL_PANELS } from "./panels";
 import type { WorkspaceToolId, WorkspaceToolProps } from "./types";
@@ -181,6 +182,8 @@ export function WorkspaceToolsSheet({
             );
           })}
         </View>
+        {/* The tools cover the composer: a running recording shows here. */}
+        <RecordingOverlay />
         <ToastHost />
       </GestureHandlerRootView>
     </Modal>

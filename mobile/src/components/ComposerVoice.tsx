@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -36,6 +36,12 @@ import { IconButton } from "../ui/primitives";
 import { statusColor } from "../ui/statusColors";
 import { useTheme } from "../ui/theme";
 
+/** Time and levels of a running recording, read by what shows them. */
+export interface ComposerVoiceMeter {
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => { elapsedMs: number; levels: readonly number[] };
+}
+
 /** The recording on screen. */
 export interface ComposerVoiceRecording {
   /** `starting` waits for the microphone, `finishing` saves the file. */
@@ -43,6 +49,28 @@ export interface ComposerVoiceRecording {
   elapsedMs: number;
   /** Recent microphone levels (0..1), oldest first. */
   levels: readonly number[];
+  /** When present, time and levels come from here instead. */
+  meter?: ComposerVoiceMeter;
+}
+
+const noMeterSubscription = () => () => undefined;
+const QUIET_METER = { elapsedMs: 0, levels: [] as readonly number[] };
+const quietMeter = () => QUIET_METER;
+
+/** Time and levels of `recording`, live from its meter when it has one. */
+function useRecordingMeter(recording: ComposerVoiceRecording): {
+  elapsedMs: number;
+  levels: readonly number[];
+} {
+  const meter = recording.meter;
+  const live = useSyncExternalStore(
+    meter?.subscribe ?? noMeterSubscription,
+    meter?.getSnapshot ?? quietMeter,
+    meter?.getSnapshot ?? quietMeter,
+  );
+  return meter
+    ? live
+    : { elapsedMs: recording.elapsedMs, levels: recording.levels };
 }
 
 /** A recording of this chat that waits for its text. */
@@ -179,6 +207,7 @@ export function VoiceRecordingBar({
 }): React.JSX.Element {
   const ink = useInk();
   const live = recording.phase === "recording";
+  const { elapsedMs, levels } = useRecordingMeter(recording);
   return (
     <View
       testID="voice-recording-bar"
@@ -198,7 +227,7 @@ export function VoiceRecordingBar({
         accessibilityRole="text"
         accessibilityLabel={
           live
-            ? `Recording, ${formatVoiceDuration(recording.elapsedMs)}`
+            ? `Recording, ${formatVoiceDuration(elapsedMs)}`
             : recording.phase === "starting"
               ? "Starting microphone"
               : "Saving recording"
@@ -213,9 +242,9 @@ export function VoiceRecordingBar({
           testID="voice-elapsed"
           style={[styles.elapsed, { color: ink.text }]}
         >
-          {formatVoiceDuration(recording.elapsedMs)}
+          {formatVoiceDuration(elapsedMs)}
         </Text>
-        <VoiceWaveform levels={recording.levels} color={ink.mutedText} />
+        <VoiceWaveform levels={levels} color={ink.mutedText} />
       </View>
       <ComposerAction
         label="Stop and edit"

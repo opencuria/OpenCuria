@@ -1,6 +1,17 @@
 require('react-native-gesture-handler/jestSetup')
 require('react-native-reanimated').setUpTests()
 
+// jest-expo's image loader answers callbacks; React Native asks for promises
+// (`Image.getSize`), so its stand-in answers like the native module.
+for (const platform of ['Android', 'IOS']) {
+  const loader = require(
+    `react-native/src/private/specs_DEPRECATED/modules/NativeImageLoader${platform}`,
+  ).default
+  if (!loader) continue
+  loader.getSize = jest.fn(async () => ({ width: 320, height: 240 }))
+  loader.getSizeWithHeaders = jest.fn(async () => ({ width: 320, height: 240 }))
+}
+
 jest.mock('react-native-safe-area-context', () => {
   const mock = require('react-native-safe-area-context/jest/mock')
   return mock.default ?? mock

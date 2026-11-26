@@ -8,7 +8,7 @@ import type { VoiceTranscriptText } from "@opencuria/chat-core/voiceTranscriptio
 import type { OpenCuriaClient } from "@opencuria/client";
 import type { ChatVoiceClip, VoiceClipFiles } from "./voiceClipStore";
 
-/** The frames and timeline an app recording kept next to its audio. */
+/** The frames and timeline a recording kept next to its audio. */
 export async function readVisualClip(
   files: VoiceClipFiles,
   clip: ChatVoiceClip,
@@ -51,10 +51,11 @@ function uploadError(status: number, body: string): Error {
 }
 
 /**
- * Upload an app recording's frames into the workspace and save its timeline
- * beside the transcript; resolves to the transcript with the timeline's path.
- * Frames are replaced on a retry, so a repeated attempt is harmless. A clip
- * whose frames are gone keeps its text without a timeline.
+ * Upload a recording's frames (an app's screen; pictures and files need
+ * none) into the workspace and save its timeline beside the transcript;
+ * resolves to the transcript with the timeline's path. Frames are replaced on
+ * a retry, so a repeated attempt is harmless. A clip whose timeline is gone
+ * keeps its text without one.
  */
 export async function attachVisualClip(
   client: OpenCuriaClient,

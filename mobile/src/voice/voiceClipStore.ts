@@ -16,7 +16,7 @@ export type ChatVoiceClip = VoiceClip<ChatInputScope>;
 const VERSION = 1;
 const INDEX = "clips.json";
 const AUDIO_EXTENSION = ".m4a";
-/** Frames and the timeline of an app recording, next to its audio. */
+/** Frames and the timeline of a recording with visuals, next to its audio. */
 const VISUAL_EXTENSION = ".visual";
 const VISUAL_TIMELINE = "timeline.json";
 
@@ -67,7 +67,7 @@ function isClip(value: unknown): value is ChatVoiceClip {
     (clip.transcript === undefined ||
       typeof clip.transcript?.text === "string") &&
     (clip.visual === undefined ||
-      (clip.visual?.kind === "app" &&
+      ((clip.visual?.kind === "app" || clip.visual?.kind === "pointing") &&
         typeof clip.visual.recordingId === "string" &&
         /^[0-9a-f-]{36}$/i.test(clip.visual.recordingId))),
   );
@@ -92,13 +92,13 @@ export class VoiceClipFiles implements VoiceClipStore<ChatInputScope> {
     return joinUri(await this.directory(), `${clip.id}${AUDIO_EXTENSION}`);
   }
 
-  /** Directory with the frames and timeline of an app recording's clip. */
+  /** Directory with the frames and timeline of a recording's clip. */
   async visualUri(clip: Pick<ChatVoiceClip, "id">): Promise<string> {
     return joinUri(await this.directory(), `${clip.id}${VISUAL_EXTENSION}`);
   }
 
   /**
-   * Keep an app recording's timeline (JSON) and frames for clip `id`; the
+   * Keep a recording's visual timeline (JSON) and frames for clip `id`; the
    * frames move in under their own names.
    */
   async adoptVisual(
@@ -113,7 +113,7 @@ export class VoiceClipFiles implements VoiceClipStore<ChatInputScope> {
     this.files.writeText(joinUri(visual, VISUAL_TIMELINE), timeline);
   }
 
-  /** The timeline of an app recording's clip; null when it is gone. */
+  /** The visual timeline of a clip; null when it is gone. */
   async visualTimeline(
     clip: Pick<ChatVoiceClip, "id">,
   ): Promise<string | null> {

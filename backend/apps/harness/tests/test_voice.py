@@ -514,6 +514,172 @@ def test_invalid_app_recordings(app_recording: dict, change: str) -> None:
         validate_recording(VoiceRecordingIn(**app_recording))
 
 
+@pytest.fixture
+def shown_recording(recording: dict) -> dict:
+    """Mobile: an image and a source file shown while talking, no frames."""
+    image = {
+        "kind": "image",
+        "path": "/workspace/screens/login.png",
+        "width": 1600,
+        "height": 800,
+    }
+    source = {
+        "kind": "file",
+        "path": "/workspace/src/cart.ts",
+        "width": 58,
+        "height": 120,
+    }
+    recording.update(
+        duration_ms=9000,
+        text="This button is too small. And this line is wrong.",
+        segments=[
+            {"start_ms": 300, "end_ms": 2000, "text": "This button is too small."},
+            {"start_ms": 5200, "end_ms": 7000, "text": "And this line is wrong."},
+        ],
+        frames=[],
+        views=[
+            {"t_ms": 100, "target": image},
+            {"t_ms": 1500, "target": image, "region": [400, 0, 800, 400]},
+            {"t_ms": 3000, "target": None},
+            {"t_ms": 3200, "target": source, "region": [0, 40, 58, 36]},
+            {
+                "t_ms": 8000,
+                "target": {**source, "path": "/workspace/README.md"},
+                "region": [0, 10, 58, 20],
+                "approximate": True,
+            },
+        ],
+        pointers=[
+            {
+                "t_ms": 600,
+                "event": "down",
+                "x": 610,
+                "y": 220,
+                "mode": "point",
+                "target": image,
+            },
+            {
+                "t_ms": 1100,
+                "event": "move",
+                "x": 900,
+                "y": 260,
+                "mode": "point",
+                "target": image,
+            },
+            {
+                "t_ms": 1200,
+                "event": "up",
+                "x": 905,
+                "y": 262,
+                "mode": "point",
+                "target": image,
+            },
+            {
+                "t_ms": 5600,
+                "event": "down",
+                "x": 0,
+                "y": 51,
+                "mode": "use",
+                "target": source,
+                "element": {"role": "line", "text": "return items.reduce(sum, 0);"},
+            },
+            {
+                "t_ms": 5700,
+                "event": "up",
+                "x": 0,
+                "y": 51,
+                "mode": "use",
+                "target": source,
+            },
+            {
+                "t_ms": 6000,
+                "event": "down",
+                "x": 4,
+                "y": 51,
+                "mode": "point",
+                "target": source,
+                "element": {"role": "line", "text": "return items.reduce(sum, 0);"},
+            },
+            {
+                "t_ms": 6500,
+                "event": "up",
+                "x": 0,
+                "y": 54,
+                "mode": "point",
+                "target": source,
+            },
+        ],
+    )
+    return recording
+
+
+async def test_shown_images_and_files_timeline(monkeypatch, shown_recording) -> None:
+    """Images keep their pixels, files their lines; no frame is needed."""
+    accessor = SimpleNamespace(write_file=AsyncMock())
+    monkeypatch.setattr(
+        "apps.harness.voice_service.create_harness_accessor",
+        AsyncMock(return_value=accessor),
+    )
+    await VoiceService().save_recording(
+        uuid.uuid4(), VoiceRecordingIn(**shown_recording)
+    )
+    written = {
+        call.args[0].rsplit("/", 1)[-1]: call.args[1]
+        for call in accessor.write_file.call_args_list
+    }
+    pointer = json.loads(written["pointer.json"])
+    assert pointer["file_coordinates"] == "zero-based-column-and-line"
+    assert pointer["views"][1]["region"] == [400, 0, 800, 400]
+    lines = written["timeline.md"].decode().splitlines()
+    assert lines[0] == "# Pointing recording"
+    timeline = lines[lines.index("## Timeline") + 2 :]
+    assert timeline == [
+        "- 00:00.1  view  /workspace/screens/login.png (1600×800)",
+        '- 00:00.3  said (00:00.3–00:02.0)  "This button is too small."',
+        "- 00:00.6  point and drag  at 610,220 on /workspace/screens/login.png "
+        "to 905,262",
+        "- 00:01.5  view  /workspace/screens/login.png (1600×800), visible 400,0 "
+        "800×400",
+        "- 00:03.0  closed  /workspace/screens/login.png",
+        "- 00:03.2  view  /workspace/src/cart.ts  lines 41–76 of 120",
+        '- 00:05.2  said (00:05.2–00:07.0)  "And this line is wrong."',
+        '- 00:05.6  tap  line 52 of /workspace/src/cart.ts  "return items.reduce'
+        '(sum, 0);"',
+        "- 00:06.0  point and drag  line 52, column 5 of /workspace/src/cart.ts "
+        'to line 55  "return items.reduce(sum, 0);"',
+        "- 00:08.0  view  /workspace/README.md  around lines 11–30 of 120 "
+        "(rendered preview)",
+    ]
+
+
+@pytest.mark.parametrize(
+    "change", ["order", "app_view", "outside", "region_without_target", "path"]
+)
+def test_invalid_views(shown_recording: dict, change: str) -> None:
+    """Views are ordered, show workspace images or files and stay inside them."""
+    views = shown_recording["views"]
+    if change == "order":
+        views[1]["t_ms"] = 50
+    elif change == "app_view":
+        views[0]["target"] = {**views[0]["target"], "kind": "app"}
+    elif change == "outside":
+        views[3]["region"] = [0, 100, 58, 21]
+    elif change == "region_without_target":
+        views[2]["region"] = [0, 0, 1, 1]
+    else:
+        views[3]["target"]["path"] = "/workspace/../etc/passwd"
+    with pytest.raises(ValueError):
+        validate_recording(VoiceRecordingIn(**shown_recording))
+
+
+def test_file_pointer_stays_inside_the_file(shown_recording: dict) -> None:
+    """A file pointer names an existing line of the file."""
+    validate_recording(VoiceRecordingIn(**shown_recording))
+    shown_recording["pointers"][3]["y"] = 120
+    with pytest.raises(ValueError):
+        validate_recording(VoiceRecordingIn(**shown_recording))
+
+
 @pytest.mark.django_db(transaction=True)
 def test_fractional_app_recording_times_are_saved_whole(
     harness_workspace, monkeypatch, app_recording

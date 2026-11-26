@@ -8,6 +8,11 @@ import {
   waitFor,
 } from "@testing-library/react-native";
 import type { OpenCuriaClient } from "@opencuria/client";
+import { State } from "react-native-gesture-handler";
+import {
+  fireGestureHandler,
+  getByGestureTestId,
+} from "react-native-gesture-handler/jest-utils";
 import * as Clipboard from "expo-clipboard";
 import * as Sharing from "expo-sharing";
 import type { MediaCache } from "../../platform";
@@ -16,6 +21,26 @@ import type { ToolDetailSheetProps } from "../ToolDetailSheet";
 import { FileViewerSheet, type FileViewerTarget } from "./FileViewerSheet";
 import { FilesPanel } from "./FilesPanel";
 import { hasNativePdfView } from "./PdfPreview";
+import {
+  activeRecording,
+  setRecordingMode,
+  startRecording,
+} from "../../voice/voiceRecording";
+
+jest.mock("../../voice/voiceRecorder", () => ({
+  VOICE_MIME_TYPE: "audio/mp4",
+  requestMicrophone: jest.fn(async () => "granted"),
+  startVoiceCapture: jest.fn(async () => ({
+    sample: () => ({ durationMs: 1200, decibels: -30, recording: true }),
+    stop: async () => ({ uri: "file:///cache/rec.m4a", durationMs: 4200 }),
+    cancel: async () => undefined,
+    onInterrupted: () => () => undefined,
+  })),
+}));
+jest.mock("../../ui/haptics", () => ({ lightTapHaptic: jest.fn() }));
+jest.mock("expo-crypto", () => ({
+  randomUUID: () => "6a1d0f6e-6f8a-4c5e-9a0b-3d2f1e4c5b6a",
+}));
 
 jest.mock(
   "lucide-react-native",
@@ -397,4 +422,146 @@ it("shares PDF attachments through the media cache and reports failures", async 
     expect(alert).toHaveBeenCalledWith("Can't share file", "Sharing failed"),
   );
   alert.mockRestore();
+});
+
+describe("while a recording runs", () => {
+  const SOURCE = [
+    "import x from 'y';",
+    "",
+    "const answer = 42;",
+    "export default answer;",
+  ];
+
+  async function recording() {
+    const files = {
+      files: {
+        adopt: jest.fn(async () => 3000),
+        adoptVisual: jest.fn(async () => undefined),
+        remove: jest.fn(async () => undefined),
+      },
+      queue: { add: jest.fn(async () => undefined) },
+    };
+    await act(async () => {
+      await startRecording({
+        owner: Symbol("test"),
+        scope: { workspaceId: "ws" },
+        shared: files as never,
+        client: null,
+        notify: jest.fn(),
+      });
+    });
+    return files;
+  }
+
+  afterEach(() => activeRecording()?.cancel());
+
+  /** The viewer on a file with these lines. */
+  async function sourceFile(path: string, lines: string[]) {
+    const readBytes = jest.fn().mockResolvedValue(textBytes(lines.join("\n")));
+    render(
+      <ThemeProvider>
+        <FileViewerSheet
+          client={{ files: { readBytes } } as unknown as OpenCuriaClient}
+          workspaceId="ws"
+          media={null}
+          file={path}
+          bottomInset={0}
+          onClose={jest.fn()}
+        />
+      </ThemeProvider>,
+    );
+    return path.endsWith(".md") ? null : screen.findByTestId("file-source");
+  }
+
+  it("keeps the lines on screen and the line under a finger, in Use and Point mode", async () => {
+    const files = await recording();
+    const list = (await sourceFile("/workspace/src/answer.ts", SOURCE))!;
+    expect(activeRecording()!.state.surface).toEqual({
+      kind: "file",
+      pointable: true,
+    });
+    act(() =>
+      list.props.onViewableItemsChanged({
+        viewableItems: [{ index: 1 }, { index: 2 }],
+        changed: [],
+      }),
+    );
+    // Use: a tap marks the line under it (rows are 19 points, 8 above).
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("file-source-tap"), [
+        { state: State.BEGAN, x: 40, y: 50 },
+        { state: State.ACTIVE, x: 40, y: 50 },
+        { state: State.END, x: 40, y: 50 },
+      ]),
+    );
+    // Point: the laser shows lines without scrolling.
+    act(() => setRecordingMode("point"));
+    await screen.findByTestId("file-source-pointer");
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("file-source-pointer"), [
+        { state: State.BEGAN, x: 40, y: 65 },
+        { state: State.ACTIVE, x: 40, y: 70 },
+        { state: State.END, x: 40, y: 70 },
+      ]),
+    );
+    await act(async () => activeRecording()!.finish());
+    const timeline = JSON.parse(
+      files.files.adoptVisual.mock.calls[0]![1] as string,
+    );
+    const target = {
+      kind: "file",
+      path: "/workspace/src/answer.ts",
+      width: 22,
+      height: 4,
+    };
+    expect(timeline.views).toEqual([
+      expect.objectContaining({ target, region: [0, 1, 22, 2] }),
+    ]);
+    const downs = timeline.pointers.filter(
+      (pointer: { event: string }) => pointer.event === "down",
+    );
+    expect(downs).toEqual([
+      expect.objectContaining({
+        y: 2,
+        mode: "use",
+        target,
+        element: { role: "line", text: "const answer = 42;" },
+      }),
+      expect.objectContaining({
+        y: 3,
+        mode: "point",
+        target,
+        element: { role: "line", text: "export default answer;" },
+      }),
+    ]);
+  });
+
+  it("estimates the lines a rendered Markdown preview shows", async () => {
+    const files = await recording();
+    await sourceFile(
+      "/workspace/README.md",
+      Array.from({ length: 100 }, (_, i) => `Line ${i}`),
+    );
+    await screen.findByText("Line 0", { exact: false });
+    expect(activeRecording()!.state.surface).toEqual({
+      kind: "file",
+      pointable: false,
+    });
+    const scroll = screen.UNSAFE_getByProps({ scrollEventThrottle: 100 });
+    act(() => {
+      scroll.props.onLayout({ nativeEvent: { layout: { height: 500 } } });
+      scroll.props.onContentSizeChange(400, 2000);
+      scroll.props.onScroll({ nativeEvent: { contentOffset: { y: 1000 } } });
+    });
+    await act(async () => activeRecording()!.finish());
+    const timeline = JSON.parse(
+      files.files.adoptVisual.mock.calls[0]![1] as string,
+    );
+    expect(timeline.views.at(-1)).toMatchObject({
+      target: { kind: "file", path: "/workspace/README.md", height: 100 },
+      region: [0, 50, 7, 25],
+      approximate: true,
+    });
+    expect(timeline.pointers).toEqual([]);
+  });
 });

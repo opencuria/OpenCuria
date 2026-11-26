@@ -95,6 +95,28 @@ def validate_recording(payload: VoiceRecordingIn) -> str:
             or bounds[1] + bounds[3] > target.height
         ):
             raise ValueError("Element bounds fall outside the target frame")
+    last = -1
+    for view in payload.views:
+        if view.t_ms > payload.duration_ms or view.t_ms < last:
+            raise ValueError("Views must be ordered and within the recording")
+        last = view.t_ms
+        target = view.target
+        if target is None:
+            if view.region is not None:
+                raise ValueError("A view region requires a target")
+            continue
+        if target.kind not in {"image", "file"}:
+            raise ValueError("Views show images or files")
+        _safe_workspace_path(target.path)
+        region = view.region
+        if region is not None and (
+            min(region) < 0
+            or region[2] < 1
+            or region[3] < 1
+            or region[0] + region[2] > target.width
+            or region[1] + region[3] > target.height
+        ):
+            raise ValueError("View region falls outside its target")
     if any(event.t_ms > payload.duration_ms for event in payload.events):
         raise ValueError("App events must lie within the recording")
     last = -1
@@ -429,9 +451,11 @@ class VoiceService:
         pointers = {
             "schema_version": 1,
             "coordinate_space": "original-image-pixels",
+            "file_coordinates": "zero-based-column-and-line",
             "sample_interval_ms": 100,
             "unchanged_positions_omitted": True,
             "events": [item.model_dump() for item in payload.pointers],
+            "views": [item.model_dump() for item in payload.views],
         }
         saved_at = datetime.now(timezone.utc)
         metadata = {

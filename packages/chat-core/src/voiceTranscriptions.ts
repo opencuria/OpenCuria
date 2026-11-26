@@ -10,6 +10,7 @@ import {
   VOICE_TRANSCRIBE_TIMEOUT_MS,
   isVoiceAbort,
   voiceFailure,
+  type DictationRecordingKind,
   type VoiceFailure,
 } from "./voiceInput";
 
@@ -208,10 +209,11 @@ export interface VoiceClip<Target = string> {
   /** Kept once known, so a delivery that did not finish never pays twice. */
   transcript?: VoiceTranscriptText;
   /**
-   * Visual references recorded with the audio (frames, taps, logs of an open
-   * app), stored by the client next to the audio; `attach` saves them.
+   * Visual references recorded with the audio (images, files, an open app's
+   * frames, taps and logs), stored by the client next to the audio; `attach`
+   * saves them.
    */
-  visual?: { kind: "app"; recordingId: string };
+  visual?: { kind: DictationRecordingKind; recordingId: string };
 }
 
 export type VoiceClipStatus =

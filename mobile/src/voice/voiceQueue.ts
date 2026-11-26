@@ -5,6 +5,7 @@ import {
 } from "@opencuria/chat-core/chatInputCache";
 import {
   appendDictation,
+  voiceRecordingDuration,
   type DictationRecordingKind,
 } from "@opencuria/chat-core/voiceInput";
 import {
@@ -73,7 +74,8 @@ export class SharedVoiceQueue {
           {
             audio_base64: audio,
             mime_type: clip.mimeType,
-            duration_ms: clip.durationMs,
+            // Clips saved before lengths were kept within the limit.
+            duration_ms: voiceRecordingDuration(clip.durationMs),
           },
           signal,
         );

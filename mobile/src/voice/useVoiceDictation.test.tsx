@@ -58,7 +58,8 @@ jest.mock("expo-file-system", () => ({
   },
 }));
 let mockIds = 0;
-jest.mock("expo-crypto", () => ({ randomUUID: () => `clip-${++mockIds}` }));
+// Each recording takes an id first, then its saved clip one.
+jest.mock("expo-crypto", () => ({ randomUUID: () => `id-${++mockIds}` }));
 jest.mock("../ui/haptics", () => ({ lightTapHaptic: jest.fn() }));
 
 const mockNetwork = {
@@ -165,15 +166,17 @@ it("records, saves the file and puts the text into the draft on screen", async (
   await act(async () => {
     jest.advanceTimersByTime(300);
   });
-  expect(view.result.current!.recording).toMatchObject({ elapsedMs: 1500 });
-  expect(view.result.current!.recording!.levels.length).toBe(3);
+  // The bar reads time and levels from the meter, not the chat's render.
+  const meter = view.result.current!.recording!.meter!.getSnapshot();
+  expect(meter.elapsedMs).toBe(1500);
+  expect(meter.levels.length).toBe(3);
 
   await act(async () => view.result.current!.finish(false));
   await waitFor(() => expect(received).toEqual([["Fix the login.", false]]));
   expect(api.voice.transcribe).toHaveBeenCalledWith(
     "ws-1",
     {
-      audio_base64: "audio:file:///voice/clip-1.m4a",
+      audio_base64: "audio:file:///voice/id-2.m4a",
       mime_type: "audio/mp4",
       duration_ms: 4200,
     },
@@ -197,7 +200,7 @@ it("keeps an offline recording and transcribes it once the connection is back", 
       failure: { kind: "offline" },
     }),
   );
-  expect(mockSaved.clips.map((clip) => clip.id)).toEqual(["clip-1"]);
+  expect(mockSaved.clips.map((clip) => clip.id)).toEqual(["id-2"]);
   expect(api.voice.transcribe).not.toHaveBeenCalled();
 
   act(() => mockNetwork.set(true));

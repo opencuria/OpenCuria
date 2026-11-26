@@ -37,9 +37,13 @@ service a few times; `VoiceTranscriptionQueue` keeps recordings in client
 storage until their text was delivered or the user discarded them, so nothing
 has to be recorded twice; its `attach` step saves what a recording kept beside
 the audio. `visualRecording.ts` holds the rules of recordings with visual
-references (web pointing at images and the desktop, the native app companion):
-frame cadence, pointer samples, coordinates in frame pixels and the manifest
-from which the server writes the agent's `timeline.md`.
+references (web pointing at images and the desktop; on mobile images, text
+files and open apps): frame cadence, pointer samples, coordinates in target
+units, image geometry and the manifest from which the server writes the
+agent's `timeline.md`. `VisualRecorder` (`visualRecorder.ts`) is one
+recording's session: the newest shown surface records; images and files
+never take screenshots (pointers land in pixels or on lines, views say what
+was visible and settle while scrolling), an app's screen only while shown.
 
 ## Desktop viewer
 

@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 import { StyleSheet, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
@@ -9,58 +9,74 @@ import Animated, {
   withDelay,
   withTiming,
 } from "react-native-reanimated";
-import { statusColor } from "../../ui/statusColors";
-import { useTheme } from "../../ui/theme";
+import { runOnJS } from "react-native-worklets";
+import { statusColor } from "../ui/statusColors";
+import { useTheme } from "../ui/theme";
 
 const DOT = 18;
 const HALO = 64;
 /** The dot lingers briefly after the finger lifts, so it can be seen. */
 const LINGER_MS = 700;
 
+/** A finger in pointer mode, in points of the overlay. */
+export type PointerOverlayEvent = (
+  event: "down" | "move" | "up",
+  x: number,
+  y: number,
+) => void;
+
 /**
- * Pointer mode over the app: touches never reach it; a laser dot follows the
- * finger instead, like the webapp's pointing cursor, and a red frame marks
- * the mode. The native layer records
- * where the finger was and what is under it.
+ * Pointer mode over what is shown: touches never reach it; a laser dot
+ * follows the finger instead, like the webapp's pointing cursor, and a red
+ * frame marks the mode. Over an app the native layer records where the
+ * finger was and what is under it; over pictures and files `onPointer`
+ * reports it.
  */
-export function PointerOverlay(): React.JSX.Element {
+export function PointerOverlay({
+  onPointer,
+  testID = "pointer-overlay",
+}: {
+  onPointer?: PointerOverlayEvent;
+  testID?: string;
+}): React.JSX.Element {
   const { theme } = useTheme();
   const red = statusColor("critical", theme);
   const x = useSharedValue(-HALO);
   const y = useSharedValue(-HALO);
   const opacity = useSharedValue(0);
   const scale = useSharedValue(0.6);
-  const gesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .minDistance(0)
-        .maxPointers(1)
-        .shouldCancelWhenOutside(false)
-        .onBegin((event) => {
-          "worklet";
-          x.value = event.x;
-          y.value = event.y;
-          opacity.value = withTiming(1, { duration: 80 });
-          scale.value = withTiming(1, { duration: 140 });
-        })
-        .onUpdate((event) => {
-          "worklet";
-          x.value = event.x;
-          y.value = event.y;
-        })
-        .onFinalize(() => {
-          "worklet";
-          opacity.value = withDelay(
-            LINGER_MS,
-            withTiming(0, { duration: 260 }),
-          );
-          scale.value = withDelay(
-            LINGER_MS,
-            withTiming(0.6, { duration: 260 }),
-          );
-        }),
-    [opacity, scale, x, y],
-  );
+  const reportRef = useRef(onPointer);
+  reportRef.current = onPointer;
+  const reports = Boolean(onPointer);
+  const gesture = useMemo(() => {
+    const report = (event: "down" | "move" | "up", px: number, py: number) =>
+      reportRef.current?.(event, px, py);
+    return Gesture.Pan()
+      .withTestId(testID)
+      .minDistance(0)
+      .maxPointers(1)
+      .shouldCancelWhenOutside(false)
+      .onBegin((event) => {
+        "worklet";
+        x.value = event.x;
+        y.value = event.y;
+        opacity.value = withTiming(1, { duration: 80 });
+        scale.value = withTiming(1, { duration: 140 });
+        if (reports) runOnJS(report)("down", event.x, event.y);
+      })
+      .onUpdate((event) => {
+        "worklet";
+        x.value = event.x;
+        y.value = event.y;
+        if (reports) runOnJS(report)("move", event.x, event.y);
+      })
+      .onFinalize((event) => {
+        "worklet";
+        if (reports) runOnJS(report)("up", event.x, event.y);
+        opacity.value = withDelay(LINGER_MS, withTiming(0, { duration: 260 }));
+        scale.value = withDelay(LINGER_MS, withTiming(0.6, { duration: 260 }));
+      });
+  }, [opacity, reports, scale, testID, x, y]);
   const halo = useAnimatedStyle(() => ({
     opacity: opacity.value * 0.28,
     transform: [
@@ -81,7 +97,7 @@ export function PointerOverlay(): React.JSX.Element {
       entering={FadeIn.duration(160)}
       exiting={FadeOut.duration(160)}
       style={StyleSheet.absoluteFill}
-      testID="companion-pointer-overlay"
+      testID={testID}
     >
       <GestureDetector gesture={gesture}>
         <View style={StyleSheet.absoluteFill} collapsable={false}>

@@ -140,6 +140,8 @@ export interface WorkspaceChatOptions {
   initialSessionId?: string | null;
   /** Sheets that stay open offline; every other sheet closes. */
   offlineSheets?: ReadonlySet<string>;
+  /** Shown over an open app (the companion): recordings keep its sounds. */
+  overApp?: boolean;
   /** A pending request (a notification) owns navigation; retries wait for it. */
   navigationBlocked?: boolean;
   /** Retrying a stuck navigation also retries this screen's own requests. */
@@ -272,6 +274,7 @@ export function useWorkspaceChat(options: WorkspaceChatOptions = {}) {
     editDraft,
     flushDrafts,
     onOpenSettings: () => optionsRef.current.onOpenSettings?.(["providers"]),
+    mixWithOthers: options.overApp,
   });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

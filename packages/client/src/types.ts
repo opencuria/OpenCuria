@@ -933,15 +933,18 @@ export interface VoiceTranscribeInput {
   duration_ms: number;
 }
 
-/** Original image pixels or a recorded desktop or app frame a pointer refers to. */
+/**
+ * Original image pixels, a recorded desktop or app frame, or a text file
+ * (`width` columns, `height` lines) a pointer refers to.
+ */
 export interface VoicePointerTarget {
-  kind: "image" | "desktop" | "app";
+  kind: "image" | "desktop" | "app" | "file";
   path: string;
   width: number;
   height: number;
 }
 
-/** The app control under a finger (`@opencuria/chat-core/visualRecording`). */
+/** The app control or file line under a finger (`@opencuria/chat-core/visualRecording`). */
 export interface VoicePointerElement {
   role?: string;
   label?: string;
@@ -958,9 +961,20 @@ export interface VoicePointer {
   x: number | null;
   y: number | null;
   target: VoicePointerTarget | null;
-  /** App recordings: a finger that used the app or only pointed. */
+  /** Touches (mobile): a finger that used the surface or only pointed. */
   mode?: "use" | "point";
   element?: VoicePointerElement;
+}
+
+/** What part of an image or file was on screen from `t_ms` on. */
+export interface VoiceView {
+  t_ms: number;
+  /** Null once the user went back from it. */
+  target: VoicePointerTarget | null;
+  /** `[x, y, width, height]` in target units; the whole target when absent. */
+  region?: [number, number, number, number];
+  /** Estimated from a rendered preview (Markdown, tables). */
+  approximate?: boolean;
 }
 
 /** A log line, error or backend request of an app recording. */
@@ -981,6 +995,7 @@ export interface VoiceRecordingInput extends VoiceTranscript {
   duration_ms: number;
   pointers: VoicePointer[];
   frames: Array<{ t_ms: number; path: string; texts?: string[] }>;
+  views?: VoiceView[];
   events?: VoiceAppEvent[];
   app?: {
     app_id: string;

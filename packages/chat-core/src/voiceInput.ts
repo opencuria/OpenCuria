@@ -44,6 +44,17 @@ export function voiceRecordingLimits(
   };
 }
 
+/**
+ * A recording's length as the server takes it: whole milliseconds within the
+ * limit. A recorder stopped at the limit reports a little more than it.
+ */
+export function voiceRecordingDuration(
+  durationMs: number,
+  maxDurationMs = VOICE_MAX_DURATION_MS,
+): number {
+  return Math.min(Math.max(1, Math.round(durationMs)), maxDurationMs);
+}
+
 /** Waveform level (0..1) of a microphone RMS amplitude (0..1). */
 export function voiceLevelFromRms(rms: number): number {
   return Number.isFinite(rms) ? Math.min(1, Math.max(0, rms * LEVEL_GAIN)) : 0;
@@ -190,14 +201,14 @@ export function voiceMicrophoneMessage(denied: boolean): string {
 }
 
 /**
- * What a recording beside the transcript shows: pointing at workspace images
- * or the desktop (web), or using an open app (the native app companion).
+ * What a recording beside the transcript shows: pointing at workspace images,
+ * files or the desktop, or using an open app (the mobile app companion).
  */
 export type DictationRecordingKind = "pointing" | "app";
 
 const RECORDING_LABELS: Record<DictationRecordingKind, string> = {
   pointing:
-    "Pointing recording (timeline of the transcript with timestamps, pointer and desktop frames)",
+    "Pointing recording (timeline of the transcript with timestamps, pointer, shown images and file lines, desktop frames)",
   app: "App recording (timeline of the transcript with timestamps, taps, screens and app logs)",
 };
 
