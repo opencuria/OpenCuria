@@ -30,6 +30,7 @@ import { RecordingLight, VoiceWaveform } from "../../components/ComposerVoice";
 import { ComposerAction } from "../../ui/ComposerAction";
 import { ComposerSurface } from "../../ui/ComposerSurface";
 import { lightTapHaptic } from "../../ui/haptics";
+import { useInk } from "../../ui/ink";
 import { NativeSegmentedPicker } from "../../ui/selection";
 import { useTheme } from "../../ui/theme";
 import { ToastSurface } from "../../ui/ToastSurface";
@@ -103,7 +104,9 @@ export interface RecordingBarProps {
  * Floats over the app while a recording runs, in the chat composer's liquid
  * glass: time and level, Use (the app gets every touch) or Point (touches
  * only show something), discard and done. It rests at the top and can be
- * dragged to the bottom (and back) when it covers the app's controls.
+ * dragged to the bottom (and back) when it covers the app's controls. Over a
+ * light app the glass turns light whatever the theme; its content is drawn
+ * inside the glass in adaptive ink (`useInk`).
  */
 export function RecordingBar({
   phase,
@@ -201,10 +204,7 @@ export function RecordingBar({
           ]}
         >
           <ToastSurface>
-            <Text style={[styles.hintText, { color: theme.text }]}>
-              Use the app and talk. Switch to Point to show something without
-              tapping it.
-            </Text>
+            <RecordingHint />
           </ToastSurface>
         </Animated.View>
       ) : null}
@@ -230,20 +230,11 @@ export function RecordingBar({
                 }
                 accessibilityLiveRegion="polite"
               >
-                <RecordingLight active={live} />
-                {phase === "finishing" ? (
-                  <ActivityIndicator size="small" color={theme.mutedText} />
-                ) : (
-                  <Text
-                    testID="companion-recording-elapsed"
-                    style={[styles.elapsed, { color: theme.text }]}
-                  >
-                    {formatVoiceDuration(elapsedMs)}
-                  </Text>
-                )}
-                <View style={styles.wave}>
-                  <VoiceWaveform levels={levels} color={theme.mutedText} />
-                </View>
+                <RecordingMeter
+                  phase={phase}
+                  elapsedMs={elapsedMs}
+                  levels={levels}
+                />
               </View>
             </GestureDetector>
             <View style={styles.modes}>
@@ -274,6 +265,47 @@ export function RecordingBar({
         </ComposerSurface>
       </View>
     </Animated.View>
+  );
+}
+
+/** Light, time and level; reads its ink inside the glass. */
+function RecordingMeter({
+  phase,
+  elapsedMs,
+  levels,
+}: {
+  phase: AppRecordingPhase;
+  elapsedMs: number;
+  levels: readonly number[];
+}): React.JSX.Element {
+  const ink = useInk();
+  return (
+    <>
+      <RecordingLight active={phase === "recording"} />
+      {phase === "finishing" ? (
+        <ActivityIndicator size="small" color={ink.mutedText} />
+      ) : (
+        <Text
+          testID="companion-recording-elapsed"
+          style={[styles.elapsed, { color: ink.text }]}
+        >
+          {formatVoiceDuration(elapsedMs)}
+        </Text>
+      )}
+      <View style={styles.wave}>
+        <VoiceWaveform levels={levels} color={ink.mutedText} />
+      </View>
+    </>
+  );
+}
+
+function RecordingHint(): React.JSX.Element {
+  const ink = useInk();
+  return (
+    <Text style={[styles.hintText, { color: ink.text }]}>
+      Use the app and talk. Switch to Point to show something without tapping
+      it.
+    </Text>
   );
 }
 

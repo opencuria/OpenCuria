@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type ColorValue,
   type LayoutChangeEvent,
 } from "react-native";
 import Reanimated, {
@@ -30,6 +31,7 @@ import {
 import type { DictationRecordingKind } from "@opencuria/chat-core/voiceInput";
 import type { VoiceClipStatus } from "@opencuria/chat-core/voiceTranscriptions";
 import { ComposerAction } from "../ui/ComposerAction";
+import { useInk } from "../ui/ink";
 import { IconButton } from "../ui/primitives";
 import { statusColor } from "../ui/statusColors";
 import { useTheme } from "../ui/theme";
@@ -97,7 +99,7 @@ export function VoiceWaveform({
   color,
 }: {
   levels: readonly number[];
-  color: string;
+  color: ColorValue;
 }): React.JSX.Element {
   const [width, setWidth] = useState(0);
   const count = Math.ceil((width + BAR_GAP) / (BAR_WIDTH + BAR_GAP));
@@ -134,6 +136,7 @@ export function RecordingLight({
   active: boolean;
 }): React.JSX.Element {
   const { theme } = useTheme();
+  const ink = useInk();
   const reduceMotion = useReducedMotion();
   const opacity = useSharedValue(1);
   useEffect(() => {
@@ -153,7 +156,7 @@ export function RecordingLight({
         {
           backgroundColor: active
             ? statusColor("critical", theme)
-            : theme.subtleText,
+            : ink.subtleText,
         },
         animated,
       ]}
@@ -174,7 +177,7 @@ export function VoiceRecordingBar({
   onCancel: () => void;
   onFinish: (send: boolean) => void;
 }): React.JSX.Element {
-  const { theme } = useTheme();
+  const ink = useInk();
   const live = recording.phase === "recording";
   return (
     <View
@@ -204,15 +207,15 @@ export function VoiceRecordingBar({
       >
         <RecordingLight active={live} />
         {recording.phase === "finishing" ? (
-          <ActivityIndicator size="small" color={theme.mutedText} />
+          <ActivityIndicator size="small" color={ink.mutedText} />
         ) : null}
         <Text
           testID="voice-elapsed"
-          style={[styles.elapsed, { color: theme.text }]}
+          style={[styles.elapsed, { color: ink.text }]}
         >
           {formatVoiceDuration(recording.elapsedMs)}
         </Text>
-        <VoiceWaveform levels={recording.levels} color={theme.mutedText} />
+        <VoiceWaveform levels={recording.levels} color={ink.mutedText} />
       </View>
       <ComposerAction
         label="Stop and edit"

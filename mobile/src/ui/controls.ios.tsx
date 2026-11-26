@@ -36,6 +36,7 @@ import {
   controlLayout,
   hugsContent,
 } from "./controlLayout";
+import { useInk } from "./ink";
 import { statusColor } from "./statusColors";
 import { useTheme } from "./theme";
 
@@ -247,14 +248,15 @@ export function NativeAction({
   accessibilityLabel: label,
   accessibilityHint: hint,
 }: NativeActionProps): React.JSX.Element {
-  const { theme } = useTheme();
+  // On glass the host follows its look, so the content's ink can too.
+  const ink = useInk();
   return (
     <View style={controlLayout(style)}>
       <Host
         style={fitContent ? undefined : { width: "100%" }}
         matchContents={fitContent ? true : { vertical: true }}
-        colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        colorScheme={ink.scheme}
+        seedColor={ink.primary}
         ignoreSafeArea="all"
       >
         <SwiftButton

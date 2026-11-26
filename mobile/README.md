@@ -67,7 +67,9 @@ hosts; public hosts need `https://`.
 - `src/components/`, `src/ui/`: chat presentation and native controls. One design
   language everywhere: ink on a white/black canvas (`theme.primary` is the text
   color), color only for status (`ui/statusColors.ts`) and destructive actions,
-  shared list states in `ui/formStates.ts`.
+  shared list states in `ui/formStates.ts`. Content on liquid glass takes its
+  colors from `useInk()` (`ui/ink.tsx`): small glass turns light or dark with
+  what lies behind it, whatever the theme.
 - `src/tools/`: workspace tools sheet (Git, desktop, terminal, files).
 - `src/settings/`: settings sheet and pages.
 - `src/apps/`: installing and opening published apps; `src/apps/companion/` holds

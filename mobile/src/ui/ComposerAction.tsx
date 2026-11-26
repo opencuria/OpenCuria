@@ -2,7 +2,7 @@ import React from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import type { LucideIcon } from "lucide-react-native";
 import { NativeAction } from "./controls";
-import { useTheme } from "./theme";
+import { useInk } from "./ink";
 
 interface ComposerActionContentProps {
   icon: LucideIcon;
@@ -26,12 +26,12 @@ export function ComposerActionContent({
   strokeWidth = primary ? 2.25 : 2,
   filledIcon = false,
 }: ComposerActionContentProps): React.JSX.Element {
-  const { theme } = useTheme();
+  const ink = useInk();
   const foreground = primary
     ? disabled
-      ? theme.subtleText
-      : theme.background
-    : theme.mutedText;
+      ? ink.subtleText
+      : ink.background
+    : ink.mutedText;
   return (
     <View style={styles.target}>
       <View
@@ -39,8 +39,7 @@ export function ComposerActionContent({
           styles.control,
           title ? styles.labelled : styles.circle,
           {
-            backgroundColor:
-              primary && !disabled ? theme.text : theme.controlFill,
+            backgroundColor: primary && !disabled ? ink.text : ink.controlFill,
             opacity: !primary && disabled ? 0.38 : 1,
           },
         ]}

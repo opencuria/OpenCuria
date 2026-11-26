@@ -1,6 +1,7 @@
 import React from "react";
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { GlassView, isGlassEffectAPIAvailable } from "expo-glass-effect";
+import { AdaptiveInkScope } from "./ink";
 import { useTheme } from "./theme";
 
 const GLASS = isGlassEffectAPIAvailable();
@@ -14,8 +15,10 @@ export const composerSheetsFloat = GLASS;
 
 /**
  * Interactive liquid glass, as on system bars: it reacts to touches and
- * refracts the transcript scrolling beneath. It is not clipped, so the glass
- * can flex beyond its bounds; earlier iOS versions use an opaque surface.
+ * refracts the transcript scrolling beneath. Its content draws in adaptive
+ * ink, as the glass turns light or dark with what lies beneath. It is not
+ * clipped, so the glass can flex beyond its bounds; earlier iOS versions use
+ * an opaque surface.
  */
 export function ComposerSurface({
   children,
@@ -29,7 +32,7 @@ export function ComposerSurface({
         colorScheme={theme.scheme}
         style={styles.surface}
       >
-        {children}
+        <AdaptiveInkScope>{children}</AdaptiveInkScope>
       </GlassView>
     );
   return (

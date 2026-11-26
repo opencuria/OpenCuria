@@ -1,13 +1,14 @@
 import React from "react";
 import { StyleSheet, View } from "react-native";
 import { GlassView, isGlassEffectAPIAvailable } from "expo-glass-effect";
+import { AdaptiveInkScope } from "./ink";
 import { useTheme } from "./theme";
 
 const GLASS = isGlassEffectAPIAvailable();
 
 /**
- * Liquid glass, like a system notification on iOS 26; earlier versions use a
- * raised surface with a soft shadow.
+ * Liquid glass, like a system notification on iOS 26, with adaptive ink;
+ * earlier versions use a raised surface with a soft shadow.
  */
 export function ToastSurface({
   children,
@@ -20,7 +21,7 @@ export function ToastSurface({
         colorScheme={theme.scheme}
         style={styles.surface}
       >
-        {children}
+        <AdaptiveInkScope>{children}</AdaptiveInkScope>
       </GlassView>
     );
   return (
