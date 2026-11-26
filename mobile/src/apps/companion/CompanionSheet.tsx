@@ -30,6 +30,17 @@ const SPRING = {
   mass: 1,
   overshootClamping: true,
 };
+/**
+ * Carries a sheet dragged away on at the finger's speed. Slightly bouncy, so
+ * it reaches the screen's edge in about a quarter second, where clamping ends
+ * it.
+ */
+const LEAVE_SPRING = {
+  stiffness: 320,
+  damping: 30,
+  mass: 1,
+  overshootClamping: true,
+};
 const OPEN_MS = 320;
 const CLOSE_MS = 240;
 /** Share of the screen the sheet takes at half height. */
@@ -84,6 +95,35 @@ export function sheetHiddenBottom(
   return Math.min(offset, geometry.full - geometry.half);
 }
 
+/**
+ * Where a drag that began at `start` and was released at `offset` with
+ * `velocity` (points per second, down positive) takes the sheet. A short drag
+ * or flick moves it one detent; from full height a flick only reaches half
+ * height, unless the sheet was already pulled below it.
+ */
+export function sheetReleaseTarget(
+  start: number,
+  offset: number,
+  velocity: number,
+  geometry: SheetGeometry,
+): SheetDetent | "dismiss" {
+  "worklet";
+  const restHalf = geometry.full - geometry.half;
+  const fromFull = start < restHalf / 2;
+  if (
+    offset > restHalf + DISMISS_DISTANCE ||
+    (velocity > DISMISS_VELOCITY && (!fromFull || offset > restHalf))
+  )
+    return "dismiss";
+  if (fromFull)
+    return velocity > DETENT_VELOCITY || offset > DETENT_DISTANCE
+      ? "half"
+      : "full";
+  return velocity < -DETENT_VELOCITY || offset < restHalf - DETENT_DISTANCE
+    ? "full"
+    : "half";
+}
+
 export interface CompanionSheetProps {
   /** Shown, or slid away below the screen. */
   open: boolean;
@@ -133,40 +173,55 @@ export function CompanionSheet({
   const start = useSharedValue(0);
   const latest = useRef({ onDetentChange, onDismiss, onHidden });
   latest.current = { onDetentChange, onDismiss, onHidden };
+  /** The sheet rests below the screen: before its first opening, or hidden. */
+  const away = useRef(true);
+  /** A drag already carries the sheet away; closing must not restart it. */
+  const draggedAway = useRef(false);
   const changeDetent = (next: SheetDetent) =>
     latest.current.onDetentChange(next);
-  const dismiss = () => latest.current.onDismiss();
-  const hiddenNow = () => latest.current.onHidden();
+  const dismissByDrag = () => {
+    draggedAway.current = true;
+    latest.current.onDismiss();
+  };
+  const hiddenNow = () => {
+    away.current = true;
+    latest.current.onHidden();
+  };
   const hiddenBottom = useDerivedValue(
     () => sheetHiddenBottom(offset.value, geometry),
     [geometry],
   );
 
-  // Opening slides in from below; closing slides away and reports it.
-  const positions = useRef({ rest, hidden });
-  positions.current = { rest, hidden };
-  const wasOpen = useRef(false);
+  // Opening slides in from below and closing slides away and reports it; a
+  // new rest while open (a detent the screen chose, a rotated screen) springs.
+  const shown = useRef({ open: false, rest });
   useEffect(() => {
-    const { rest: target, hidden: away } = positions.current;
-    if (open) {
-      if (!wasOpen.current) offset.value = away;
-      offset.value = withTiming(target, {
+    const previous = shown.current;
+    shown.current = { open, rest };
+    if (open && !previous.open) {
+      draggedAway.current = false;
+      if (away.current) offset.value = hidden;
+      away.current = false;
+      offset.value = withTiming(rest, {
         duration: OPEN_MS,
         easing: Easing.out(Easing.cubic),
       });
-    } else if (wasOpen.current) {
+    } else if (open && rest !== previous.rest) {
+      // After a drag this joins the release spring and keeps its speed.
+      offset.value = withSpring(rest, SPRING);
+    } else if (!open && previous.open && !draggedAway.current) {
       offset.value = withTiming(
-        away,
+        hidden,
         { duration: CLOSE_MS, easing: Easing.in(Easing.cubic) },
         (finished) => {
           if (finished) runOnJS(hiddenNow)();
         },
       );
     }
-    wasOpen.current = open;
-    // Positions and `hiddenNow` are read when the sheet opens or closes.
+    // `hidden` is read when the sheet opens or closes; `hiddenNow` reads the
+    // latest props.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, offset]);
+  }, [open, rest, offset]);
 
   // Only the grabber and the navigation bar drag the sheet; their buttons
   // keep their taps, and touches below go to the content.
@@ -175,6 +230,9 @@ export function CompanionSheet({
   const pan = useMemo(
     () =>
       Gesture.Pan()
+        .withTestId("companion-sheet-drag")
+        // A closing sheet is on its way out; grabbing it would strand it.
+        .enabled(open)
         .manualActivation(true)
         .onTouchesDown((event, manager) => {
           "worklet";
@@ -207,45 +265,37 @@ export function CompanionSheet({
         })
         .onEnd((event) => {
           "worklet";
-          const position = offset.value;
+          // The sheet keeps the finger's speed on its way, like UIKit's
+          // sheets, instead of stopping and starting over.
           const velocity = event.velocityY;
-          const fromFull = start.value < restHalf / 2;
-          let target: "full" | "half" | "dismiss";
-          if (
-            velocity > DISMISS_VELOCITY ||
-            position > restHalf + DISMISS_DISTANCE
-          )
-            target = "dismiss";
-          else if (fromFull)
-            target =
-              velocity > DETENT_VELOCITY || position > DETENT_DISTANCE
-                ? "half"
-                : "full";
-          else
-            target =
-              velocity < -DETENT_VELOCITY ||
-              position < restHalf - DETENT_DISTANCE
-                ? "full"
-                : "half";
+          const target = sheetReleaseTarget(
+            start.value,
+            offset.value,
+            velocity,
+            geometry,
+          );
           if (target === "dismiss") {
-            runOnJS(dismiss)();
+            // Leaves right away on the UI thread; the screen only learns it.
+            offset.value = withSpring(
+              hidden,
+              { ...LEAVE_SPRING, velocity },
+              (finished) => {
+                if (finished) runOnJS(hiddenNow)();
+              },
+            );
+            runOnJS(dismissByDrag)();
             return;
           }
-          offset.value = withSpring(target === "full" ? 0 : restHalf, SPRING);
+          offset.value = withSpring(target === "full" ? 0 : restHalf, {
+            ...SPRING,
+            velocity,
+          });
           runOnJS(changeDetent)(target);
         }),
     // Callbacks read the latest props through a ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [dragZone, hidden, restHalf, offset, start, touchStart],
+    [open, dragZone, geometry, hidden, restHalf, offset, start, touchStart],
   );
-
-  // A detent chosen by the screen (e.g. the keyboard opening) animates too.
-  const shownDetent = useRef(detent);
-  useEffect(() => {
-    if (shownDetent.current === detent) return;
-    shownDetent.current = detent;
-    if (open) offset.value = withSpring(rest, SPRING);
-  }, [detent, open, offset, rest]);
 
   const sheetStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: offset.value }],
