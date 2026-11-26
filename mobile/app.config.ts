@@ -13,7 +13,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     ...config,
     name: development ? "OpenCuria Dev" : "OpenCuria",
     slug: "opencuria",
-    version: "0.1.0",
+    version: "1.0.0",
     scheme: "opencuria",
     orientation: "default",
     userInterfaceStyle: "automatic",
@@ -30,7 +30,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       bundleIdentifier: development
         ? "com.opencuria.mobile.dev"
         : "com.opencuria.mobile",
-      supportsTablet: true,
+      // iPhone only for the App Store launch: iPad would need its own screenshots
+      // and layout review. iPads still run the iPhone app; adding iPad later is
+      // possible, removing it after release is not.
+      supportsTablet: false,
       entitlements: { "aps-environment": apnsEnvironment },
       infoPlist: {
         // Camera, photo library and microphone strings come from the
