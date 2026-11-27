@@ -12,7 +12,8 @@ MIGRATIONS = {
     # migration module: (upgraded version, target version)
     "0015_computer_use_accessibility": ("0.2.0", "0.2.1"),
     "0018_computer_use_session_runtime": ("0.2.1", "0.3.0"),
-    "0019_computer_use_desktop_bus": ("0.3.0", VERSION),
+    "0019_computer_use_desktop_bus": ("0.3.0", "0.3.1"),
+    "0020_computer_use_error_output": ("0.3.1", VERSION),
 }
 
 

@@ -661,6 +661,9 @@ class LinuxDriver:
                 name.casefold(),
                 app_id.removesuffix(".desktop").casefold(),
                 (desktop.get_startup_wm_class() or "").casefold(),
+                # The program name too, unless options start another mode of it
+                # ("xfce4-panel --preferences" is not the panel window).
+                self._plain_executable(desktop),
             }
             # Windows listed under an app name that app by its inventory ID.
             running = [
@@ -675,6 +678,15 @@ class LinuxDriver:
                 }
             )
         return sorted(apps, key=lambda app: (app["displayName"].casefold(), app["id"]))
+
+    @staticmethod
+    def _plain_executable(desktop: Any) -> str:
+        command = re.sub(
+            r"%[fFuUdDnNickvm]", "", desktop.get_commandline() or ""
+        ).split()
+        if len(command) != 1:
+            return ""
+        return os.path.basename(command[0]).casefold()
 
     def _bind(self, identifier: int) -> BoundWindow:
         window = self.connection.create_resource_object("window", identifier)
@@ -1192,8 +1204,8 @@ class LinuxDriver:
             if node["labels"]:
                 node["name"] = ", ".join(node["labels"])
                 continue
-            if _has(node["states"], "multi_line"):
-                continue  # editors and documents: neighbors do not label them
+            if _has(node["states"], "multi_line") or node["description"]:
+                continue  # editors and documents; a description already labels it
             if any(self._text_of(nodes, child) for child in node["children"]):
                 continue
             node["context"] = self._table_context(nodes, index)
@@ -1284,25 +1296,44 @@ class LinuxDriver:
             if box is not None:
                 x, y, width, height = box
                 cx, cy = x + width / 2, y + height / 2
-                row, column = None, None
-                row_gap = column_gap = float("inf")
+                # Text within the control's own wrapper (a chosen chip, a unit
+                # prefix) only labels it when no label stands outside of it.
+                wrapper = set()
+                current = node["parent"]
+                for _ in range(2):
+                    if current < 0:
+                        break
+                    wrapper.add(current)
+                    current = nodes[current]["parent"]
+
+                def within(text: int, wrapper: set[int] = wrapper) -> bool:
+                    current = nodes[text]["parent"]
+                    for _ in range(2):
+                        if current < 0:
+                            return False
+                        if current in wrapper:
+                            return True
+                        current = nodes[current]["parent"]
+                    return False
+
+                rows: dict[bool, tuple[float, int]] = {}
+                column, column_gap = None, max(3 * height, 60)
                 for text in texts:
                     other = extents.get(text)
                     if other is None or text == index or foreign(text, index):
                         continue
                     ox, oy, ow, oh = other
-                    if (
-                        abs((oy + oh / 2) - cy) <= max(height, oh) / 2
-                        and ox + ow <= cx
-                        and cx - (ox + ow) < row_gap
-                    ):
-                        row, row_gap = text, cx - (ox + ow)
+                    if abs((oy + oh / 2) - cy) <= max(height, oh) / 2 and ox + ow <= cx:
+                        gap, inner = cx - (ox + ow), within(text)
+                        if gap < rows.get(inner, (float("inf"), -1))[0]:
+                            rows[inner] = (gap, text)
                     if (
                         abs((ox + ow / 2) - cx) <= max(width, ow) / 2 + 4
                         and oy + oh <= cy
                         and cy - (oy + oh) < column_gap
                     ):
                         column, column_gap = text, cy - (oy + oh)
+                row = (rows.get(False) or rows.get(True) or (0, None))[1]
                 parts = []
                 for choice in (row, column):
                     if choice is not None:
@@ -1379,13 +1410,23 @@ class LinuxDriver:
             siblings = nodes[parent]["children"]
             position = siblings.index(current) if current in siblings else 0
             for sibling in reversed(siblings[:position]):
-                if self._interactive(nodes[sibling]) and nodes[sibling]["name"]:
-                    continue
+                if self._holds_control(nodes, sibling):
+                    continue  # another field, or chips of a chosen value
                 text = self._text_of(nodes, sibling, last=True)
                 if text:
                     return text
             current = parent
         return ""
+
+    def _holds_control(self, nodes: list[dict[str, Any]], index: int) -> bool:
+        pending, visited = [index], 0
+        while pending and visited < 200:
+            visited += 1
+            node = nodes[pending.pop()]
+            if node["role"] in CONTEXT_ROLES and self._interactive(node):
+                return True
+            pending.extend(node["children"])
+        return False
 
     @staticmethod
     def _flags(node: dict[str, Any]) -> tuple[list[str], list[str]]:

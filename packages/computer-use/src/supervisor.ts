@@ -170,6 +170,10 @@ export class Supervisor {
               content: active.content.length ? active.content : [{ type: 'text', text: '' }],
               isError: false,
             };
+            // Keep what the code printed before it failed: the agent needs it.
+            if (error instanceof CuaError && ['JAVASCRIPT_ERROR', 'TIMEOUT'].includes(error.code) && active.content.length) {
+              result.content = [...active.content, ...result.content];
+            }
             result._meta = { ...result._meta, 'codex/nodeReplExecutionDurationMs': Math.round(performance.now() - startedAt) };
             if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) resolve(errorResult(new CuaError('OUTPUT_LIMIT', 'Computer use response exceeded 6 MiB', 'possible')));
             else resolve(result);
