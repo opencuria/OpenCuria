@@ -187,7 +187,6 @@ export function RootPage(): React.JSX.Element {
           rows: [
             link("providers", "Provider & Models", "cpu"),
             ...(isAdmin ? [link("agents", "Agents", "sparkles")] : []),
-            link("skills", "Skills", "book.closed"),
             link("plugins", "Plugins", "puzzlepiece.extension"),
             link("credentials", "Credentials", "key"),
           ],

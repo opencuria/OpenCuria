@@ -32,6 +32,7 @@ import {
 import Animated, {
   cancelAnimation,
   interpolateColor,
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
   withDecay,
@@ -41,12 +42,25 @@ import Animated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { runOnJS } from "react-native-worklets";
+import {
+  containedRect,
+  imagePixel,
+  visibleImageRegion,
+  zoomedRect,
+  type Rect,
+} from "@opencuria/chat-core/visualRecording";
+import type { VisualSurfaceSpec } from "@opencuria/chat-core/visualRecorder";
 import { Button, NativeAction } from "../ui/controls";
+import { useRecordingSurface } from "../voice/useRecordingSurface";
+import { usePointMode } from "../voice/voiceRecording";
 import { MediaViewerFrame } from "../ui/MediaViewerFrame";
 import { useTheme } from "../ui/theme";
 import { mediaKey, type MediaGallery } from "./chatGallery";
 import type { MarkdownMedia } from "./markdownMedia";
 import { MediaPlaceholder } from "./MediaPlaceholder";
+import { PointerOverlay, type PointerOverlayEvent } from "./PointerOverlay";
+import { RecordingOverlay } from "./RecordingOverlay";
+import { useImageSize } from "./useImageSize";
 import {
   placeholderState,
   useWorkspaceMedia,
@@ -79,6 +93,8 @@ const DOUBLE_TAP_SCALE = 2.5;
 const THUMB = 40;
 const THUMB_GAP = 4;
 const THUMB_STEP = THUMB + THUMB_GAP;
+/** The strip's padding above and below its thumbnails. */
+const THUMB_STRIP_PADDING = 20;
 /** Thumbnails loaded around the strip's visible range before it reports one. */
 const THUMB_WINDOW = 4;
 const FLING_VELOCITY = 500;
@@ -94,6 +110,8 @@ const PAGE_SPRING = {
   overshootClamping: true,
 };
 const FADE = { duration: 180 };
+/** A zoom or pan settles this long before a recording keeps its view. */
+const VIEW_DEBOUNCE_MS = 250;
 const ORIENTATIONS = [
   "portrait",
   "portrait-upside-down",
@@ -282,6 +300,109 @@ export function MediaViewer({
     contentWidth.value = naturalSize ? naturalSize.width * fit : size.width;
     contentHeight.value = naturalSize ? naturalSize.height * fit : size.height;
   }, [contentHeight, contentWidth, naturalSize, size]);
+
+  // A running recording sees the shown picture in its original pixels:
+  // what part is visible, where the user taps (Use) or points (Point).
+  const shownState = stateOf(currentItem);
+  // The file's own pixels: an image view reports the size it decoded at,
+  // which changes with the view.
+  const original = useImageSize(
+    currentItem?.path && shownState?.status === "ready" ? shownState.uri : null,
+  );
+  const imageSpec = useMemo<VisualSurfaceSpec | null>(
+    () =>
+      currentItem?.path && original
+        ? {
+            kind: "image",
+            path: currentItem.path,
+            width: original.width,
+            height: original.height,
+          }
+        : null,
+    [currentItem?.path, original],
+  );
+  const surface = useRecordingSurface(imageSpec);
+  const pointMode = usePointMode();
+  /** Where the shown picture is drawn now, after zoom and pan. */
+  const shownRect = useCallback((): Rect | null => {
+    if (!original) return null;
+    const fitted = containedRect(
+      { x: 0, y: 0, width: size.width, height: size.height },
+      original,
+    );
+    return fitted
+      ? zoomedRect(fitted, {
+          scale: scale.value,
+          offsetX: offsetX.value,
+          offsetY: offsetY.value,
+        })
+      : null;
+  }, [original, offsetX, offsetY, scale, size]);
+  const reportView = useCallback(() => {
+    const rect = shownRect();
+    if (surface && rect && original)
+      surface.view(visibleImageRegion(rect, size, original));
+  }, [original, shownRect, size, surface]);
+  useEffect(() => {
+    if (surface) reportView();
+  }, [reportView, surface]);
+  const viewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const zoomChanged = useCallback(() => {
+    if (viewTimer.current) clearTimeout(viewTimer.current);
+    viewTimer.current = setTimeout(reportView, VIEW_DEBOUNCE_MS);
+  }, [reportView]);
+  useEffect(
+    () => () => {
+      if (viewTimer.current) clearTimeout(viewTimer.current);
+    },
+    [],
+  );
+  const watchingZoom = useSharedValue(false);
+  useEffect(() => {
+    watchingZoom.value = Boolean(surface);
+  }, [surface, watchingZoom]);
+  useAnimatedReaction(
+    () =>
+      watchingZoom.value
+        ? `${Math.round(scale.value * 100)}:${Math.round(offsetX.value)}:${Math.round(offsetY.value)}`
+        : "",
+    (zoom, previous) => {
+      if (zoom && previous !== null && zoom !== previous)
+        runOnJS(zoomChanged)();
+    },
+    [zoomChanged],
+  );
+  const pointAt = useCallback(
+    (
+      event: "down" | "move" | "up",
+      x: number,
+      y: number,
+      mode: "use" | "point",
+    ) => {
+      const rect = shownRect();
+      if (!surface || !rect || !original) return;
+      surface.pointer({
+        event,
+        point: imagePixel({ x, y }, rect, original),
+        mode,
+      });
+    },
+    [original, shownRect, surface],
+  );
+  const pointed = useCallback<PointerOverlayEvent>(
+    (event, x, y) => pointAt(event, x, y, "point"),
+    [pointAt],
+  );
+  /** A tap on the picture (Use) marks a spot; it also toggles the bars. */
+  const tapRef = useRef<(x: number, y: number) => void>(() => undefined);
+  tapRef.current = (x, y) => {
+    pointAt("down", x, y, "use");
+    pointAt("up", x, y, "use");
+  };
+  const tapped = useCallback(
+    (x: number, y: number) => tapRef.current(x, y),
+    [],
+  );
 
   // The system fades the modal in and out; a swipe fades it away itself.
   const close = useCallback(() => {
@@ -523,9 +644,11 @@ export function MediaViewer({
       });
     const singleTap = Gesture.Tap()
       .withTestId("image-preview-tap")
-      .onEnd((_event, success) => {
+      .onEnd((event, success) => {
         "worklet";
-        if (success) runOnJS(toggleChrome)();
+        if (!success) return;
+        runOnJS(toggleChrome)();
+        runOnJS(tapped)(event.x, event.y);
       });
 
     return Gesture.Race(
@@ -550,6 +673,7 @@ export function MediaViewer({
     scale,
     settlePage,
     start,
+    tapped,
     toggleChrome,
     width,
   ]);
@@ -605,7 +729,7 @@ export function MediaViewer({
     [],
   );
 
-  const currentState = stateOf(currentItem);
+  const currentState = shownState;
   const share = useCallback(async () => {
     if (!currentItem) return;
     try {
@@ -729,6 +853,12 @@ export function MediaViewer({
                 </Animated.View>
               </Animated.View>
             </GestureDetector>
+            {surface && pointMode ? (
+              <PointerOverlay
+                onPointer={pointed}
+                testID="image-preview-pointer"
+              />
+            ) : null}
             {count > 1 ? (
               <ThumbnailStrip
                 items={items}
@@ -743,6 +873,9 @@ export function MediaViewer({
             ) : null}
           </View>
         </MediaViewerFrame>
+        <RecordingOverlay
+          bottomOffset={count > 1 && chrome ? THUMB + THUMB_STRIP_PADDING : 0}
+        />
       </GestureHandlerRootView>
     </Modal>
   );

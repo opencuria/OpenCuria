@@ -27,7 +27,7 @@ def test_run_preparation_queries_are_bounded(
     org, _, workspace, services = runtime_catalogue
     for index in range(count):
         _plugin(workspace, services, index)
-    with django_assert_num_queries(11):
+    with django_assert_num_queries(10):
         prepared = WorkspacePluginRuntimeService().prepare(workspace.id, org.id)
     assert len(prepared.snapshot.plugins) == count
     assert all(

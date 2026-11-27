@@ -54,31 +54,61 @@ test('reference image blocks keep their MIME, detail hint and text channel', asy
   ]);
 });
 
-test('syntax errors preserve bindings; infinite code is terminated and reset', async t => {
+test('syntax errors preserve bindings and say that nothing ran; infinite code is terminated and reset', async t => {
   const client = await runtime(t);
   await client.callTool({ name: 'js', arguments: { code: 'var retained = 42;' } });
-  const syntax = await client.callTool({ name: 'js', arguments: { code: 'var =' } });
+  const syntax = await client.callTool({ name: 'js', arguments: { code: 'const a = 1; const a = 2; var never = 1;' } });
   assert.equal(syntax.isError, true);
-  assert.equal(text(await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write(retained)' } })), '42');
+  assert.match(text(syntax), /nothing from this call ran/);
+  assert.equal(text(await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write(`${retained} ${typeof never}`)' } })), '42 undefined');
   const loop = await client.callTool({ name: 'js', arguments: { code: 'while (true) {}', timeout_ms: 100 } });
   assert.equal(loop.isError, true);
   assert.equal(text(await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write(typeof retained)' } })), 'undefined');
 });
 
-test('lifecycle fences a turn and cannot be redirected to another turn', async t => {
+const meta = (turn, extra = {}) => ({ 'opencuria/context': { session_id: 'test-session', turn_id: turn, ...extra } });
+const run = (client, code, turn, extra) => client.callTool({ name: 'js', arguments: { code }, _meta: meta(turn, extra) });
+const end = (client, turn, reason = 'Stop', session = 'test-session') => client.callTool({ name: 'turn_ended', arguments: { session_id: session, turn_id: turn, hook_event_name: reason }, _meta: meta(turn) });
+
+test('a chat session keeps JS state across turns; Stop fences only the ended turn', async t => {
   const client = await runtime(t);
-  const bad = await client.callTool({ name: 'turn_ended', arguments: { session_id: 'other', turn_id: 'test-turn', hook_event_name: 'Stop' } });
-  assert.equal(bad.isError, true);
-  const good = await client.callTool({ name: 'turn_ended', arguments: { session_id: 'test-session', turn_id: 'test-turn', hook_event_name: 'Stop' } });
-  assert.equal(good.isError, false);
-  const late = await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write(42)' } });
+  assert.equal((await run(client, 'var kept = 41; function helper() { return kept + 1; }', 'turn-1')).isError, false);
+  assert.equal((await end(client, 'turn-1', 'Stop', 'other-session')).isError, true);
+  assert.equal((await end(client, 'turn-1')).isError, false);
+  const late = await run(client, 'nodeRepl.write(1)', 'turn-1');
   assert.equal(late.isError, true);
   assert.match(text(late), /ended turn/);
+  assert.equal(text(await run(client, 'nodeRepl.write(helper())', 'turn-2')), '42');
+  assert.equal((await end(client, 'turn-2', 'Interrupt')).isError, false);
+  assert.equal((await end(client, 'turn-2', 'DesktopStop')).isError, false);
+  assert.equal(text(await run(client, 'nodeRepl.write(kept)', 'turn-2')), '41');
+});
+
+test('a restarted desktop keeps variables and says that windows must be bound again', async t => {
+  const client = await runtime(t);
+  await run(client, 'var survivor = "here";', 'turn-1', { generation: 1, epoch: 'a' });
+  const after = await run(client, 'nodeRepl.write(survivor)', 'turn-2', { generation: 2, epoch: 'a' });
+  assert.equal(after.isError, false);
+  assert.match(text(after), /desktop restarted[\s\S]*here$/);
+  assert.doesNotMatch(text(await run(client, 'nodeRepl.write(survivor)', 'turn-3', { generation: 2, epoch: 'a' })), /restarted/);
+});
+
+test('workspace files can be read from JavaScript, other paths cannot', async t => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const folder = await mkdtemp('/tmp/opencuria-cua-read-');
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  await writeFile(`${folder}/text.txt`, 'Grüße ✅\nZeile 2');
+  const client = await runtime(t);
+  assert.equal(text(await client.callTool({ name: 'js', arguments: { code: `nodeRepl.write(await nodeRepl.readFile(${JSON.stringify(`${folder}/text.txt`)}))` } })), 'Grüße ✅\nZeile 2');
+  assert.equal(text(await client.callTool({ name: 'js', arguments: { code: `nodeRepl.write((await nodeRepl.readFile(${JSON.stringify(`${folder}/text.txt`)}, { encoding: null })).length)` } })), String(Buffer.byteLength('Grüße ✅\nZeile 2')));
+  const denied = await client.callTool({ name: 'js', arguments: { code: 'await nodeRepl.readFile("/etc/hostname")' } });
+  assert.equal(denied.isError, true);
+  assert.match(text(denied), /limited to/);
 });
 
 test('shipped artifact manifest matches the current source build', async () => {
   const { readFile } = await import('node:fs/promises');
-  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.2.1.json', import.meta.url), 'utf8'));
+  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.3.3.json', import.meta.url), 'utf8'));
   const built = JSON.parse(await readFile(new URL('../dist/manifest.json', import.meta.url), 'utf8'));
   assert.deepEqual(shipped.manifest, built, 'Rebuild and pack the Computer Use artifact after source changes.');
 });

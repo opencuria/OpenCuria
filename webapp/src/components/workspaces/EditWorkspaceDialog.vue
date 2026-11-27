@@ -1,11 +1,16 @@
+<!--
+  EditWorkspaceDialog — workspace settings as a small navigation stack: the
+  main page holds the name and resources and links to "Plugins & Credentials"
+  (plugins and credentials), which slides in as a sub page. Both pages stay
+  mounted so the selection keeps validating and summarizing while hidden.
+-->
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Pencil } from '@lucide/vue'
+import { AlertCircle, ChevronLeft, ChevronRight, Pencil, Puzzle, RotateCw } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
-  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -20,17 +25,20 @@ import { useNotificationStore } from '@/stores/notifications'
 import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
-import { type Workspace, type WorkspaceUpdateIn } from '@/types'
+import { WorkspaceStatus, type Workspace, type WorkspaceUpdateIn } from '@/types'
 import {
   DEFAULT_DESKTOP_HEIGHT,
   DEFAULT_DESKTOP_WIDTH,
+  DESKTOP_SIZE_LIMITS,
   UNLISTED_RUNNER_QEMU_LIMITS,
   areQemuResourcesValid,
   isDesktopSizeValid,
+  isWorkspaceSettingsChanged,
   qemuResourceLimits,
   workspaceSettingsForm,
   workspaceUpdatePayload,
 } from '@opencuria/chat-core/workspaceCreation'
+import type { WorkspaceSelectionSummary } from '@opencuria/chat-core/workspaceConfiguration'
 import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from '@/lib/workspaceDraft'
 import type { WorkspaceDraftFields } from '@/lib/workspaceDraft'
 
@@ -72,12 +80,33 @@ const qemuDiskSizeGb = ref(50)
 const desktopWidth = ref(DEFAULT_DESKTOP_WIDTH)
 const desktopHeight = ref(DEFAULT_DESKTOP_HEIGHT)
 const submitting = ref(false)
+/** The visible page: settings, or the pushed "Plugins & Credentials". */
+const page = ref<'main' | 'access'>('main')
+const selectionSummary = ref<WorkspaceSelectionSummary | null>(null)
+const accessRow = ref<HTMLButtonElement | null>(null)
+const backButton = ref<InstanceType<typeof Button> | null>(null)
+const accessScroller = ref<HTMLElement | null>(null)
 let preserveDraftOnClose = false
 let resetTimer: ReturnType<typeof setTimeout> | undefined
-const diskSizeInput = ref<HTMLInputElement | null>(null)
+const diskSizeField = ref<InstanceType<typeof Input> | null>(null)
+/** Push or pop the sub page and move focus to where the eye goes. */
+async function showPage(next: 'main' | 'access'): Promise<void> {
+  if (page.value === next) return
+  page.value = next
+  if (next === 'access' && accessScroller.value) accessScroller.value.scrollTop = 0
+  await nextTick()
+  if (next === 'access') (backButton.value?.$el as HTMLElement | undefined)?.focus()
+  else accessRow.value?.focus()
+}
+/** Escape on the sub page goes back instead of closing the dialog. */
+function handleEscapeKeyDown(event: KeyboardEvent): void {
+  if (page.value !== 'access') return
+  event.preventDefault()
+  void showPage('main')
+}
 /** Focus the storage size and keep it in view while plugins and credentials load in. */
 function handleOpenAutoFocus(event: Event): void {
-  const input = diskSizeInput.value
+  const input = diskSizeField.value?.$el as HTMLInputElement | undefined
   if (!props.focusDisk || !input) return
   event.preventDefault()
   input.focus({ preventScroll: true })
@@ -147,6 +176,8 @@ function restoreDraft(id: string): void {
   qemuDiskSizeGb.value = fields.qemuDiskSizeGb ?? qemuDefaults.value.diskSizeGb
   desktopWidth.value = fields.desktopWidth ?? props.workspace.desktop_width
   desktopHeight.value = fields.desktopHeight ?? props.workspace.desktop_height
+  // Drafts come from adding a credential, which only the sub page offers.
+  page.value = 'access'
   open.value = true
 }
 watch(
@@ -174,6 +205,7 @@ async function handleOpen(): Promise<void> {
     ])
     return
   }
+  page.value = 'main'
   syncForm(props.workspace)
   await Promise.all([
     credentialStore.fetchCredentials(),
@@ -207,6 +239,7 @@ function buildPayload(): WorkspaceUpdateIn {
 async function handleSubmit(): Promise<void> {
   if (
     submitting.value ||
+    !dirty.value ||
     !name.value.trim() ||
     !pluginSelectionValid.value ||
     !resourceSelectionValid.value ||
@@ -235,6 +268,7 @@ function handleClose(): void {
   resetTimer = setTimeout(() => {
     if (open.value) return
     draftError.value = null
+    page.value = 'main'
     syncForm(props.workspace)
     resetTimer = undefined
   }, 200)
@@ -283,14 +317,58 @@ async function navigateToCredentials(serviceId?: string, reconnectId?: string): 
     },
   })
 }
+const form = computed(() => ({
+  name: name.value,
+  credentialIds: selectedCredentialIds.value,
+  pluginIds: selectedPluginIds.value,
+  vcpus: qemuVcpus.value,
+  memoryMb: qemuMemoryMb.value,
+  diskSizeGb: qemuDiskSizeGb.value,
+  desktopWidth: desktopWidth.value,
+  desktopHeight: desktopHeight.value,
+}))
+const dirty = computed(() =>
+  isWorkspaceSettingsChanged(props.workspace, form.value, qemuLimits.value),
+)
 const canSave = computed(
   () =>
     !submitting.value &&
     !props.disabled &&
+    dirty.value &&
     !!name.value.trim() &&
     pluginSelectionValid.value &&
     resourceSelectionValid.value,
 )
+/** Memory is stored in MiB and edited in GiB. */
+const memoryGb = computed({
+  get: () => Math.round((qemuMemoryMb.value / 1024) * 100) / 100,
+  set: (value: number) => {
+    qemuMemoryMb.value = Math.round(Number(value) * 1024)
+  },
+})
+const qemuValid = computed(() =>
+  areQemuResourcesValid(
+    { vcpus: qemuVcpus.value, memoryMb: qemuMemoryMb.value, diskSizeGb: qemuDiskSizeGb.value },
+    qemuLimits.value,
+  ),
+)
+const desktopValid = computed(() => isDesktopSizeValid(desktopWidth.value, desktopHeight.value))
+const limitsHint = computed(() => {
+  const limits = qemuLimits.value
+  return `Allowed: ${limits.minVcpus}–${limits.maxVcpus} vCPUs, ${limits.minMemoryMb / 1024}–${
+    limits.maxMemoryMb / 1024
+  } GiB memory, ${limits.minDiskSizeGb}–${limits.maxDiskSizeGb} GiB storage.`
+})
+/** Resource changes restart a running workspace; say so before saving. */
+const restartsOnSave = computed(() => {
+  if (props.workspace.status !== WorkspaceStatus.RUNNING) return false
+  const current = workspaceSettingsForm(props.workspace, qemuLimits.value)
+  return (
+    current.vcpus !== qemuVcpus.value ||
+    current.memoryMb !== qemuMemoryMb.value ||
+    current.diskSizeGb !== qemuDiskSizeGb.value
+  )
+})
 
 defineExpose({ show: handleOpen })
 </script>
@@ -309,144 +387,286 @@ defineExpose({ show: handleOpen })
       </Button>
     </DialogTrigger>
 
-    <DialogContent class="sm:max-w-xl" @open-auto-focus="handleOpenAutoFocus">
-      <DialogHeader>
-        <DialogTitle>Edit Workspace</DialogTitle>
-        <DialogDescription
-          >Update the workspace name, desktop size, credentials, and plugins.</DialogDescription
+    <DialogContent
+      class="h-[min(41rem,calc(100dvh-2rem))] gap-0 p-0 sm:max-w-xl"
+      data-testid="edit-workspace-dialog"
+      @open-auto-focus="handleOpenAutoFocus"
+      @escape-key-down="handleEscapeKeyDown"
+    >
+      <div class="flex shrink-0 items-start gap-1.5 px-6 pt-6 pb-4 pr-14">
+        <Transition
+          enter-active-class="transition-[opacity,translate] duration-200"
+          enter-from-class="opacity-0 translate-x-2"
+          leave-active-class="transition-opacity duration-100"
+          leave-to-class="opacity-0"
         >
-      </DialogHeader>
+          <Button
+            v-if="page === 'access'"
+            ref="backButton"
+            variant="ghost"
+            size="icon-sm"
+            type="button"
+            class="-mt-1.5 -ml-2.5"
+            aria-label="Back to workspace settings"
+            data-testid="edit-workspace-back"
+            @click="showPage('main')"
+          >
+            <ChevronLeft />
+          </Button>
+        </Transition>
+        <Transition
+          mode="out-in"
+          enter-active-class="transition-[opacity,translate] duration-200"
+          :enter-from-class="
+            page === 'access' ? 'opacity-0 translate-x-3' : 'opacity-0 -translate-x-3'
+          "
+          leave-active-class="transition-opacity duration-100"
+          leave-to-class="opacity-0"
+        >
+          <DialogHeader :key="page" class="min-w-0">
+            <DialogTitle>{{
+              page === 'access' ? 'Plugins & Credentials' : 'Edit workspace'
+            }}</DialogTitle>
+            <DialogDescription>{{
+              page === 'access'
+                ? 'Plugins add skills and tools. Credentials give agents access to services.'
+                : 'Changes apply when you save.'
+            }}</DialogDescription>
+          </DialogHeader>
+        </Transition>
+      </div>
 
-      <DialogBody>
-        <form id="edit-workspace-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-            <Input
-              v-model="name"
-              :disabled="submitting || props.disabled"
-              placeholder="Workspace name"
-            />
-          </div>
+      <div class="grid min-h-0 flex-1 grid-cols-1 grid-rows-1 overflow-hidden">
+        <div
+          class="col-start-1 row-start-1 min-h-0 overflow-y-auto px-6 pt-1 pb-6 transition-[translate,opacity] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none"
+          :class="page === 'main' ? 'translate-x-0 opacity-100' : '-translate-x-1/4 opacity-0'"
+          :inert="page !== 'main' || undefined"
+          :aria-hidden="page !== 'main' || undefined"
+          data-testid="edit-workspace-main"
+        >
+          <form id="edit-workspace-form" class="flex flex-col gap-6" @submit.prevent="handleSubmit">
+            <div>
+              <label for="edit-workspace-name" class="mb-1.5 block text-sm font-medium">Name</label>
+              <Input
+                id="edit-workspace-name"
+                v-model="name"
+                :disabled="submitting || props.disabled"
+                :aria-invalid="!name.trim() || undefined"
+                placeholder="Workspace name"
+              />
+            </div>
 
+            <button
+              ref="accessRow"
+              type="button"
+              class="group flex w-full items-center gap-3 rounded-xl border border-border px-3.5 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+              :class="selectionSummary?.issue ? 'border-destructive/40 bg-destructive/5' : ''"
+              :disabled="props.disabled"
+              data-testid="edit-workspace-access"
+              @click="showPage('access')"
+            >
+              <span
+                class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"
+                aria-hidden="true"
+                ><Puzzle :size="17"
+              /></span>
+              <span class="min-w-0 flex-1">
+                <span class="block text-sm font-medium text-foreground">Plugins & Credentials</span>
+                <span
+                  v-if="selectionSummary?.issue"
+                  class="flex items-center gap-1 text-xs text-destructive"
+                  ><AlertCircle :size="12" class="shrink-0" aria-hidden="true" />{{
+                    selectionSummary.issue
+                  }}</span
+                >
+                <span v-else class="block truncate text-xs text-muted-foreground">{{
+                  selectionSummary?.text ?? 'Loading…'
+                }}</span>
+              </span>
+              <ChevronRight
+                :size="16"
+                class="shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
+                aria-hidden="true"
+              />
+            </button>
+
+            <section class="space-y-2" aria-labelledby="edit-workspace-resources">
+              <h3 id="edit-workspace-resources" class="text-sm font-medium">Resources</h3>
+              <div class="divide-y divide-border rounded-xl border border-border">
+                <div class="grid grid-cols-[4.5rem_1fr_6.5rem] items-center gap-3 px-3.5 py-2.5">
+                  <label for="edit-workspace-vcpus" class="text-sm">CPU</label>
+                  <input
+                    v-model.number="qemuVcpus"
+                    :disabled="submitting || props.disabled"
+                    type="range"
+                    class="w-full accent-primary"
+                    :min="qemuLimits.minVcpus"
+                    :max="qemuLimits.maxVcpus"
+                    step="1"
+                    aria-label="CPU"
+                  />
+                  <div class="relative">
+                    <Input
+                      id="edit-workspace-vcpus"
+                      v-model.number="qemuVcpus"
+                      :disabled="submitting || props.disabled"
+                      type="number"
+                      class="h-8 pr-12 no-spinner text-right tabular-nums"
+                      :min="qemuLimits.minVcpus"
+                      :max="qemuLimits.maxVcpus"
+                      step="1"
+                      :aria-invalid="!qemuValid || undefined"
+                    />
+                    <span
+                      class="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs text-muted-foreground"
+                      >vCPU</span
+                    >
+                  </div>
+                </div>
+                <div class="grid grid-cols-[4.5rem_1fr_6.5rem] items-center gap-3 px-3.5 py-2.5">
+                  <label for="edit-workspace-memory" class="text-sm">Memory</label>
+                  <input
+                    v-model.number="qemuMemoryMb"
+                    :disabled="submitting || props.disabled"
+                    type="range"
+                    class="w-full accent-primary"
+                    :min="qemuLimits.minMemoryMb"
+                    :max="qemuLimits.maxMemoryMb"
+                    step="256"
+                    aria-label="Memory"
+                  />
+                  <div class="relative">
+                    <Input
+                      id="edit-workspace-memory"
+                      v-model.number="memoryGb"
+                      :disabled="submitting || props.disabled"
+                      type="number"
+                      class="h-8 pr-11 no-spinner text-right tabular-nums"
+                      :min="qemuLimits.minMemoryMb / 1024"
+                      :max="qemuLimits.maxMemoryMb / 1024"
+                      step="0.25"
+                      :aria-invalid="!qemuValid || undefined"
+                    />
+                    <span
+                      class="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs text-muted-foreground"
+                      >GiB</span
+                    >
+                  </div>
+                </div>
+                <div class="grid grid-cols-[4.5rem_1fr_6.5rem] items-center gap-3 px-3.5 py-2.5">
+                  <label for="edit-workspace-disk" class="text-sm">Storage</label>
+                  <input
+                    v-model.number="qemuDiskSizeGb"
+                    :disabled="submitting || props.disabled"
+                    type="range"
+                    class="w-full accent-primary"
+                    :min="qemuLimits.minDiskSizeGb"
+                    :max="qemuLimits.maxDiskSizeGb"
+                    step="1"
+                    aria-label="Storage"
+                  />
+                  <div class="relative">
+                    <Input
+                      id="edit-workspace-disk"
+                      ref="diskSizeField"
+                      v-model.number="qemuDiskSizeGb"
+                      :disabled="submitting || props.disabled"
+                      type="number"
+                      class="h-8 pr-11 no-spinner text-right tabular-nums"
+                      :min="qemuLimits.minDiskSizeGb"
+                      :max="qemuLimits.maxDiskSizeGb"
+                      step="1"
+                      :aria-invalid="!qemuValid || undefined"
+                    />
+                    <span
+                      class="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs text-muted-foreground"
+                      >GiB</span
+                    >
+                  </div>
+                </div>
+                <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3 px-3.5 py-2.5">
+                  <span id="edit-workspace-desktop" class="text-sm">Desktop</span>
+                  <div
+                    class="flex items-center justify-end gap-2"
+                    role="group"
+                    aria-labelledby="edit-workspace-desktop"
+                  >
+                    <Input
+                      v-model.number="desktopWidth"
+                      :disabled="submitting || props.disabled"
+                      type="number"
+                      class="no-spinner h-8 min-w-0 flex-1 text-right tabular-nums sm:w-24 sm:flex-none"
+                      :min="DESKTOP_SIZE_LIMITS.minWidth"
+                      :max="DESKTOP_SIZE_LIMITS.maxWidth"
+                      step="2"
+                      aria-label="Desktop width"
+                      :aria-invalid="!desktopValid || undefined"
+                    />
+                    <span class="text-xs text-muted-foreground" aria-hidden="true">×</span>
+                    <Input
+                      v-model.number="desktopHeight"
+                      :disabled="submitting || props.disabled"
+                      type="number"
+                      class="no-spinner h-8 min-w-0 flex-1 text-right tabular-nums sm:w-24 sm:flex-none"
+                      :min="DESKTOP_SIZE_LIMITS.minHeight"
+                      :max="DESKTOP_SIZE_LIMITS.maxHeight"
+                      step="2"
+                      aria-label="Desktop height"
+                      :aria-invalid="!desktopValid || undefined"
+                    />
+                    <span class="text-xs text-muted-foreground">px</span>
+                  </div>
+                </div>
+              </div>
+              <p v-if="!qemuValid" class="text-xs text-destructive" role="alert">
+                {{ limitsHint }}
+              </p>
+              <p v-if="!desktopValid" class="text-xs text-destructive" role="alert">
+                Desktop size: even values, {{ DESKTOP_SIZE_LIMITS.minWidth }}–{{
+                  DESKTOP_SIZE_LIMITS.maxWidth
+                }}
+                × {{ DESKTOP_SIZE_LIMITS.minHeight }}–{{ DESKTOP_SIZE_LIMITS.maxHeight }}.
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Changing CPU, memory or storage restarts a running workspace. The desktop size
+                applies the next time the desktop starts.
+              </p>
+            </section>
+          </form>
+        </div>
+
+        <div
+          ref="accessScroller"
+          class="col-start-1 row-start-1 min-h-0 overflow-y-auto bg-popover px-6 pt-1 pb-6 transition-[translate] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none"
+          :class="page === 'access' ? 'translate-x-0' : 'translate-x-full'"
+          :inert="page !== 'access' || undefined"
+          :aria-hidden="page !== 'access' || undefined"
+          data-testid="edit-workspace-access-page"
+        >
           <WorkspacePluginCredentialSelection
             v-model:plugin-ids="selectedPluginIds"
             v-model:credential-ids="selectedCredentialIds"
             :disabled="submitting || props.disabled"
             :active="open"
             @validity-change="pluginSelectionValid = $event"
+            @summary-change="selectionSummary = $event"
             @add-credential="navigateToCredentials"
             @reconnect-credential="(id) => navigateToCredentials(undefined, id)"
           />
-          <p v-if="draftError" class="text-xs text-destructive" role="alert">{{ draftError }}</p>
-          <p v-if="!resourceSelectionValid" class="text-xs text-destructive" role="alert">
-            Restore or adjust resource values to fit the workspace runner's limits.
+          <p v-if="draftError" class="mt-4 text-xs text-destructive" role="alert">
+            {{ draftError }}
           </p>
+        </div>
+      </div>
 
-          <div class="space-y-3">
-            <label class="text-sm font-medium text-foreground block">Desktop size</label>
-            <p class="text-xs text-muted-foreground">Applies the next time the desktop starts.</p>
-            <div class="grid grid-cols-2 gap-3">
-              <div>
-                <label class="text-sm font-medium text-muted-foreground mb-1 block">Width</label>
-                <Input
-                  v-model.number="desktopWidth"
-                  :disabled="submitting || props.disabled"
-                  type="number"
-                  min="800"
-                  max="3840"
-                  step="2"
-                />
-              </div>
-              <div>
-                <label class="text-sm font-medium text-muted-foreground mb-1 block">Height</label>
-                <Input
-                  v-model.number="desktopHeight"
-                  :disabled="submitting || props.disabled"
-                  type="number"
-                  min="600"
-                  max="2160"
-                  step="2"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div class="space-y-3">
-            <label class="text-sm font-medium text-foreground block">QEMU resources</label>
-
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block">vCPU</label>
-              <input
-                v-model.number="qemuVcpus"
-                :disabled="submitting || props.disabled"
-                type="range"
-                class="w-full accent-primary"
-                :min="qemuLimits.minVcpus"
-                :max="qemuLimits.maxVcpus"
-                step="1"
-              />
-              <input
-                v-model.number="qemuVcpus"
-                :disabled="submitting || props.disabled"
-                type="number"
-                class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
-                :min="qemuLimits.minVcpus"
-                :max="qemuLimits.maxVcpus"
-                step="1"
-              />
-            </div>
-
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block">RAM (MiB)</label>
-              <input
-                v-model.number="qemuMemoryMb"
-                :disabled="submitting || props.disabled"
-                type="range"
-                class="w-full accent-primary"
-                :min="qemuLimits.minMemoryMb"
-                :max="qemuLimits.maxMemoryMb"
-                step="256"
-              />
-              <input
-                v-model.number="qemuMemoryMb"
-                :disabled="submitting || props.disabled"
-                type="number"
-                class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
-                :min="qemuLimits.minMemoryMb"
-                :max="qemuLimits.maxMemoryMb"
-                step="256"
-              />
-            </div>
-
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block"
-                >Storage (GiB)</label
-              >
-              <input
-                v-model.number="qemuDiskSizeGb"
-                :disabled="submitting || props.disabled"
-                type="range"
-                class="w-full accent-primary"
-                :min="qemuLimits.minDiskSizeGb"
-                :max="qemuLimits.maxDiskSizeGb"
-                step="1"
-              />
-              <input
-                ref="diskSizeInput"
-                v-model.number="qemuDiskSizeGb"
-                :disabled="submitting || props.disabled"
-                type="number"
-                class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
-                :min="qemuLimits.minDiskSizeGb"
-                :max="qemuLimits.maxDiskSizeGb"
-                step="1"
-              />
-            </div>
-          </div>
-        </form>
-      </DialogBody>
-
-      <DialogFooter>
+      <DialogFooter class="shrink-0 items-center border-t border-border px-6 py-4">
+        <p
+          v-if="restartsOnSave"
+          class="mr-auto flex items-center gap-1.5 text-xs text-warning"
+          data-testid="edit-workspace-restart-hint"
+        >
+          <RotateCw :size="13" aria-hidden="true" />Saving restarts the workspace.
+        </p>
         <Button variant="outline" type="button" :disabled="submitting" @click="handleClose"
           >Cancel</Button
         >
@@ -456,9 +676,21 @@ defineExpose({ show: handleOpen })
           data-testid="edit-workspace-save"
           :disabled="!canSave"
         >
-          {{ submitting ? 'Saving…' : 'Save Changes' }}
+          {{ submitting ? 'Saving…' : 'Save changes' }}
         </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>
+
+<style scoped>
+/* The unit sits where the browser's stepper would; sliders and arrow keys step instead. */
+.no-spinner {
+  appearance: textfield;
+}
+.no-spinner::-webkit-inner-spin-button,
+.no-spinner::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+</style>

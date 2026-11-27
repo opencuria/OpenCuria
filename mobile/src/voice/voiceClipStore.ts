@@ -16,6 +16,9 @@ export type ChatVoiceClip = VoiceClip<ChatInputScope>;
 const VERSION = 1;
 const INDEX = "clips.json";
 const AUDIO_EXTENSION = ".m4a";
+/** Frames and the timeline of a recording with visuals, next to its audio. */
+const VISUAL_EXTENSION = ".visual";
+const VISUAL_TIMELINE = "timeline.json";
 
 export type VoiceFiles = Pick<
   LocalFiles,
@@ -62,7 +65,11 @@ function isClip(value: unknown): value is ChatVoiceClip {
     typeof clip.bytes === "number" &&
     typeof clip.createdAt === "string" &&
     (clip.transcript === undefined ||
-      typeof clip.transcript?.text === "string"),
+      typeof clip.transcript?.text === "string") &&
+    (clip.visual === undefined ||
+      ((clip.visual?.kind === "app" || clip.visual?.kind === "pointing") &&
+        typeof clip.visual.recordingId === "string" &&
+        /^[0-9a-f-]{36}$/i.test(clip.visual.recordingId))),
   );
 }
 
@@ -83,6 +90,40 @@ export class VoiceClipFiles implements VoiceClipStore<ChatInputScope> {
   /** `file://` URI of a clip's audio. */
   async audioUri(clip: Pick<ChatVoiceClip, "id">): Promise<string> {
     return joinUri(await this.directory(), `${clip.id}${AUDIO_EXTENSION}`);
+  }
+
+  /** Directory with the frames and timeline of a recording's clip. */
+  async visualUri(clip: Pick<ChatVoiceClip, "id">): Promise<string> {
+    return joinUri(await this.directory(), `${clip.id}${VISUAL_EXTENSION}`);
+  }
+
+  /**
+   * Keep a recording's visual timeline (JSON) and frames for clip `id`; the
+   * frames move in under their own names.
+   */
+  async adoptVisual(
+    id: string,
+    timeline: string,
+    frames: readonly string[],
+  ): Promise<void> {
+    const visual = await this.visualUri({ id });
+    this.files.makeDirectory(joinUri(visual, "frames"));
+    for (const frame of frames)
+      this.files.move(frame, this.visualFrameUri(visual, frame));
+    this.files.writeText(joinUri(visual, VISUAL_TIMELINE), timeline);
+  }
+
+  /** The visual timeline of a clip; null when it is gone. */
+  async visualTimeline(
+    clip: Pick<ChatVoiceClip, "id">,
+  ): Promise<string | null> {
+    const uri = joinUri(await this.visualUri(clip), VISUAL_TIMELINE);
+    return this.files.exists(uri) ? this.files.readText(uri) : null;
+  }
+
+  /** Where the frame named like `path` (a URI or workspace path) is kept. */
+  visualFrameUri(visual: string, path: string): string {
+    return joinUri(visual, "frames", path.slice(path.lastIndexOf("/") + 1));
   }
 
   /** Move a finished recording in as the audio of clip `id`; returns its size. */
@@ -124,6 +165,7 @@ export class VoiceClipFiles implements VoiceClipStore<ChatInputScope> {
 
   async remove(clip: ChatVoiceClip): Promise<void> {
     this.files.remove(await this.audioUri(clip));
+    if (clip.visual) this.files.remove(await this.visualUri(clip));
   }
 
   private async directory(): Promise<string> {

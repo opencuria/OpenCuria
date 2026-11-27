@@ -74,6 +74,34 @@ async def test_lifecycle_bypasses_busy_execution_lock_and_is_idempotent():
         await conn.call_tool("turn_ended", {})
 
 
+async def test_run_end_stop_fences_after_interrupts_and_rebinding_starts_a_turn():
+    conn = connection()
+    conn._session = AsyncMock()
+    conn._session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text="ok")]
+    )
+    await conn.notify_turn_ended("Interrupt")
+    await conn.notify_turn_ended("DesktopStop")
+    await conn.finish()
+    await conn.finish()
+    calls = conn._session.call_tool.await_args_list
+    assert [call.args[1]["hook_event_name"] for call in calls] == ["Interrupt", "Stop"]
+    # A kept connection serves the chat's next run under a new turn.
+    conn.begin_run({"session_id": "session", "turn_id": "next"})
+    assert conn.run_context == {"session_id": "session", "turn_id": "next"}
+    await conn.finish()
+    last = conn._session.call_tool.await_args_list[-1]
+    assert last.args[1] == {
+        "session_id": "session",
+        "turn_id": "next",
+        "hook_event_name": "Stop",
+    }
+    assert last.kwargs["meta"]["opencuria/context"]["turn_id"] == "next"
+    assert await conn.check_alive()
+    conn._session.send_ping.side_effect = RuntimeError("process gone")
+    assert not await conn.check_alive()
+
+
 @pytest.mark.django_db
 def test_stop_automation_finds_only_current_busy_desktop_runs(harness_workspace):
     """Root plugin usage participates in stop automation, without old-turn matches."""

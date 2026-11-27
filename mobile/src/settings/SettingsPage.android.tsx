@@ -52,7 +52,7 @@ export function SettingsPage({
     >
       {/* The native toolbar parses colors with Color.parseColor: hex only. */}
       <NativeToolbar
-        title={root ? "Settings" : title}
+        title={title}
         subtitle=""
         titleColor={theme.text}
         subtitleColor={theme.mutedText}

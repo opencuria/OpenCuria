@@ -83,11 +83,8 @@ const plugin = {
   name: "GitHub",
   slug: "github",
   description: "Issues and pull requests",
-  enabled: true,
-  published: true,
+  available: true,
   organization_id: null,
-  is_global: true,
-  org_enabled: true,
   credential_requirements: [
     {
       id: "requirement",
@@ -385,6 +382,74 @@ it("edits a workspace and saves only what changed", async () => {
   tree.unmount();
 });
 
+it("edits plugins and credentials on the pushed Plugins & Credentials page", async () => {
+  const { client, tree } = renderSheet();
+  await screen.findByTestId("form-section-running");
+  fireEvent.press(screen.getByRole("button", { name: "Details for api" }));
+  const sheet = await screen.findByTestId("workspace-detail-sheet");
+  fireEvent.press(
+    await within(sheet).findByRole("link", {
+      name: "Plugins & Credentials, None",
+    }),
+  );
+  let page = await within(sheet).findByTestId("workspace-access-page");
+
+  // Enabling the plugin attaches the only token; its picker shows it.
+  fireEvent.press(within(page).getByRole("switch", { name: "GitHub" }));
+  const picker = within(page).getByTestId(
+    "requirement-plugin-github-requirement",
+  );
+  expect(
+    within(picker).getByRole("button", { name: "Personal GitHub" }).props
+      .accessibilityState.selected,
+  ).toBe(true);
+  expect(
+    within(page).getByText("GitHub token · Personal · Used by GitHub"),
+  ).toBeTruthy();
+
+  // Without the token the parent page names what is missing.
+  fireEvent.press(
+    within(page).getByRole("switch", { name: "Personal GitHub" }),
+  );
+  fireEvent.press(within(sheet).getByRole("button", { name: "Back" }));
+  expect(
+    within(sheet).getByRole("link", {
+      name: "Plugins & Credentials, Missing GitHub token credential",
+    }),
+  ).toBeTruthy();
+  expect(
+    screen.getByTestId("workspace-save").props.accessibilityState.disabled,
+  ).toBe(true);
+
+  // Choosing it in the plugin's picker unblocks saving.
+  fireEvent.press(
+    within(sheet).getByRole("link", {
+      name: "Plugins & Credentials, Missing GitHub token credential",
+    }),
+  );
+  page = await within(sheet).findByTestId("workspace-access-page");
+  fireEvent.press(
+    within(
+      within(page).getByTestId("requirement-plugin-github-requirement"),
+    ).getByRole("button", { name: "Personal GitHub" }),
+  );
+  fireEvent.press(within(sheet).getByRole("button", { name: "Back" }));
+  expect(
+    within(sheet).getByRole("link", {
+      name: "Plugins & Credentials, GitHub · 1 credential",
+    }),
+  ).toBeTruthy();
+  fireEvent.press(screen.getByTestId("workspace-save"));
+  await waitFor(() =>
+    expect(client.workspaces.update).toHaveBeenCalledWith("ws-api", {
+      name: "api",
+      credential_ids: ["credential-github"],
+      plugin_ids: ["plugin-github"],
+    }),
+  );
+  tree.unmount();
+});
+
 it("shows the license state of a Windows workspace in its details", async () => {
   const windows = workspace({
     id: "ws-win",
@@ -414,7 +479,7 @@ it("shows the license state of a Windows workspace in its details", async () => 
   linux.tree.unmount();
 });
 
-it("blocks creation until required plugin credentials are selected", async () => {
+it("attaches plugin credentials and blocks creation without them", async () => {
   const { client, onRefresh, tree } = renderSheet();
   await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
@@ -431,9 +496,19 @@ it("blocks creation until required plugin credentials are selected", async () =>
   fireEvent.press(
     within(sheet).getByRole("button", { name: "Add repository" }),
   );
+  // Enabling the plugin attaches the only matching credential.
   fireEvent.press(within(sheet).getByRole("switch", { name: "GitHub" }));
+  expect(within(sheet).getByText("Uses GitHub token")).toBeTruthy();
   expect(
-    within(sheet).getByText("Select a GitHub token credential below"),
+    within(sheet).getByRole("switch", { name: "Personal GitHub" }),
+  ).toBeChecked();
+
+  // Without it, creation is blocked.
+  fireEvent.press(
+    within(sheet).getByRole("switch", { name: "Personal GitHub" }),
+  );
+  expect(
+    within(sheet).getByText("Choose a credential for GitHub token"),
   ).toBeTruthy();
   expect(
     screen.getByTestId("workspace-create").props.accessibilityState.disabled,

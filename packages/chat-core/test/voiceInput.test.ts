@@ -12,6 +12,7 @@ import {
   voiceFailure,
   voiceLevelFromDecibels,
   voiceLevelFromRms,
+  voiceRecordingDuration,
   voiceRecordingLimits,
   voiceRecordingProblem,
   voiceWaveformBars,
@@ -26,6 +27,13 @@ describe("voice input rules", () => {
     expect(
       voiceRecordingLimits({ max_duration_ms: 60_000, max_audio_bytes: 99e9 }),
     ).toEqual({ maxDurationMs: 60_000, maxAudioBytes: VOICE_MAX_AUDIO_BYTES });
+  });
+
+  it("keeps lengths sent to the server whole and within the limit", () => {
+    expect(voiceRecordingDuration(1234.6)).toBe(1235);
+    expect(voiceRecordingDuration(600_087)).toBe(600_000);
+    expect(voiceRecordingDuration(310_000, 300_000)).toBe(300_000);
+    expect(voiceRecordingDuration(0.2)).toBe(1);
   });
 
   it("maps browser RMS and native dBFS readings onto one waveform scale", () => {
@@ -107,8 +115,13 @@ describe("voice input rules", () => {
       "Fix this:\nHello.",
     );
     expect(appendDictation("Draft", "")).toBe("Draft");
-    expect(appendDictation("", "Look.", "/workspace/rec/manifest.json")).toBe(
-      "Look.\n\nPointing recording (transcript, pointer timeline and desktop frames): @file:/workspace/rec/manifest.json",
+    expect(appendDictation("", "Look.", "/workspace/rec/timeline.md")).toBe(
+      "Look.\n\nPointing recording (timeline of the transcript with timestamps, pointer, shown images and file lines, desktop frames): @file:/workspace/rec/timeline.md",
+    );
+    expect(
+      appendDictation("Draft", " This. ", "/workspace/rec/timeline.md", "app"),
+    ).toBe(
+      "Draft\nThis.\n\nApp recording (timeline of the transcript with timestamps, taps, screens and app logs): @file:/workspace/rec/timeline.md",
     );
   });
 });

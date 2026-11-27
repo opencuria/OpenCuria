@@ -20,8 +20,10 @@ import {
   useKeyboardAnimation,
   useReanimatedKeyboardAnimation,
 } from "react-native-keyboard-controller";
-import {
+import Reanimated, {
   makeMutable,
+  useAnimatedReaction,
+  useAnimatedStyle,
   useDerivedValue,
   useSharedValue,
   type DerivedValue,
@@ -30,7 +32,7 @@ import {
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { runOnJS } from "react-native-worklets";
-import { useChromeTopInset } from "../ui/chromeInset";
+import { useChromeTopInset, useHiddenBottom } from "../ui/chromeInset";
 import { useTheme } from "../ui/theme";
 
 /** Links the composer input to the keyboard's interactive-dismiss area. */
@@ -66,7 +68,10 @@ const EXTENDS_DISMISS_AREA = Platform.OS === "ios" && !Platform.isPad;
 export type TranscriptScrollToEnd = () => Promise<void>;
 
 export interface ChatLayoutValue {
-  /** Docked composer, its sheet stack and bottom inset; the transcript scrolls above. */
+  /**
+   * Docked composer, its sheet stack and bottom inset, plus the layout's part
+   * below the visible area (`HiddenBottomContext`); the transcript scrolls above.
+   */
   dockHeight: SharedValue<number>;
   /** The same height for layout on the JavaScript side. */
   dockOffset: number;
@@ -156,28 +161,40 @@ export function ChatLayout({
   const heights = useRef({ composer: composerHeight, sheets: sheetsHeight });
   const dockOffset =
     (docked ? composerHeight + sheetsHeight : 0) + restingInset;
-  const dockHeight = useSharedValue(dockOffset);
+  /** The dock's own height; `dockHeight` adds the hidden bottom to it. */
+  const dockBase = useSharedValue(dockOffset);
   useEffect(() => {
-    dockHeight.value = dockOffset;
-  }, [dockHeight, dockOffset]);
+    dockBase.value = dockOffset;
+  }, [dockBase, dockOffset]);
+  const hiddenBottom = useHiddenBottom();
+  const dockHeight = useSharedValue(dockOffset);
+  // A sheet moving between its heights changes this every frame; the
+  // transcript's end follows on the UI thread like it follows the keyboard.
+  useAnimatedReaction(
+    () => dockBase.value + hiddenBottom.value,
+    (height) => {
+      dockHeight.value = height;
+    },
+    [dockBase, dockHeight, hiddenBottom],
+  );
   const onComposerLayout = useCallback(
     (event: LayoutChangeEvent) => {
       const height = Math.round(event.nativeEvent.layout.height);
       heights.current.composer = height;
       // The transcript inset follows on the UI thread before React re-renders.
-      dockHeight.value = height + heights.current.sheets + restingInset;
+      dockBase.value = height + heights.current.sheets + restingInset;
       setComposerHeight(height);
     },
-    [dockHeight, restingInset],
+    [dockBase, restingInset],
   );
   const onSheetsHeight = useCallback(
     (height: number) => {
       const rounded = Math.max(0, Math.round(height));
       heights.current.sheets = rounded;
-      dockHeight.value = heights.current.composer + rounded + restingInset;
+      dockBase.value = heights.current.composer + rounded + restingInset;
       setSheetsHeight(rounded);
     },
-    [dockHeight, restingInset],
+    [dockBase, restingInset],
   );
   const onRootLayout = useCallback((event: LayoutChangeEvent) => {
     setLayoutHeight(Math.round(event.nativeEvent.layout.height));
@@ -196,32 +213,32 @@ export function ChatLayout({
     [keyboard.height, keyboard.progress, keyboardOffset],
   );
   const dockStyle = useMemo(
-    () => [
-      styles.dock,
-      {
-        paddingBottom: restingInset,
-        transform: [{ translateY: dockTranslateY }],
-      },
-    ],
+    () => ({
+      paddingBottom: restingInset,
+      transform: [{ translateY: dockTranslateY }],
+    }),
     [dockTranslateY, restingInset],
   );
   const { height: keyboardShift } = useReanimatedKeyboardAnimation();
   const keyboardHeight = useDerivedValue(() => -keyboardShift.value);
-  const sheetMaxHeight = useDerivedValue(
-    () =>
-      Math.max(
-        SHEET_MIN_HEIGHT,
-        Math.min(
-          layoutHeight * SHEET_MAX_SHARE,
-          layoutHeight -
-            chromeTop -
-            SHEET_TRANSCRIPT_GAP -
-            composerHeight -
-            Math.max(-keyboardShift.value + KEYBOARD_GAP, restingInset),
-        ),
+  const sheetMaxHeight = useDerivedValue(() => {
+    const visibleHeight = layoutHeight - Math.max(0, hiddenBottom.value);
+    return Math.max(
+      SHEET_MIN_HEIGHT,
+      Math.min(
+        visibleHeight * SHEET_MAX_SHARE,
+        visibleHeight -
+          chromeTop -
+          SHEET_TRANSCRIPT_GAP -
+          composerHeight -
+          Math.max(-keyboardShift.value + KEYBOARD_GAP, restingInset),
       ),
-    [chromeTop, composerHeight, layoutHeight, restingInset],
-  );
+    );
+  }, [chromeTop, composerHeight, hiddenBottom, layoutHeight, restingInset]);
+  // The dock stays at the visible bottom edge while the layout reaches below it.
+  const liftStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -hiddenBottom.value }],
+  }));
 
   const scrollToEndRef = useRef<TranscriptScrollToEnd | null>(null);
   const registerScrollToEnd = useCallback(
@@ -298,18 +315,24 @@ export function ChatLayout({
           {children}
         </KeyboardGestureArea>
         {docked ? (
-          <Animated.View pointerEvents="box-none" style={dockStyle}>
-            <View
-              pointerEvents="none"
-              style={[
-                styles.scrim,
-                {
-                  experimental_backgroundImage: `linear-gradient(to bottom, ${theme.background}00 0%, ${theme.background}99 45%, ${theme.background}E6 100%)`,
-                },
-              ]}
-            />
-            {composer}
-          </Animated.View>
+          <Reanimated.View
+            pointerEvents="box-none"
+            style={[styles.dock, liftStyle]}
+            testID="chat-dock"
+          >
+            <Animated.View pointerEvents="box-none" style={dockStyle}>
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.scrim,
+                  {
+                    experimental_backgroundImage: `linear-gradient(to bottom, ${theme.background}00 0%, ${theme.background}99 45%, ${theme.background}E6 100%)`,
+                  },
+                ]}
+              />
+              {composer}
+            </Animated.View>
+          </Reanimated.View>
         ) : null}
         {overlay}
       </View>

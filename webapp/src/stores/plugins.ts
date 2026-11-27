@@ -1,7 +1,7 @@
 /**
  * Plugin Pinia store.
  *
- * Manages the org-visible plugin catalog (global + org-owned).
+ * Manages the plugin catalog: built-in, organization and personal plugins.
  * Org-switch-safe: `clear()` empties the
  * state and `reload()` re-fetches from the active org (callers watch the
  * active organization id and call `reload`, same pattern the settings
@@ -22,15 +22,16 @@ export const usePluginStore = defineStore('plugins', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const togglingIds = ref<string[]>([])
+  /** Message of the last failed create/update, for the editor to show. */
+  const lastError = ref<string | null>(null)
   /** Last org id the catalog was loaded for (org-switch safety). */
   const loadedOrgId = ref<string | null>(null)
   /** Monotonic request generation; stale org fetches are discarded. */
   let catalogRequestId = 0
 
   // --- Getters ---
-  const globalPlugins = computed(() => plugins.value.filter((p) => p.is_global))
-  const orgPlugins = computed(() => plugins.value.filter((p) => !p.is_global))
-  const orgEnabledPlugins = computed(() => plugins.value.filter((p) => p.org_enabled))
+  /** Plugins that can be enabled in the user's workspaces. */
+  const availablePlugins = computed(() => plugins.value.filter((p) => p.available))
 
   // --- Actions ---
 
@@ -82,6 +83,7 @@ export const usePluginStore = defineStore('plugins', () => {
 
   async function createPlugin(data: PluginCreateIn): Promise<Plugin | null> {
     const notifications = useNotificationStore()
+    lastError.value = null
     try {
       const created = await pluginsApi.createPlugin(data)
       plugins.value = [...plugins.value, created].sort((a, b) => a.name.localeCompare(b.name))
@@ -89,6 +91,7 @@ export const usePluginStore = defineStore('plugins', () => {
       return created
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to create plugin'
+      lastError.value = msg
       notifications.error('Creation failed', msg)
       return null
     }
@@ -96,6 +99,7 @@ export const usePluginStore = defineStore('plugins', () => {
 
   async function updatePlugin(id: string, data: PluginUpdateIn, options: { silent?: boolean } = {}): Promise<Plugin | null> {
     const notifications = useNotificationStore()
+    lastError.value = null
     try {
       const updated = await pluginsApi.updatePlugin(id, data)
       const idx = plugins.value.findIndex((p) => p.id === id)
@@ -104,6 +108,7 @@ export const usePluginStore = defineStore('plugins', () => {
       return updated
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update plugin'
+      lastError.value = msg
       if (!options.silent) notifications.error('Update failed', msg)
       return null
     }
@@ -151,10 +156,9 @@ export const usePluginStore = defineStore('plugins', () => {
     error,
     togglingIds,
     loadedOrgId,
+    lastError,
     // Getters
-    globalPlugins,
-    orgPlugins,
-    orgEnabledPlugins,
+    availablePlugins,
     // Actions
     clear,
     reload,

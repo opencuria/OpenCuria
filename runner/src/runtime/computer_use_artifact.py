@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-VERSION = "0.2.1"
+VERSION = "0.3.3"
 NODE_VERSION = "22.23.2"
 NODE_PINS = {
     "linux-x64": (

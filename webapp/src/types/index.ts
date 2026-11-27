@@ -75,8 +75,6 @@ export type {
   RunnerSystemMetrics,
   RunnerUpdateInput,
   Skill,
-  SkillCreateInput,
-  SkillUpdateInput,
   VmSystemMetrics,
 } from '@opencuria/client/types'
 import type { ImageArtifact, WorkspaceWindowsLicense } from '@opencuria/client/types'

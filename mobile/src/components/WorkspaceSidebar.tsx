@@ -430,7 +430,7 @@ export function WorkspaceSidebar({
 }
 
 /** One chat: status icon, single-line title and a quiet time or workspace. */
-function ConversationRow({
+export function ConversationRow({
   conversation,
   inbox,
   selected,

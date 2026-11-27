@@ -29,7 +29,7 @@ from apps.mobile_apps.api import app_router
 from apps.notifications.api import notification_router
 from apps.organizations.api import org_router
 from apps.organizations.member_profile_api import member_profile_router
-from apps.plugins.api import plugin_router
+from apps.plugins.api import plugin_router, skill_router
 from apps.runners.api import (
     captured_image_router,
     git_router,
@@ -40,7 +40,6 @@ from apps.runners.api import (
     workspace_router,
 )
 from apps.scheduled_tasks.api import scheduled_task_router
-from apps.skills.api import skill_router
 from apps.workspace_files.api import workspace_file_router
 from common.exceptions import ServiceUnavailableError
 

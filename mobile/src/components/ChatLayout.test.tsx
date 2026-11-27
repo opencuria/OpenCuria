@@ -7,7 +7,9 @@ import {
   waitFor,
 } from "@testing-library/react-native";
 import { KeyboardController } from "react-native-keyboard-controller";
-import { ChatLayout, useChatLayout } from "./ChatLayout";
+import { makeMutable } from "react-native-reanimated";
+import { ChatLayout, useChatLayout, type ChatLayoutValue } from "./ChatLayout";
+import { HiddenBottomContext } from "../ui/chromeInset";
 import { ThemeProvider } from "../ui/theme";
 
 jest.mock("react-native-safe-area-context", () => ({
@@ -71,6 +73,34 @@ describe("ChatLayout", () => {
     expect(screen.getByTestId("dock-offset")).toHaveTextContent("174");
     // The open keyboard covers the home indicator area except for a small gap.
     expect(screen.getByTestId("keyboard-offset")).toHaveTextContent("26");
+  });
+
+  it("keeps the composer on the visible edge and the transcript's end above it while a sheet rests lower", async () => {
+    const hidden = makeMutable(0);
+    let layout: ChatLayoutValue | undefined;
+    function Probe(): null {
+      layout = useChatLayout();
+      return null;
+    }
+    render(
+      <ThemeProvider>
+        <HiddenBottomContext.Provider value={hidden}>
+          <ChatLayout composer={<Composer />}>
+            <Probe />
+          </ChatLayout>
+        </HiddenBottomContext.Provider>
+      </ThemeProvider>,
+    );
+    // Estimated composer (104) and the home indicator (34).
+    expect(layout!.dockHeight.value).toBe(138);
+    hidden.value = 240;
+    // The transcript ends above the visible edge, and the dock rises to it
+    // without the layout changing.
+    await waitFor(() => expect(layout!.dockHeight.value).toBe(378));
+    expect(layout!.dockOffset).toBe(138);
+    expect(screen.getByTestId("chat-dock")).toHaveAnimatedStyle({
+      transform: [{ translateY: -240 }],
+    });
   });
 
   it("reserves only the safe area without a composer", () => {

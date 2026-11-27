@@ -15,7 +15,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
-  BookText,
   Bot,
   Building2,
   Camera,
@@ -46,7 +45,6 @@ const WorkspacePolicyTab = defineAsyncComponent(() => import('./WorkspacePolicyT
 const ProviderConfigTab = defineAsyncComponent(() => import('./ProviderConfigTab.vue'))
 const AgentConfigTab = defineAsyncComponent(() => import('./AgentConfigTab.vue'))
 const CredentialServicesTab = defineAsyncComponent(() => import('./CredentialServicesTab.vue'))
-const SkillsPanel = defineAsyncComponent(() => import('./SkillsPanel.vue'))
 const CredentialsPanel = defineAsyncComponent(() => import('./CredentialsPanel.vue'))
 const PluginsPanel = defineAsyncComponent(() => import('./PluginsPanel.vue'))
 const ApiKeysPanel = defineAsyncComponent(() => import('./ApiKeysPanel.vue'))
@@ -83,7 +81,6 @@ const navItems: SettingsNavItem[] = [
   { id: 'general', label: 'General', icon: Settings2, adminOnly: true },
   { id: 'provider', label: 'Provider & Models', icon: Bot },
   { id: 'agents', label: 'Agents', icon: Sparkles, adminOnly: true },
-  { id: 'skills', label: 'Skills', icon: BookText },
   { id: 'credentials', label: 'Credentials', icon: KeyRound },
   { id: 'plugins', label: 'Plugins', icon: Puzzle },
   { id: 'api-keys', label: 'API Keys', icon: Key },
@@ -313,7 +310,6 @@ watch(
             <WorkspacePolicyTab v-if="open && shownTab === 'general'" />
             <ProviderConfigTab v-else-if="open && shownTab === 'provider'" />
             <AgentConfigTab v-else-if="open && shownTab === 'agents'" />
-            <SkillsPanel v-else-if="open && shownTab === 'skills'" />
             <CredentialsPanel
               v-else-if="open && shownTab === 'credentials'"
               :initial-service-id="settingsContext.serviceId"

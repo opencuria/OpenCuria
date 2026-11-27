@@ -11,6 +11,9 @@ export const DRAFT_SAVE_DELAY_MS = 500;
 
 export type DraftAccount = Pick<OfflineAccount, "loadDrafts" | "saveDrafts">;
 
+/** Called with the key of a draft that changed in memory. */
+export type DraftListener = (key: string) => void;
+
 /**
  * One account's composer drafts. Reads are synchronous so a chat shows its
  * draft at once. The drafts are saved with the account's offline data, which
@@ -28,6 +31,7 @@ export class ChatDraftStore implements ChatInputStorage {
   private loaded = false;
   private dirty = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly listeners = new Set<DraftListener>();
 
   constructor(
     private readonly account: DraftAccount | null,
@@ -49,6 +53,15 @@ export class ChatDraftStore implements ChatInputStorage {
     if (this.drafts.delete(key) || !this.loaded) this.changed(key);
   }
 
+  /**
+   * Listen for drafts that change in memory, e.g. edited in the app
+   * companion while the same chat shows in OpenCuria. Returns an unsubscribe.
+   */
+  subscribe(listener: DraftListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   /** Write pending edits now, e.g. when the app goes to the background. */
   async flush(): Promise<void> {
     if (this.timer) clearTimeout(this.timer);
@@ -68,6 +81,7 @@ export class ChatDraftStore implements ChatInputStorage {
   private changed(key: string): void {
     if (!this.loaded) this.edited.add(key);
     this.dirty = true;
+    for (const listener of [...this.listeners]) listener(key);
     if (!this.account || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -113,4 +127,52 @@ export class ChatDraftStore implements ChatInputStorage {
         editedAt: new Date(draft.editedAt).toISOString(),
       }));
   }
+}
+
+const shared = new WeakMap<
+  DraftAccount,
+  { store: ChatDraftStore; users: number }
+>();
+
+/**
+ * The draft store of an account, one per account for every React root
+ * (OpenCuria and the app companion), so neither saves over the other's
+ * edits. Without an account, drafts live in memory per caller. Callers
+ * `retainChatDraftStore` it while they show drafts.
+ */
+export function chatDraftStore(account: DraftAccount | null): ChatDraftStore {
+  if (!account) return new ChatDraftStore(null);
+  let entry = shared.get(account);
+  if (!entry) {
+    entry = { store: new ChatDraftStore(account), users: 0 };
+    shared.set(account, entry);
+  }
+  return entry.store;
+}
+
+/**
+ * Keep an account's shared store while it is used; the returned release
+ * flushes it, and the last release forgets it, so the next user loads the
+ * drafts saved on the device again.
+ */
+export function retainChatDraftStore(
+  account: DraftAccount | null,
+  store: ChatDraftStore,
+): () => void {
+  const entry = account ? shared.get(account) : undefined;
+  if (!account || !entry || entry.store !== store)
+    return () => void store.flush();
+  entry.users += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    entry.users -= 1;
+    void store.flush();
+    // A root that renders again right away (React's strict effects) keeps it.
+    queueMicrotask(() => {
+      if (entry.users === 0 && shared.get(account) === entry)
+        shared.delete(account);
+    });
+  };
 }

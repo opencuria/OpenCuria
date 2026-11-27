@@ -28,6 +28,8 @@ export interface InstalledApp {
   /** When the app was last opened on this device; missing until then. */
   openedAt?: string;
   hasIcon: boolean;
+  /** Workspace the app comes from; its chats show in the app companion. */
+  workspaceId?: string | null;
 }
 
 /** Progress of an install, in bytes of files still to download. */
@@ -38,6 +40,8 @@ export interface InstallProgress {
 
 export interface InstallOptions {
   scope: string;
+  /** Workspace the app comes from (`PublishedApp.workspace_id`). */
+  workspaceId?: string | null;
   /** Authenticated request for a file of this version. */
   fileRequest: (sha256: string) => AppFileRequest;
   onProgress?: (progress: InstallProgress) => void;
@@ -251,6 +255,11 @@ export class AppInstaller {
       ...(typeof background === "string" && background
         ? { backgroundColor: background }
         : {}),
+      companion: {
+        scope: app.scope,
+        workspaceId: app.workspaceId ?? null,
+        versionName: app.versionName,
+      },
     };
   }
 
@@ -338,6 +347,7 @@ export class AppInstaller {
       updatedAt: now,
       ...(previous?.openedAt ? { openedAt: previous.openedAt } : {}),
       hasIcon: Boolean(manifest.icon) && this.fs.exists(layout.icon),
+      workspaceId: options.workspaceId ?? previous?.workspaceId ?? null,
     };
     await this.saveRegistry({
       ...registry,

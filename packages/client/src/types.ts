@@ -394,9 +394,11 @@ export type {
   PluginMcpToolPolicy,
   PluginMcpTransport,
   PluginResources,
+  PluginScope,
   PluginSkill,
   PluginSkillIn,
   PluginUpdateIn,
+  SelectableSkill,
 } from "@opencuria/chat-core/plugins";
 
 /** Credential metadata only; secrets never leave the server. */
@@ -826,26 +828,8 @@ export interface CapturedImageWorkspaceInput {
   plugin_ids?: string[];
 }
 
-export interface Skill {
-  id: string;
-  name: string;
-  body: string;
-  scope: "personal" | "organization";
-  created_by_email: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SkillCreateInput {
-  name: string;
-  body: string;
-  organization_skill?: boolean;
-}
-
-export interface SkillUpdateInput {
-  name?: string;
-  body?: string;
-}
+/** A skill of a usable plugin, selectable for chats and scheduled tasks. */
+export type { SelectableSkill as Skill } from "@opencuria/chat-core/plugins";
 
 export type { HarnessEngine } from "@opencuria/chat-core/harnessModels";
 export type {
@@ -950,12 +934,26 @@ export interface VoiceTranscribeInput {
   duration_ms: number;
 }
 
-/** Original image pixels or a stored desktop frame a pointer refers to. */
+/**
+ * Original image pixels, a recorded desktop or app frame, or a text file
+ * (`width` columns, `height` lines) a pointer refers to.
+ */
 export interface VoicePointerTarget {
-  kind: "image" | "desktop";
+  kind: "image" | "desktop" | "app" | "file";
   path: string;
   width: number;
   height: number;
+}
+
+/** The app control or file line under a finger (`@opencuria/chat-core/visualRecording`). */
+export interface VoicePointerElement {
+  role?: string;
+  label?: string;
+  text?: string;
+  test_id?: string;
+  type?: string;
+  interactive?: boolean;
+  bounds?: [number, number, number, number];
 }
 
 export interface VoicePointer {
@@ -964,14 +962,48 @@ export interface VoicePointer {
   x: number | null;
   y: number | null;
   target: VoicePointerTarget | null;
+  /** Touches (mobile): a finger that used the surface or only pointed. */
+  mode?: "use" | "point";
+  element?: VoicePointerElement;
 }
 
-/** Manifest of a pointing recording; frames were uploaded beforehand. */
+/** What part of an image or file was on screen from `t_ms` on. */
+export interface VoiceView {
+  t_ms: number;
+  /** Null once the user went back from it. */
+  target: VoicePointerTarget | null;
+  /** `[x, y, width, height]` in target units; the whole target when absent. */
+  region?: [number, number, number, number];
+  /** Estimated from a rendered preview (Markdown, tables). */
+  approximate?: boolean;
+}
+
+/** A log line, error or backend request of an app recording. */
+export interface VoiceAppEvent {
+  t_ms: number;
+  kind: "log" | "error" | "network";
+  level?: "debug" | "info" | "warn" | "error";
+  message?: string;
+  method?: string;
+  url?: string;
+  status?: number;
+  duration_ms?: number;
+}
+
+/** Manifest of a pointing or app recording; frames were uploaded beforehand. */
 export interface VoiceRecordingInput extends VoiceTranscript {
   recording_id: string;
   duration_ms: number;
   pointers: VoicePointer[];
-  frames: Array<{ t_ms: number; path: string }>;
+  frames: Array<{ t_ms: number; path: string; texts?: string[] }>;
+  views?: VoiceView[];
+  events?: VoiceAppEvent[];
+  app?: {
+    app_id: string;
+    name: string;
+    version?: string;
+    platform: "android" | "ios";
+  };
 }
 
 export interface RecentModelUsage {

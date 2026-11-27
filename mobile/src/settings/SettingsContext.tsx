@@ -28,7 +28,7 @@ export interface SettingsChoice {
   emptyText?: string;
 }
 
-/** Moves through the settings pages; routes are strings such as "skill:<id>". */
+/** Moves through the settings pages; routes are strings such as "plugin:<id>". */
 export interface SettingsNavigation {
   push: (route: string) => void;
   /** Goes back one page. */

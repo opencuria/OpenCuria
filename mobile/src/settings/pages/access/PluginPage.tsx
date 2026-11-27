@@ -1,6 +1,9 @@
 import React, { useState } from "react";
 import { Alert } from "react-native";
-import { canTogglePlugin } from "@opencuria/chat-core/plugins";
+import {
+  canTogglePlugin,
+  pluginAvailability,
+} from "@opencuria/chat-core/plugins";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
@@ -8,29 +11,24 @@ import { route } from "../../routes";
 import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
-import {
-  mcpSubtitle,
-  pluginOwner,
-  pluginStatus,
-  requirementSubtitle,
-} from "./plugins";
+import { mcpServerSubtitle, requirementSubtitle } from "./plugins";
 import { PLUGINS } from "./resources";
 import { openPluginEditor } from "./usePluginDraft";
 
 /**
- * One plugin: its skills, MCP servers and credential services, activation
- * for the organization (admins), and editing of organization plugins.
+ * One plugin: its skills, MCP servers and credentials, its availability in
+ * the organization (admins, shared plugins) and editing where allowed.
  */
 export function PluginPage({
   pluginId,
 }: {
   pluginId: string;
 }): React.JSX.Element {
-  const { client, resources, isAdmin } = useSettings();
+  const { client, resources, isAdmin, refreshWorkspaces } = useSettings();
   const navigation = useSettingsNavigation();
   const plugins = useResource(resources, PLUGINS, () => client.plugins.list());
   const plugin = plugins.data?.find((entry) => entry.id === pluginId);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"available" | "delete" | null>(null);
 
   if (!plugin)
     return (
@@ -42,7 +40,7 @@ export function PluginPage({
           loadFailure("plugin", plugins) ?? {
             title: "Plugin unavailable",
             description:
-              "This plugin is unavailable in the current organization or no longer exists.",
+              "This plugin no longer exists or isn’t shared with you.",
             symbol: "exclamationmark.triangle",
           }
         }
@@ -50,19 +48,15 @@ export function PluginPage({
       />
     );
 
-  const editable = isAdmin && !plugin.is_global;
-  const setActive = async (active: boolean) => {
-    setBusy("active");
+  const setAvailable = async (available: boolean) => {
+    setBusy("available");
     try {
-      const saved = await client.plugins.setActive(plugin.id, active);
+      const saved = await client.plugins.setActive(plugin.id, available);
       plugins.set((current) =>
         (current ?? []).map((entry) => (entry.id === saved.id ? saved : entry)),
       );
-      showToast({
-        title: active ? "Plugin enabled" : "Plugin disabled",
-        message: `"${plugin.name}" is now ${active ? "enabled" : "disabled"} for this organization.`,
-        tone: "success",
-      });
+      // The composer offers the skills of available plugins.
+      void refreshWorkspaces();
     } catch (cause) {
       showToast({
         title: "Update failed",
@@ -76,7 +70,7 @@ export function PluginPage({
   const remove = () =>
     Alert.alert(
       `Delete ${plugin.name}?`,
-      "Its skills, MCP servers, and requirements will be removed. This cannot be undone.",
+      "Its skills and MCP servers are removed from every workspace. This cannot be undone.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -89,6 +83,7 @@ export function PluginPage({
               plugins.set((current) =>
                 (current ?? []).filter((entry) => entry.id !== plugin.id),
               );
+              void refreshWorkspaces();
               showToast({ title: "Plugin deleted", tone: "success" });
               navigation.pop();
             } catch (cause) {
@@ -109,98 +104,104 @@ export function PluginPage({
     (a, b) => a.position - b.position,
   );
   const servers = plugin.mcp_servers ?? [];
+  const requirements = plugin.credential_requirements ?? [];
+  // Releasing shared plugins for the organization is an admin setting.
+  const releasable = isAdmin && plugin.scope !== "personal";
   const sections: NativeFormSection[] = [
-    {
-      id: "plugin",
-      footer: plugin.description || "No description provided.",
-      rows: [
-        isAdmin
-          ? {
-              kind: "value" as const,
-              id: "status",
-              label: "Status",
-              value: `${pluginStatus(plugin)} · ${pluginOwner(plugin)}`,
-              tone: plugin.org_enabled ? "success" : "muted",
-            }
-          : {
-              kind: "value" as const,
-              id: "status",
-              label: "Provided by",
-              value: pluginOwner(plugin),
-            },
-        ...(isAdmin
-          ? [
+    ...(releasable || plugin.description
+      ? [
+          {
+            id: "plugin",
+            footer: plugin.description || undefined,
+            rows: releasable
+              ? [
+                  {
+                    kind: "toggle" as const,
+                    id: "available",
+                    testID: "plugin-available",
+                    label: "Available in this organization",
+                    subtitle:
+                      pluginAvailability(plugin) === "Unpublished"
+                        ? "Unpublished"
+                        : undefined,
+                    value: plugin.org_enabled,
+                    disabled: busy === "available" || !canTogglePlugin(plugin),
+                    onChange: (value: boolean) => void setAvailable(value),
+                  },
+                ]
+              : [],
+          },
+        ]
+      : []),
+    ...(skills.length
+      ? [
+          {
+            id: "skills",
+            title: "Skills",
+            rows: skills.map((skill) => ({
+              kind: "link" as const,
+              id: `skill-${skill.id}`,
+              title: skill.name,
+              subtitle: skill.description || undefined,
+              route: route("plugin-skill-view", plugin.id, skill.id),
+            })),
+          },
+        ]
+      : []),
+    ...(servers.length
+      ? [
+          {
+            id: "servers",
+            title: "MCP servers",
+            rows: servers.map((server) => ({
+              kind: "item" as const,
+              id: `server-${server.id}`,
+              title: server.name,
+              subtitle: mcpServerSubtitle(server),
+            })),
+          },
+        ]
+      : []),
+    ...(!skills.length && !servers.length
+      ? [
+          {
+            id: "contents",
+            rows: [
               {
-                kind: "toggle" as const,
-                id: "enabled",
-                testID: "plugin-enabled",
-                label: "Enabled for this organization",
-                subtitle:
-                  !plugin.enabled || !plugin.published
-                    ? "Unpublished plugins cannot be enabled."
-                    : undefined,
-                value: plugin.org_enabled,
-                disabled: busy === "active" || !canTogglePlugin(plugin),
-                onChange: (active: boolean) => void setActive(active),
+                kind: "note" as const,
+                id: "empty",
+                text: "No skills or MCP servers yet.",
               },
-            ]
-          : []),
-      ],
-    },
-    {
-      id: "skills",
-      title: `Skills (${skills.length})`,
-      rows: skills.length
-        ? skills.map((skill) => ({
-            kind: "link" as const,
-            id: `skill-${skill.id}`,
-            title: skill.name,
-            route: route("plugin-skill-view", plugin.id, skill.id),
-          }))
-        : [{ kind: "note" as const, id: "no-skills", text: "No skills." }],
-    },
-    {
-      id: "servers",
-      title: `MCP servers (${servers.length})`,
-      rows: servers.length
-        ? servers.map((server) => ({
-            kind: "item" as const,
-            id: `server-${server.id}`,
-            title: server.name,
-            subtitle: mcpSubtitle(server),
-          }))
-        : [
-            {
-              kind: "note" as const,
-              id: "no-servers",
-              text: "No MCP servers.",
-            },
-          ],
-    },
-    {
-      id: "services",
-      title: `Credential services (${plugin.credential_requirements.length})`,
-      footer: plugin.credential_requirements.length
-        ? "Tap a service to add a credential for it."
-        : undefined,
-      rows: plugin.credential_requirements.length
-        ? plugin.credential_requirements.map((requirement) => ({
-            kind: "item" as const,
-            id: `requirement-${requirement.id}`,
-            title: requirement.service_name,
-            subtitle: requirementSubtitle(requirement),
-            onPress: () =>
-              navigation.push(route("credential-new", requirement.service_id)),
-          }))
-        : [
-            {
-              kind: "note" as const,
-              id: "no-services",
-              text: "No credential services required.",
-            },
-          ],
-    },
-    ...(editable
+            ],
+          },
+        ]
+      : []),
+    ...(requirements.length
+      ? [
+          {
+            id: "credentials",
+            title: "Credentials",
+            footer: requirements.some(
+              (requirement) => !requirement.credential_id,
+            )
+              ? "Tap a service to add a credential for it."
+              : undefined,
+            rows: requirements.map((requirement) => ({
+              kind: "item" as const,
+              id: `requirement-${requirement.id}`,
+              title: requirement.service_name,
+              subtitle: requirementSubtitle(requirement),
+              onPress: requirement.credential_id
+                ? undefined
+                : () =>
+                    navigation.push(
+                      route("credential-new", requirement.service_id),
+                    ),
+            })),
+          },
+        ]
+      : []),
+    ...(plugin.editable
       ? [
           {
             id: "danger",
@@ -225,12 +226,16 @@ export function PluginPage({
     <SettingsPage
       title={plugin.name}
       sections={sections}
-      actions={
-        editable ? [{ id: "edit", title: "Edit", symbol: "pencil" }] : undefined
+      primaryAction={
+        plugin.editable
+          ? {
+              title: "Edit",
+              onPress: () => openPluginEditor(resources, navigation, plugin),
+              disabled: Boolean(busy),
+              testID: "edit-plugin",
+            }
+          : undefined
       }
-      onAction={(id) => {
-        if (id === "edit") openPluginEditor(resources, navigation, plugin);
-      }}
       testID="settings-plugin"
     />
   );

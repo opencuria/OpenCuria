@@ -1,4 +1,4 @@
-"""Skill management, name resolution and the orientation tool."""
+"""Plugin skill selection by name and the orientation tool."""
 
 from __future__ import annotations
 
@@ -8,6 +8,10 @@ import pytest
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import User
+from apps.harness.harness_service import HarnessService
+from apps.harness.models import HarnessSession
+from apps.mcp_app import resolve
+from apps.mcp_app.errors import ToolError
 from apps.organizations.models import Membership, MembershipRole
 
 from .conftest import fails, ok
@@ -15,86 +19,118 @@ from .conftest import fails, ok
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
-async def test_skill_lifecycle_by_name(world):
+@pytest.fixture
+def runs(monkeypatch) -> list:
+    """Record started runs instead of executing an agent."""
+    started: list = []
+
+    async def start_run(self, target, prompt, **kwargs):
+        started.append(kwargs["skill_ids"])
+
+    monkeypatch.setattr(HarnessService, "start_run", start_run)
+    return started
+
+
+async def _personal_plugin(ctx, name: str, *skills: str) -> dict:
+    return await ok(
+        ctx,
+        "plugin_create",
+        name=name,
+        skills=[{"name": skill, "body": f"{skill} body."} for skill in skills],
+        enable=False,
+    )
+
+
+def _make_member() -> User:
+    return User.objects.create_user(email=f"s-{uuid.uuid4().hex[:8]}@x.com")
+
+
+async def test_chat_skills_resolve_personal_plugin_skills_by_name_or_slug(world, runs):
     ctx = world.ctx()
+    plugin = await _personal_plugin(ctx, "Style", "Python style")
+    skill_id = plugin["skills"][0]["skill_id"]
 
-    created = await ok(
-        ctx, "skill_create", name="Python style", body="Use type hints everywhere."
+    by_name = await ok(
+        ctx, "chat_start", workspace="billing-api", prompt="A", skills=["python STYLE"]
     )
-    assert created["scope"] == "personal"
-
-    listed = await ok(ctx, "skill_list", query="type hints")
-    assert [s["name"] for s in listed["skills"]] == ["Python style"]
-    assert listed["skills"][0]["preview"] == "Use type hints everywhere."
-
-    fetched = await ok(ctx, "skill_get", skill="python STYLE")
-    assert fetched["body"] == "Use type hints everywhere."
-
-    updated = await ok(ctx, "skill_update", skill=created["skill_id"], body="Use mypy.")
-    assert updated["body"] == "Use mypy."
-
-    deleted = await ok(ctx, "skill_delete", skill="Python style")
-    assert deleted["deleted"] is True
-    assert (await ok(ctx, "skill_list"))["total"] == 0
-
-
-async def test_organization_skills_require_admin(world):
-    # Members are not offered the organization scope at all.
-    member_error = await fails(
-        world.ctx(),
-        "skill_create",
-        name="Shared",
-        body="Body",
-        scope="organization",
+    by_slug = await ok(
+        ctx, "chat_start", workspace="billing-api", prompt="B", skills=["python-style"]
     )
-    assert "'scope' was unexpected" in member_error
 
-    created = await ok(
-        world.ctx(role="admin"),
-        "skill_create",
-        name="Shared",
-        body="Body",
-        scope="organization",
-    )
-    assert created["scope"] == "organization"
-    # Members see organization skills but cannot change them.
-    assert (await ok(world.ctx(), "skill_get", skill="Shared"))["scope"] == (
-        "organization"
-    )
-    error = await fails(world.ctx(), "skill_update", skill="Shared", name="Mine")
-    assert "Not allowed" in error
+    assert by_name["chat"]["skills"] == ["Python style"]
+    assert by_slug["chat"]["skills"] == ["Python style"]
+    assert runs == [[skill_id], [skill_id]]
 
 
-async def test_unknown_and_ambiguous_names_explain_how_to_recover(world):
+async def test_unknown_and_ambiguous_skill_names_explain_how_to_recover(world, runs):
     ctx = world.ctx()
-    await ok(ctx, "skill_create", name="Review", body="A")
-    await ok(ctx, "skill_create", name="review", body="B")
-    await ok(ctx, "skill_create", name="Release checklist", body="C")
+    await _personal_plugin(ctx, "Backend", "Review")
+    await _personal_plugin(ctx, "Frontend", "review", "Release checklist")
 
-    ambiguous = await fails(ctx, "skill_get", skill="REVIEW")
+    ambiguous = await fails(
+        ctx, "chat_start", workspace="billing-api", prompt="A", skills=["REVIEW"]
+    )
+    unknown = await fails(
+        ctx, "chat_start", workspace="billing-api", prompt="A", skills=["Releas"]
+    )
+
     assert "2 skills match 'REVIEW'" in ambiguous
     assert "Pass the skill ID" in ambiguous
-
-    unknown = await fails(ctx, "skill_get", skill="Releas")
     assert "Did you mean: 'Release checklist'" in unknown
-    assert "skill_list" in unknown
+    assert "plugin_list" in unknown
+    assert runs == []
+    assert await sync_to_async(HarnessSession.objects.count)() == 0
 
 
-async def test_other_users_skills_are_invisible(world):
-    owner_skill = await ok(world.ctx(), "skill_create", name="Private", body="X")
+async def test_other_users_and_unreleased_skills_are_not_selectable(world, runs):
+    owner_plugin = await _personal_plugin(world.ctx(), "Private", "Secret sauce")
+    admin = world.ctx(role="admin")
+    shared = await ok(
+        admin,
+        "plugin_create",
+        name="Team",
+        scope="organization",
+        skills=[{"name": "Team rules", "body": "Be kind."}],
+        enable=False,
+    )
 
-    def make_stranger():
-        stranger = User.objects.create_user(email=f"s-{uuid.uuid4().hex[:8]}@x.com")
+    def make_stranger() -> User:
+        stranger = _make_member()
         Membership.objects.create(
             user=stranger, organization=world.org, role=MembershipRole.MEMBER
         )
         return stranger
 
-    stranger = await sync_to_async(make_stranger)()
-    error = await fails(
-        world.ctx(user=stranger), "skill_delete", skill=owner_skill["skill_id"]
+    stranger = world.ctx(user=await sync_to_async(make_stranger)())
+    owner_skill_id = owner_plugin["skills"][0]["skill_id"]
+    with pytest.raises(ToolError, match="No skill") as hidden:
+        await sync_to_async(resolve.skill_ids)(stranger, [owner_skill_id])
+    assert "Secret sauce" not in str(hidden.value)
+    assert "No plugin 'Private'" in await fails(
+        stranger, "plugin_get", plugin="Private"
     )
-    assert "No skill" in error
+
+    # Organization plugin skills are selectable only while released.
+    await ok(admin, "plugin_set_active", plugin="Team", active=False, organization=True)
+    withdrawn = await fails(
+        world.ctx(),
+        "chat_start",
+        workspace="billing-api",
+        prompt="A",
+        skills=["Team rules"],
+    )
+    assert "No skill 'Team rules' found" in withdrawn
+
+    await ok(admin, "plugin_set_active", plugin="Team", active=True, organization=True)
+    started = await ok(
+        world.ctx(),
+        "chat_start",
+        workspace="billing-api",
+        prompt="A",
+        skills=["Team rules"],
+    )
+    assert started["chat"]["skills"] == ["Team rules"]
+    assert runs == [[shared["skills"][0]["skill_id"]]]
 
 
 async def test_context_reports_workspace_scope_and_counts(world):
@@ -117,3 +153,22 @@ async def test_context_reports_workspace_scope_and_counts(world):
         "claude",
         "codex",
     }
+
+
+async def test_context_counts_usable_plugin_skills(world):
+    await _personal_plugin(world.ctx(), "Mine", "One", "Two")
+    admin = world.ctx(role="admin")
+    await ok(
+        admin,
+        "plugin_create",
+        name="Shared",
+        scope="organization",
+        skills=[{"name": "Three", "body": "Three body."}],
+        enable=False,
+    )
+    assert (await ok(world.ctx(), "opencuria_context"))["counts"]["skills"] == 3
+
+    await ok(
+        admin, "plugin_set_active", plugin="Shared", active=False, organization=True
+    )
+    assert (await ok(world.ctx(), "opencuria_context"))["counts"]["skills"] == 2

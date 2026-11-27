@@ -4,20 +4,10 @@ import { createPinia, setActivePinia } from 'pinia'
 import ApiKeyCard from '@/components/api-keys/ApiKeyCard.vue'
 import ImageDefinitionModal from '@/components/images/ImageDefinitionModal.vue'
 import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
-import SkillsPanel from './SkillsPanel.vue'
 import { updateImageDefinition } from '@/services/workspaces.api'
-import type { ApiKey, ImageDefinition, Skill } from '@/types'
+import type { ApiKey, ImageDefinition } from '@/types'
 
 const stores = vi.hoisted(() => ({
-  skills: {
-    skills: [] as Skill[],
-    loading: false,
-    error: null,
-    fetchSkills: vi.fn(),
-    updateSkill: vi.fn(),
-    createSkill: vi.fn(),
-    deleteSkill: vi.fn(),
-  },
   keys: {
     availablePermissions: ['workspaces:read', 'workspaces:create'].map((value) => ({
       value,
@@ -29,7 +19,6 @@ const stores = vi.hoisted(() => ({
     updateKeyPermissions: vi.fn(),
   },
 }))
-vi.mock('@/stores/skills', () => ({ useSkillStore: () => stores.skills }))
 vi.mock('@/stores/apiKeys', () => ({ useApiKeyStore: () => stores.keys }))
 vi.mock('@/services/workspaces.api', () => ({
   updateImageDefinition: vi.fn(),
@@ -58,15 +47,6 @@ const global = {
     ...dialogStubs,
     Dialog: { props: ['open'], template: '<div v-if="open"><slot /></div>' },
   },
-}
-const skill: Skill = {
-  id: 'skill-1',
-  name: 'Basics',
-  body: 'Use it well.',
-  scope: 'personal',
-  created_by_email: null,
-  created_at: '',
-  updated_at: '',
 }
 const apiKey: ApiKey = {
   id: 'key-1',
@@ -100,8 +80,6 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.useFakeTimers()
   vi.clearAllMocks()
-  stores.skills.skills = [{ ...skill }]
-  stores.skills.updateSkill.mockResolvedValue(true)
   stores.keys.updateKeyPermissions.mockResolvedValue(true)
   vi.mocked(updateImageDefinition).mockResolvedValue(definition)
 })
@@ -109,60 +87,6 @@ async function autosave() {
   await vi.advanceTimersByTimeAsync(500)
   await flushPromises()
 }
-
-describe('skill editor', () => {
-  it('writes only after Save and closes the editor on success', async () => {
-    const wrapper = mount(SkillsPanel, { global })
-    await wrapper.get('[title="Edit skill"]').trigger('click')
-    await wrapper.get('#edit-skill-name').setValue('Updated')
-    await autosave()
-    expect(stores.skills.updateSkill).not.toHaveBeenCalled()
-    await wrapper.get('#edit-skill-form').trigger('submit')
-    await flushPromises()
-    expect(stores.skills.updateSkill).toHaveBeenCalledExactlyOnceWith('skill-1', {
-      name: 'Updated',
-      body: skill.body,
-    })
-    expect(wrapper.find('#edit-skill-name').exists()).toBe(false)
-  })
-
-  it('keeps invalid or failed changes visible for another Save attempt', async () => {
-    const wrapper = mount(SkillsPanel, { global })
-    await wrapper.get('[title="Edit skill"]').trigger('click')
-    await wrapper.get('#edit-skill-body').setValue('')
-    await wrapper.get('#edit-skill-form').trigger('submit')
-    expect(stores.skills.updateSkill).not.toHaveBeenCalled()
-    stores.skills.updateSkill.mockResolvedValueOnce(false)
-    await wrapper.get('#edit-skill-body').setValue('Updated body')
-    await wrapper.get('#edit-skill-form').trigger('submit')
-    await flushPromises()
-    expect(wrapper.get('[role="alert"]').text()).toContain('Failed to update')
-    expect(wrapper.find('#edit-skill-body').exists()).toBe(true)
-    await wrapper.get('#edit-skill-form').trigger('submit')
-    await flushPromises()
-    expect(stores.skills.updateSkill).toHaveBeenCalledTimes(2)
-    expect(wrapper.find('#edit-skill-body').exists()).toBe(false)
-  })
-
-  it('discards invalid edits on Cancel without writes on dismissal', async () => {
-    const wrapper = mount(SkillsPanel, { global })
-    await wrapper.get('[title="Edit skill"]').trigger('click')
-    await wrapper.get('#edit-skill-name').setValue('')
-    await autosave()
-    await wrapper
-      .findAll('button')
-      .find((button) => button.text() === 'Cancel')!
-      .trigger('click')
-    wrapper.unmount()
-    expect(stores.skills.updateSkill).not.toHaveBeenCalled()
-  })
-
-  it('does not expose organization skill editing to members', () => {
-    stores.skills.skills = [{ ...skill, scope: 'organization' }]
-    const wrapper = mount(SkillsPanel, { global })
-    expect(wrapper.find('[title="Edit skill"]').exists()).toBe(false)
-  })
-})
 
 describe('API key permission autosave', () => {
   it('saves restricted permissions without closing and requires explicit full access', async () => {

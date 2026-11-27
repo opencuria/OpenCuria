@@ -191,12 +191,14 @@ async def test_cua_playwright_and_explicit_action_share_one_claim(desktop_worksp
     # Stopping does not close connections, and a later operational call reclaims.
     await desktop.action("stop")
     assert not cua._closed and not playwright._closed
+    # Desktop stop only cancels the worker's execution; the turn goes on.
     cua._session.call_tool.assert_any_await(
         "turn_ended",
-        {"session_id": "", "turn_id": "", "hook_event_name": "Stop"},
+        {"session_id": "", "turn_id": "", "hook_event_name": "DesktopStop"},
         meta=cua._request_meta(),
         read_timeout_seconds=timedelta(seconds=5),
     )
+    assert not cua._turn_stopped
     await playwright.call_tool("browser_navigate", {"url": "about:blank"})
     assert (await desktop.action("status"))["own_claim"]
     await cua.call_tool("js", {"code": "await cua.getState()"})
@@ -662,12 +664,10 @@ async def test_native_child_close_cancels_only_its_pending_tool(
     assert all(not conn._closed for conn in runtime.connections)
 
 
-async def test_native_scope_actors_own_real_sdk_scopes_and_close_lifo(
-    desktop_workspace,
-):
+def _scripted_computer_use(world, *, tool_policy=None):
+    """Serve Computer Use through real SDK stdio sessions on scripted processes."""
     from apps.harness.tests.test_mcp_startup_lifecycle import ScriptedProcess
 
-    world = desktop_workspace
     opened, closed = [], []
 
     class Process(ScriptedProcess):
@@ -711,47 +711,116 @@ async def test_native_scope_actors_own_real_sdk_scopes_and_close_lifo(
                 slug="cua_repl",
                 transport="stdio",
                 command="fixture",
+                tool_policy=dict(tool_policy or {}),
                 resources=PluginResourcesSnapshot(
                     desktop=DesktopResourceSnapshot(activation="first_tool")
                 ),
             ),
         ),
     )
+    prepared = PreparedPluginRuntime(
+        WorkspacePluginSnapshot(
+            workspace_id=world.workspace,
+            organization_id=uuid4(),
+            plugins=(plugin,),
+        )
+    )
+    return prepared, opened, closed
+
+
+def _close_failures(logs):
+    """Teardown warnings, e.g. from cancel scopes exited out of order."""
+    return [entry for entry in logs if entry["event"].endswith("_close_failed")]
+
+
+async def test_native_scope_actors_own_real_sdk_scopes_and_close_lifo(
+    desktop_workspace,
+):
+    from structlog.testing import capture_logs
+
+    world = desktop_workspace
+    prepared, opened, closed = _scripted_computer_use(world)
     runtime = McpRuntime()
     registry = ToolRegistry()
-    try:
-        await runtime.setup(
-            prepared=PreparedPluginRuntime(
-                WorkspacePluginSnapshot(
-                    workspace_id=world.workspace,
-                    organization_id=uuid4(),
-                    plugins=(plugin,),
+    with capture_logs() as logs:
+        try:
+            await runtime.setup(prepared=prepared, accessor=world.accessor)
+            runtime.register_tools(registry)
+            tool = registry.get(DesktopTool.name)
+            for scope in ("codex:child:a", "claude:child-b"):
+                ctx = ToolContext(
+                    session_id="root",
+                    workspace_id=str(world.workspace),
+                    accessor=world.accessor,
+                    agent_scope=scope,
                 )
-            ),
-            accessor=world.accessor,
-        )
-        runtime.register_tools(registry)
-        tool = registry.get(DesktopTool.name)
-        for scope in ("codex:child:a", "claude:child-b"):
-            ctx = ToolContext(
-                session_id="root",
-                workspace_id=str(world.workspace),
-                accessor=world.accessor,
-                agent_scope=scope,
-            )
-            await tool.execute({"action": "start"}, ctx)
-            await registry.get("mcp_computer-use_cua_repl_echo").execute({}, ctx)
-            await runtime.agent_scopes.close(scope)
-        # The parent's entered SDK scope remains usable after both child exits.
-        assert runtime.connections[0]._session is not None
-        await runtime.connections[0]._session.list_tools()
-        assert len(opened) == 3 and len(closed) == 2
-        assert len({process.name for process in opened}) == 3
-    finally:
-        await runtime.aclose()
+                await tool.execute({"action": "start"}, ctx)
+                await registry.get("mcp_computer-use_cua_repl_echo").execute({}, ctx)
+                await runtime.agent_scopes.close(scope)
+            # The parent's entered SDK scope remains usable after both child exits.
+            assert runtime.connections[0]._session is not None
+            await runtime.connections[0]._session.list_tools()
+            assert len(opened) == 3 and len(closed) == 2
+            assert len({process.name for process in opened}) == 3
+        finally:
+            await runtime.aclose()
     assert len(closed) == 3
     assert all(process.close_count == 1 for process in opened)
     assert not await world.store.list_unfinished(str(world.workspace))
+    assert not _close_failures(logs)
+
+
+async def test_cancelled_scope_actor_finalizes_then_unwinds_its_sdk_scopes(
+    desktop_workspace,
+):
+    """Cancellation keeps the recording and leaves no scope over the SDK unwind."""
+    import anyio
+    from structlog.testing import capture_logs
+
+    from apps.harness.mcp_client.runtime import _open_desktop_scope
+
+    world = desktop_workspace
+    runner = world.manager._get_runtime(world.workspace)
+    runner.probe_managed_token = AsyncMock(
+        return_value={"boot_id": "boot", "init_starttime": "1"}
+    )
+    runner.spawn_process = AsyncMock(return_value=object())
+    runner.process_wait = AsyncMock(return_value=0)
+    runner.close_managed_process = AsyncMock(return_value=True)
+    runner.process_close = AsyncMock(return_value=True)
+    world.manager._get_desktop_geometry = AsyncMock(return_value=(1280, 720))
+    prepared, opened, closed = _scripted_computer_use(
+        world, tool_policy={"desktop_kind": "computeruse"}
+    )
+    ctx = ToolContext(
+        session_id="root",
+        workspace_id=str(world.workspace),
+        accessor=world.accessor,
+    )
+    with capture_logs() as logs:
+        # Cancels the SDK scopes entered inside it, as a failing SDK task would.
+        with anyio.CancelScope() as cancelled:
+            async with _open_desktop_scope(
+                prepared=prepared,
+                accessor=world.accessor,
+                core_tool_names=None,
+                session_id="",
+                turn_id="turn",
+                runtime_options={"enable_recording": True},
+            ) as resources:
+                await resources.tools.get(DesktopTool.name).execute(
+                    {"action": "start"}, ctx
+                )
+                await resources.tools.get("mcp_computer-use_cua_repl_echo").execute(
+                    {}, ctx
+                )
+                cancelled.cancel()
+                await anyio.sleep_forever()
+    assert cancelled.cancelled_caught
+    assert len(resources.recordings) == 1
+    assert len(opened) == len(closed) == 1 and opened[0].close_count == 1
+    assert not await world.store.list_unfinished(str(world.workspace))
+    assert not _close_failures(logs)
 
 
 async def test_lost_recording_ack_can_stop_without_inventing_video(desktop_workspace):

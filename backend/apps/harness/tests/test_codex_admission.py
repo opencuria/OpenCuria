@@ -13,7 +13,7 @@ from apps.harness.provider_turn_models import ProviderTurn
 from apps.harness.tests.test_codex_domain import codex_setup, create_session
 from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.subagents import TaskArgs
-from apps.skills.services import SkillService
+from apps.plugins.skills import PluginSkillService
 from common.exceptions import AuthenticationError
 
 # Re-export the fixture for this test module.
@@ -164,7 +164,9 @@ async def test_managed_task_happy_path_keeps_codex_owner_skills_and_snapshot(
         return real_create(**kwargs)
 
     data.service.create_session = create
-    monkeypatch.setattr(SkillService, "resolve_bodies", lambda *a, **kw: ["skill body"])
+    monkeypatch.setattr(
+        PluginSkillService, "resolve_bodies", lambda *a, **kw: ["skill body"]
+    )
 
     async def start(child, prompt, **kwargs):
         assert child.harness_id == "codex"

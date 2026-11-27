@@ -8,7 +8,7 @@ import jsonschema
 
 from apps.mcp_app.tools import TOOLS
 
-PREFIXES = ("opencuria_", "model_", "workspace_", "chat_", "skill_", "plugin_")
+PREFIXES = ("opencuria_", "model_", "workspace_", "chat_", "plugin_")
 PREFIXES += ("scheduled_task_", "app_")
 READ_ONLY_VERBS = ("_list", "_get", "_read", "_options", "_context")
 
@@ -24,11 +24,13 @@ def test_tool_set_stays_small_and_uniquely_named():
 
 def test_core_domains_are_covered():
     names = {tool.name for tool in TOOLS}
-    for domain in ("workspace", "chat", "skill", "plugin", "scheduled_task"):
+    for domain in ("workspace", "chat", "plugin", "scheduled_task"):
         assert f"{domain}_list" in names
     assert {"chat_read", "chat_start", "chat_send", "chat_respond"} <= names
-    assert {"skill_create", "skill_update", "skill_delete"} <= names
-    assert {"plugin_create", "plugin_update", "plugin_set_active"} <= names
+    # Skills are managed as part of plugins.
+    assert not {name for name in names if name.startswith("skill_")}
+    assert {"plugin_create", "plugin_update", "plugin_delete"} <= names
+    assert "plugin_set_active" in names
     assert {"scheduled_task_create", "scheduled_task_run_now"} <= names
 
 
@@ -79,13 +81,16 @@ def test_members_are_not_offered_admin_only_tools_or_arguments():
     """Admin-only tools and arguments are hidden; the text never points at them."""
     admin = {tool.name: tool.for_role(admin=True) for tool in TOOLS}
     member = {tool.name: spec for tool in TOOLS if (spec := tool.for_role(admin=False))}
-    admin_only = {"plugin_create", "plugin_update", "plugin_delete"}
-    assert admin_only <= set(admin)
-    assert not admin_only & set(member)
-    assert "scope" in admin["skill_create"].input_schema["properties"]
-    assert "scope" not in member["skill_create"].input_schema["properties"]
-    assert "workspace" not in admin["plugin_set_active"].input_schema["required"]
-    assert "workspace" in member["plugin_set_active"].input_schema["required"]
+    # Members manage their personal plugins with the same tools.
+    assert {"plugin_create", "plugin_update", "plugin_delete"} <= set(member)
+    assert "scope" in admin["plugin_create"].input_schema["properties"]
+    assert "scope" not in member["plugin_create"].input_schema["properties"]
+    assert "enable" in member["plugin_create"].input_schema["properties"]
+    activation = admin["plugin_set_active"].input_schema
+    assert "organization" in activation["properties"]
+    assert "organization" not in member["plugin_set_active"].input_schema["properties"]
+    for role in (admin, member):
+        assert "workspace" not in role["plugin_set_active"].input_schema["required"]
     for tool in member.values():
         jsonschema.Draft202012Validator.check_schema(tool.input_schema)
         text = tool.description + str(tool.input_schema)

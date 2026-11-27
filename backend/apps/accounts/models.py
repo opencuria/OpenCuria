@@ -65,9 +65,8 @@ class APIKeyPermission(str, enum.Enum):
     IMAGE_DEFINITIONS_WRITE = "image_definitions:write"
     IMAGE_DEFINITIONS_MANAGE_RUNNERS = "image_definitions:manage_runners"
 
-    # Skills
+    # Skills (read-only; skills are edited as part of their plugin)
     SKILLS_READ = "skills:read"
-    SKILLS_WRITE = "skills:write"
 
     # Plugins (additive; existing keys are never auto-granted these)
     PLUGINS_READ = "plugins:read"

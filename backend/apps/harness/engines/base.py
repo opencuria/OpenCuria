@@ -56,6 +56,12 @@ class RunOptions:
     last_step_total_tokens: int = 0
     #: Queue of user messages the model should see mid-run (root runs only).
     steering: SteeringChannel | None = None
+    #: Loadable plugin skills (``apps.harness.tools.skill.SkillCatalog``);
+    #: the native engine lists them and loads bodies with the skill tool.
+    skill_catalog: Any | None = None
+    #: Async callback returning a truthy change object (with ``message()``
+    #: and ``tools_changed``) when plugins changed mid-run, else ``None``.
+    refresh_plugins: Callable[[], Awaitable[Any]] | None = None
 
 
 @dataclass

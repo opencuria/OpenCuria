@@ -1,70 +1,98 @@
 /**
- * Form models + (de)serialization helpers for the plugin editors of the web
- * and native clients.
+ * Form model + helpers for the plugin editors of the web and native clients.
  *
  * Keeps the editors thin: conversion between `Plugin` API objects and
- * editable form rows, the edits that keep dependent fields consistent,
- * payload normalization for create/update, and client-side validation.
- * Edits never mutate their input; they return the next form.
+ * editable rows, edits that keep dependent fields consistent, import of
+ * pasted MCP configurations (the `mcpServers` JSON of Claude, Cursor and
+ * VS Code, a command line or a URL) and SKILL.md files, payload
+ * normalization and client-side validation. Edits never mutate their
+ * input; they return the next form.
  *
  * Slugs are never user-editable: payloads send empty slugs and the
- * backend derives them from the names (also on rename).
+ * backend derives them from the names. Timeouts are not configurable.
  */
 
 import type {
+  CredentialService,
   Plugin,
   PluginCreateIn,
+  PluginCredentialRequirement,
   PluginCredentialRequirementIn,
   PluginCredentialServiceType,
-  CredentialService,
   PluginMcpAuthType,
-  PluginMcpToolPolicy,
   PluginMcpServerIn,
-  PluginMcpTransport,
+  PluginMcpToolPolicy,
   PluginSkillIn,
   PluginUpdateIn,
 } from "./plugins";
+import { boundCredentialKey, quoteArgument } from "./plugins";
 
-/** Narrow transport union (mirrors `PluginMcpTransport` from `./plugins`). */
-export type PluginMcpTransportOption = PluginMcpTransport;
-
-/** Narrow credential-service union (mirrors `PluginCredentialServiceType`). */
-export type PluginServiceTypeOption = PluginCredentialServiceType;
-
-/** Exact placeholder example shown in the editor help texts. */
+/** Exact placeholder syntax for per-user credentials in values. */
 export const PLACEHOLDER_EXAMPLE = "{{credential.KEY}}";
 
-export interface KeyValueRow {
+/** How an MCP server is reached: a command in the workspace or a URL. */
+export type McpKind = "command" | "url";
+export type McpUrlTransport = "streamable_http" | "sse";
+export type PluginServiceTypeOption = PluginCredentialServiceType;
+
+/**
+ * Where a secret variable gets its value: a value stored as a credential
+ * the plugin uses, an existing credential, or each workspace's own.
+ */
+export type SecretSource = "value" | "credential" | "per_user";
+
+/**
+ * One environment variable (command) or header (URL). A secret variable is
+ * a credential requirement of the plugin: its value lives in a credential,
+ * never in the plugin.
+ */
+export interface VariableRow {
   uid: string;
   key: string;
+  /** The plain value, or a new secret value to store as a credential. */
   value: string;
+  secret: boolean;
+  source: SecretSource;
+  /** The credential the plugin uses (its saved value for source "value"). */
+  credentialId: string;
+  credentialName: string;
+  /** Credential service of the secret; empty creates a new one on save. */
+  serviceId: string;
+  /** The requirement key the variable is bound to (kept across edits). */
+  requirementKey: string;
+  /** Kept from the stored requirement: optional secrets and their purpose. */
+  required: boolean;
+  description: string;
 }
 
 export interface PluginSkillForm {
   uid: string;
+  id?: string;
   name: string;
+  description: string;
   body: string;
 }
 
 export interface PluginMcpForm {
   uid: string;
+  id?: string;
   name: string;
-  transport: PluginMcpTransportOption;
-  desktop: "none" | "server_start" | "first_tool";
-  command: string;
-  argsText: string;
-  cwd: string;
-  env: KeyValueRow[];
-  headers: KeyValueRow[];
+  kind: McpKind;
+  commandLine: string;
   url: string;
-  startupTimeout: number;
-  requestTimeout: number;
+  transport: McpUrlTransport;
+  /** Environment variables (command) or headers (URL). */
+  variables: VariableRow[];
   authType: PluginMcpAuthType;
   oauthRequirementKey: string;
+  /** Kept as loaded; not edited in the clients. */
+  cwd: string;
+  desktop: "none" | "server_start" | "first_tool";
   toolPolicy?: PluginMcpToolPolicy;
   runtimeArtifact?: { id: string; version: string } | null;
 }
 
+/** A credential requirement not bound to a variable (e.g. OAuth). */
 export interface PluginRequirementForm {
   uid: string;
   reqKey: string;
@@ -72,13 +100,15 @@ export interface PluginRequirementForm {
   required: boolean;
   serviceId: string;
   credentialType: PluginServiceTypeOption;
+  /** The credential the plugin uses; empty: each workspace attaches one. */
+  credentialId: string;
 }
 
 export interface PluginFormModel {
   name: string;
   description: string;
-  enabled: boolean;
-  published: boolean;
+  /** Only used when creating; organization plugins need an admin. */
+  scope: "personal" | "organization";
   skills: PluginSkillForm[];
   mcps: PluginMcpForm[];
   requirements: PluginRequirementForm[];
@@ -87,7 +117,7 @@ export interface PluginFormModel {
 
 let uidCounter = 0;
 
-/** Unique row key for v-for lists (never sent to the backend). */
+/** Unique row key for list rendering (never sent to the backend). */
 export function newUid(prefix = "row"): string {
   uidCounter += 1;
   return `${prefix}-${Date.now().toString(36)}-${uidCounter}`;
@@ -104,30 +134,61 @@ export function slugify(value: string): string {
     .replace(/^-|-$/g, "");
 }
 
-export function emptyKeyValueRow(): KeyValueRow {
-  return { uid: newUid("kv"), key: "", value: "" };
+const SECRET_NAME = /(key|token|secret|password|passwd|auth|bearer|cookie)/i;
+
+/** Whether a variable name usually holds a secret (`GITHUB_TOKEN`). */
+export function looksSecret(name: string): boolean {
+  return SECRET_NAME.test(name);
+}
+
+export function emptyVariableRow(key = "", value = ""): VariableRow {
+  return {
+    uid: newUid("var"),
+    key,
+    value,
+    secret: looksSecret(key),
+    source: "value",
+    credentialId: "",
+    credentialName: "",
+    serviceId: "",
+    requirementKey: "",
+    required: true,
+    description: "",
+  };
+}
+
+/** A secret with a saved value: leaving the value empty keeps it. */
+export function isSavedSecret(row: VariableRow): boolean {
+  return row.secret && row.source === "value" && !!row.credentialId;
+}
+
+/** Requirement key of a secret variable: `GITHUB_TOKEN` -> `github_token`. */
+export function secretKey(name: string): string {
+  const key = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "");
+  return key || "secret";
 }
 
 export function emptySkillForm(): PluginSkillForm {
-  return { uid: newUid("skill"), name: "", body: "" };
+  return { uid: newUid("skill"), name: "", description: "", body: "" };
 }
 
-export function emptyMcpForm(): PluginMcpForm {
+export function emptyMcpForm(kind: McpKind = "command"): PluginMcpForm {
   return {
     uid: newUid("mcp"),
     name: "",
-    transport: "stdio",
-    desktop: "none",
-    command: "",
-    argsText: "",
-    cwd: "/workspace",
-    env: [],
-    headers: [],
+    kind,
+    commandLine: "",
     url: "",
-    startupTimeout: 30,
-    requestTimeout: 60,
+    transport: "streamable_http",
+    variables: [],
     authType: "none",
     oauthRequirementKey: "",
+    cwd: "/workspace",
+    desktop: "none",
   };
 }
 
@@ -139,24 +200,21 @@ export function emptyRequirementForm(): PluginRequirementForm {
     required: true,
     serviceId: "",
     credentialType: "env",
+    credentialId: "",
   };
 }
 
-export function emptyPluginForm(): PluginFormModel {
+export function emptyPluginForm(
+  scope: PluginFormModel["scope"] = "personal",
+): PluginFormModel {
   return {
     name: "",
     description: "",
-    enabled: true,
-    published: true,
+    scope,
     skills: [],
     mcps: [],
     requirements: [],
   };
-}
-
-function toTransport(value: string): PluginMcpTransportOption {
-  if (value === "streamable_http" || value === "sse") return value;
-  return "stdio";
 }
 
 function toServiceType(value: string): PluginServiceTypeOption {
@@ -165,60 +223,194 @@ function toServiceType(value: string): PluginServiceTypeOption {
   return "env";
 }
 
-function dictToRows(
-  dict: Record<string, string> | undefined,
-  prefix: string,
-): KeyValueRow[] {
-  return Object.entries(dict ?? {}).map(([key, value]) => ({
-    uid: newUid(prefix),
-    key,
-    value,
-  }));
+// ---------------------------------------------------------------------------
+// Command lines
+// ---------------------------------------------------------------------------
+
+/**
+ * Split a command line like a POSIX shell would, without expansion:
+ * whitespace separates words, quotes group them, backslash escapes.
+ *
+ * @throws Error on an unterminated quote.
+ */
+export function splitCommandLine(text: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let inWord = false;
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else current += char;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') quote = null;
+      else if (char === "\\" && /["\\$`]/.test(text[index + 1] ?? "")) {
+        current += text[index + 1];
+        index += 1;
+      } else current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      inWord = true;
+    } else if (char === "\\") {
+      if (index + 1 < text.length) {
+        current += text[index + 1];
+        index += 1;
+      }
+      inWord = true;
+    } else if (/\s/.test(char)) {
+      if (inWord) words.push(current);
+      current = "";
+      inWord = false;
+    } else {
+      current += char;
+      inWord = true;
+    }
+  }
+  if (quote) throw new Error("Unterminated quote in the command line.");
+  if (inWord) words.push(current);
+  return words;
+}
+
+/** Join executable and arguments into a copyable command line. */
+export function joinCommandLine(argv: string[]): string {
+  return argv.map(quoteArgument).join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// API <-> form
+// ---------------------------------------------------------------------------
+
+function variablesFrom(
+  mapping: Record<string, string> | undefined,
+  requirements: Map<string, PluginCredentialRequirement>,
+): VariableRow[] {
+  return Object.entries(mapping ?? {}).map(([key, value]) => {
+    const bound = boundCredentialKey(value);
+    const requirement = bound ? requirements.get(bound) : undefined;
+    if (!requirement) return { ...emptyVariableRow(key, value), secret: false };
+    return {
+      ...emptyVariableRow(key),
+      secret: true,
+      source: requirement.credential_id ? "value" : "per_user",
+      credentialId: requirement.credential_id ?? "",
+      credentialName: requirement.credential_name ?? "",
+      serviceId: requirement.service_id,
+      requirementKey: requirement.key,
+      required: requirement.required,
+      description: requirement.description ?? "",
+    };
+  });
 }
 
 /**
- * Build an editable form from an existing plugin.
- *
- * Credential requirements always round-trip via `service_id` (mode
- * `existing`) so PATCH never creates duplicate credential services.
+ * Drops credential choices the plugin may not use, e.g. personal credentials
+ * after switching a new plugin to the organization. Such secrets go back to
+ * "Enter a value"; other credentials go back to "each workspace adds its own".
  */
+export function keepUsableCredentials(
+  form: PluginFormModel,
+  usable: (credentialId: string) => boolean,
+): PluginFormModel {
+  const allowed = (id: string) => !id || usable(id);
+  return {
+    ...form,
+    mcps: form.mcps.map((mcp) => ({
+      ...mcp,
+      variables: mcp.variables.map((row) =>
+        allowed(row.credentialId)
+          ? row
+          : {
+              ...row,
+              source: "value",
+              value: "",
+              credentialId: "",
+              credentialName: "",
+              serviceId: "",
+            },
+      ),
+    })),
+    requirements: form.requirements.map((requirement) =>
+      allowed(requirement.credentialId)
+        ? requirement
+        : { ...requirement, credentialId: "" },
+    ),
+  };
+}
+
+/** Requirement keys bound to a variable of any server. */
+function boundRequirementKeys(plugin: Plugin): Set<string> {
+  const keys = new Set<string>();
+  for (const server of plugin.mcp_servers ?? []) {
+    const mapping = server.transport === "stdio" ? server.env : server.headers;
+    for (const value of Object.values(mapping ?? {})) {
+      const key = boundCredentialKey(value);
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+
+/** Build an editable form from an existing plugin. */
 export function pluginToForm(plugin: Plugin): PluginFormModel {
+  const requirements = new Map(
+    (plugin.credential_requirements ?? []).map((r) => [r.key, r]),
+  );
+  const bound = boundRequirementKeys(plugin);
   return {
     name: plugin.name,
     description: plugin.description ?? "",
-    enabled: plugin.enabled,
-    published: plugin.published,
+    scope: plugin.scope === "organization" ? "organization" : "personal",
     skills: [...(plugin.skills ?? [])]
       .sort((a, b) => a.position - b.position)
-      .map((s) => ({ uid: newUid("skill"), name: s.name, body: s.body })),
-    mcps: (plugin.mcp_servers ?? []).map((m) => ({
-      uid: newUid("mcp"),
-      name: m.name,
-      toolPolicy: m.tool_policy,
-      runtimeArtifact: m.runtime_artifact,
-      transport: toTransport(m.transport),
-      desktop: m.resources?.desktop
-        ? (m.resources.desktop.activation ?? "server_start")
-        : "none",
-      command: m.command ?? "",
-      argsText: (m.args ?? []).join("\n"),
-      cwd: m.cwd || "/workspace",
-      env: dictToRows(m.env, "env"),
-      headers: dictToRows(m.headers, "hdr"),
-      url: m.url ?? "",
-      startupTimeout: m.startup_timeout_seconds ?? 30,
-      requestTimeout: m.request_timeout_seconds ?? 60,
-      authType: m.auth_type ?? "none",
-      oauthRequirementKey: m.oauth_requirement_key ?? "",
-    })),
-    requirements: (plugin.credential_requirements ?? []).map((r) => ({
-      uid: newUid("req"),
-      reqKey: r.key,
-      description: r.description ?? "",
-      required: r.required,
-      serviceId: r.service_id,
-      credentialType: toServiceType(r.credential_type),
-    })),
+      .map((skill) => ({
+        uid: newUid("skill"),
+        id: skill.id,
+        name: skill.name,
+        description: skill.description ?? "",
+        body: skill.body,
+      })),
+    mcps: (plugin.mcp_servers ?? []).map((server) => {
+      const command = server.transport === "stdio";
+      return {
+        uid: newUid("mcp"),
+        id: server.id,
+        name: server.name,
+        kind: command ? "command" : "url",
+        commandLine: command
+          ? joinCommandLine([server.command, ...(server.args ?? [])])
+          : "",
+        url: command ? "" : (server.url ?? ""),
+        transport: server.transport === "sse" ? "sse" : "streamable_http",
+        variables: variablesFrom(
+          command ? server.env : server.headers,
+          requirements,
+        ),
+        authType: server.auth_type ?? "none",
+        oauthRequirementKey: server.oauth_requirement_key ?? "",
+        cwd: server.cwd || "/workspace",
+        desktop: server.resources?.desktop
+          ? (server.resources.desktop.activation ?? "server_start")
+          : "none",
+        toolPolicy: server.tool_policy,
+        runtimeArtifact: server.runtime_artifact,
+      };
+    }),
+    requirements: (plugin.credential_requirements ?? [])
+      .filter((r) => !bound.has(r.key))
+      .map((r) => ({
+        uid: newUid("req"),
+        reqKey: r.key,
+        description: r.description ?? "",
+        required: r.required,
+        serviceId: r.service_id,
+        credentialType: toServiceType(r.credential_type),
+        credentialId: r.credential_id ?? "",
+      })),
   };
 }
 
@@ -253,35 +445,26 @@ export function removeEntry(
 }
 
 /**
- * Switches an MCP server's transport and clears what the new transport
- * forbids, so no stale value hides in the payload: stdio has no URL,
- * headers or OAuth; HTTP and SSE have no command, arguments, environment
- * or managed desktop.
+ * Switches an MCP server between command and URL and clears what the new
+ * kind does not use, so no stale value hides in the payload.
  */
-export function setMcpTransport(
+export function setMcpKind(
   form: PluginFormModel,
   uid: string,
-  transport: PluginMcpTransportOption,
+  kind: McpKind,
 ): PluginFormModel {
   return updateEntry(form, "mcps", uid, (mcp) => {
-    if (mcp.transport === transport) return mcp;
-    return transport === "stdio"
+    if (mcp.kind === kind) return mcp;
+    return kind === "command"
       ? {
           ...mcp,
-          transport,
+          kind,
           url: "",
-          headers: [],
+          variables: [],
           authType: "none",
           oauthRequirementKey: "",
         }
-      : {
-          ...mcp,
-          transport,
-          desktop: "none",
-          command: "",
-          argsText: "",
-          env: [],
-        };
+      : { ...mcp, kind, desktop: "none", commandLine: "", variables: [] };
   });
 }
 
@@ -365,92 +548,109 @@ export function setRequirementService(
     ...next,
     mcps: next.mcps.map((mcp) =>
       uids.has(mcp.uid)
-        ? {
-            ...mcp,
-            oauthRequirementKey: reqKey,
-            url: service.oauth_server_url,
-          }
+        ? { ...mcp, oauthRequirementKey: reqKey, url: service.oauth_server_url }
         : mcp,
     ),
   };
 }
 
-/** One argument per line → string list (trimmed, empties dropped). */
-export function parseArgsText(text: string): string[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-}
-
-/** Key/value rows → mapping (rows with blank keys are dropped). */
-export function rowsToDict(rows: KeyValueRow[]): Record<string, string> {
+/**
+ * Variables of one server as the backend stores them: plain values as
+ * they are, secrets as `{{credential.KEY}}` of their requirement.
+ */
+function serverVariables(rows: VariableRow[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const row of rows) {
     const key = row.key.trim();
     if (!key) continue;
-    out[key] = row.value;
+    out[key] = row.secret
+      ? `{{credential.${row.requirementKey || secretKey(key)}}}`
+      : row.value;
   }
   return out;
 }
 
+/** The credential requirement a secret variable stands for. */
+function secretRequirement(
+  row: VariableRow,
+  pluginName: string,
+): PluginCredentialRequirementIn {
+  const name = row.key.trim();
+  const service = row.serviceId
+    ? { service_id: row.serviceId }
+    : {
+        new_service: {
+          name: pluginName ? `${name} (${pluginName})` : name,
+          env_var_name: name,
+        },
+      };
+  const base = {
+    key: row.requirementKey || secretKey(name),
+    required: row.required,
+    ...(row.description.trim() ? { description: row.description.trim() } : {}),
+    ...service,
+  };
+  if (row.source === "per_user") return { ...base, credential_id: null };
+  if (row.source === "credential")
+    return { ...base, credential_id: row.credentialId || null };
+  return {
+    ...base,
+    credential_id: row.credentialId || null,
+    ...(row.value ? { value: row.value } : {}),
+  };
+}
+
 function skillToIn(skill: PluginSkillForm, index: number): PluginSkillIn {
   return {
+    ...(skill.id ? { id: skill.id } : {}),
     name: skill.name.trim(),
-    // Backend derives the slug from the name (also on rename).
     slug: "",
+    description: skill.description.trim(),
     body: skill.body,
     position: index,
   };
 }
 
 function mcpToIn(mcp: PluginMcpForm): PluginMcpServerIn {
-  const startup = Number(mcp.startupTimeout);
-  const request = Number(mcp.requestTimeout);
-  const base = {
+  const base: PluginMcpServerIn = {
+    ...(mcp.id ? { id: mcp.id } : {}),
     name: mcp.name.trim(),
+    slug: "",
     ...(mcp.toolPolicy ? { tool_policy: mcp.toolPolicy } : {}),
     ...(mcp.runtimeArtifact ? { runtime_artifact: mcp.runtimeArtifact } : {}),
-    // Backend derives the slug from the name (also on rename).
-    slug: "",
-    transport: mcp.transport,
-    cwd: mcp.cwd.trim() || "/workspace",
-    startup_timeout_seconds: Number.isFinite(startup)
-      ? Math.trunc(startup)
-      : 30,
-    request_timeout_seconds: Number.isFinite(request)
-      ? Math.trunc(request)
-      : 60,
     auth_type: mcp.authType,
     oauth_requirement_key:
       mcp.authType === "oauth" ? mcp.oauthRequirementKey.trim() : "",
   };
-  if (mcp.transport === "stdio") {
-    // Backend forbids URL for stdio; headers are validated but never
-    // injected — clear both so stale values cannot hide in the payload.
+  if (mcp.kind === "command") {
+    let argv: string[] = [];
+    try {
+      argv = splitCommandLine(mcp.commandLine.trim());
+    } catch {
+      argv = [mcp.commandLine.trim()];
+    }
     return {
       ...base,
-      command: mcp.command.trim(),
-      args: parseArgsText(mcp.argsText),
-      env: rowsToDict(mcp.env),
+      transport: "stdio",
+      command: argv[0] ?? "",
+      args: argv.slice(1),
+      cwd: mcp.cwd || "/workspace",
+      env: serverVariables(mcp.variables),
       resources:
-        !mcp.desktop || mcp.desktop === "none"
-          ? {}
-          : { desktop: { activation: mcp.desktop } },
+        mcp.desktop === "none" ? {} : { desktop: { activation: mcp.desktop } },
       url: "",
       headers: {},
     };
   }
-  // Backend forbids command/args for http/sse; env is validated but never
-  // injected — clear both so stale values cannot hide in the payload.
   return {
     ...base,
+    transport: mcp.transport,
     command: "",
     args: [],
     env: {},
     resources: {},
     url: mcp.url.trim(),
-    headers: rowsToDict(mcp.headers),
+    headers: serverVariables(mcp.variables),
   };
 }
 
@@ -462,22 +662,38 @@ function requirementToIn(
     description: req.description.trim(),
     required: req.required,
     service_id: req.serviceId,
+    credential_id: req.credentialId || null,
   };
 }
 
-/** Normalize the form into a create payload (backend derives slugs from names). */
+/** Every credential requirement: secret variables first, then the rest. */
+function formRequirements(
+  form: PluginFormModel,
+): PluginCredentialRequirementIn[] {
+  const byKey = new Map<string, PluginCredentialRequirementIn>();
+  for (const mcp of form.mcps) {
+    for (const row of mcp.variables) {
+      if (!row.secret || !row.key.trim()) continue;
+      const requirement = secretRequirement(row, form.name.trim());
+      if (!byKey.has(requirement.key)) byKey.set(requirement.key, requirement);
+    }
+  }
+  for (const requirement of form.requirements.map(requirementToIn)) {
+    if (!byKey.has(requirement.key)) byKey.set(requirement.key, requirement);
+  }
+  return [...byKey.values()];
+}
+
+/** Normalize the form into a create payload. */
 export function formToCreateIn(form: PluginFormModel): PluginCreateIn {
   return {
     name: form.name.trim(),
-    // Explicitly empty: the backend generates the slug from the name.
-    // (Omitted/`None` would keep the old slug on update and skip rename.)
     slug: "",
+    scope: form.scope,
     description: form.description.trim(),
-    enabled: form.enabled,
-    published: form.published,
-    skills: form.skills.map((s, i) => skillToIn(s, i)),
+    skills: form.skills.map(skillToIn),
     mcp_servers: form.mcps.map(mcpToIn),
-    credential_requirements: form.requirements.map(requirementToIn),
+    credential_requirements: formRequirements(form),
   };
 }
 
@@ -488,35 +704,252 @@ export function formToUpdateIn(form: PluginFormModel): PluginUpdateIn {
     name: create.name,
     slug: create.slug,
     description: create.description,
-    enabled: create.enabled,
-    published: create.published,
     skills: create.skills,
     mcp_servers: create.mcp_servers,
     credential_requirements: create.credential_requirements,
   };
 }
 
-const ENV_VAR_RE = /^[A-Z_][A-Z0-9_]*$/;
+// ---------------------------------------------------------------------------
+// Imports: SKILL.md and MCP configurations
+// ---------------------------------------------------------------------------
+
+/** A SKILL.md split into frontmatter name/description and body. */
+export interface SkillDocument {
+  name: string;
+  description: string;
+  body: string;
+}
+
+const FRONTMATTER = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
+
+/** Parse a SKILL.md (frontmatter optional; mirrors the backend parser). */
+export function parseSkillMarkdown(text: string): SkillDocument {
+  const match = FRONTMATTER.exec(text ?? "");
+  if (!match) return { name: "", description: "", body: (text ?? "").trim() };
+  const values: Record<string, string> = {};
+  const lines = match[1]!.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const found = /^([A-Za-z][\w-]*):[ \t]*(.*)$/.exec(lines[index]!);
+    if (!found) continue;
+    const key = found[1]!.toLowerCase();
+    const raw = found[2]!.trim();
+    if (["|", ">", "|-", ">-", "|+", ">+"].includes(raw)) {
+      const block: string[] = [];
+      while (
+        index + 1 < lines.length &&
+        (!lines[index + 1]!.trim() || /^[ \t]/.test(lines[index + 1]!))
+      ) {
+        index += 1;
+        if (lines[index]!.trim()) block.push(lines[index]!.trim());
+      }
+      values[key] = block.join(raw.startsWith("|") ? "\n" : " ");
+    } else {
+      values[key] = raw.replace(/^(["'])(.*)\1$/, "$2").trim();
+    }
+  }
+  return {
+    name: values.name ?? "",
+    description: values.description ?? "",
+    body: (text ?? "").slice(match[0].length).trim(),
+  };
+}
+
+/**
+ * Apply pasted Markdown to a skill: frontmatter fills an empty name or
+ * description and is removed from the body.
+ */
+export function applySkillMarkdown(
+  skill: PluginSkillForm,
+  text: string,
+): PluginSkillForm {
+  const parsed = parseSkillMarkdown(text);
+  if (!FRONTMATTER.test(text ?? "")) return { ...skill, body: text };
+  return {
+    ...skill,
+    name: skill.name.trim() ? skill.name : humanize(parsed.name),
+    description: skill.description.trim()
+      ? skill.description
+      : parsed.description,
+    body: parsed.body,
+  };
+}
+
+function humanize(identifier: string): string {
+  const words = identifier.replace(/[-_]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
+}
+
+/** A readable server name from a package, URL host or config key. */
+export function serverNameFrom(source: string): string {
+  const text = source.trim();
+  try {
+    const url = new URL(text);
+    const parts = url.hostname
+      .split(".")
+      .filter(
+        (part) =>
+          !["www", "mcp", "api", "com", "io", "dev", "ai"].includes(part),
+      );
+    return humanize(parts[0] ?? url.hostname);
+  } catch {
+    // Not a URL.
+  }
+  let argv: string[] = [];
+  try {
+    argv = splitCommandLine(text);
+  } catch {
+    argv = text.split(/\s+/);
+  }
+  const runners = new Set([
+    "npx",
+    "uvx",
+    "pnpm",
+    "bunx",
+    "pipx",
+    "dlx",
+    "run",
+    "exec",
+  ]);
+  const target =
+    argv.slice(1).find((arg) => !arg.startsWith("-") && !runners.has(arg)) ??
+    argv[0] ??
+    "";
+  const withoutVersion = target.replace(/(.)@[^/]*$/, "$1");
+  const [scope, pkg] = withoutVersion.startsWith("@")
+    ? withoutVersion.slice(1).split("/")
+    : ["", withoutVersion.split("/").pop() ?? ""];
+  const base = (pkg ?? "")
+    .replace(/^(mcp-server-|server-|mcp-)/, "")
+    .replace(/(-mcp-server|-mcp|-server)$/, "");
+  const chosen = !base || base === "mcp" ? (scope ?? "") : base;
+  return humanize(chosen || target);
+}
+
+/** Values a pasted config expects the user to fill in, e.g. `${TOKEN}`. */
+const PLACEHOLDER_VALUE = /\$\{[^}]*\}|<[^>]+>|^your[_-]|^x{3,}$|^\.\.\.$/i;
+
+function variablesFromConfig(values: unknown): VariableRow[] {
+  if (!values || typeof values !== "object") return [];
+  return Object.entries(values as Record<string, unknown>).map(([key, raw]) => {
+    const value = typeof raw === "string" ? raw : String(raw ?? "");
+    const placeholder = PLACEHOLDER_VALUE.test(value.trim());
+    return {
+      ...emptyVariableRow(key, placeholder ? "" : value),
+      secret: looksSecret(key) || placeholder,
+    };
+  });
+}
+
+function serverFromConfig(
+  name: string,
+  config: Record<string, unknown>,
+): PluginMcpForm {
+  const type = String(config.type ?? config.transport ?? "").toLowerCase();
+  const url = typeof config.url === "string" ? config.url : "";
+  const server = emptyMcpForm(url ? "url" : "command");
+  server.name = name ? humanize(name) : "";
+  if (url) {
+    server.url = url;
+    server.transport =
+      type === "sse" || /\/sse\/?$/.test(url) ? "sse" : "streamable_http";
+    server.variables = variablesFromConfig(
+      config.headers ?? config.http_headers,
+    );
+    if (!server.name) server.name = serverNameFrom(url);
+    return server;
+  }
+  const command = typeof config.command === "string" ? config.command : "";
+  const args = Array.isArray(config.args) ? config.args.map(String) : [];
+  server.commandLine = args.length
+    ? joinCommandLine([command, ...args])
+    : command;
+  server.variables = variablesFromConfig(config.env);
+  if (!server.name) server.name = serverNameFrom(server.commandLine);
+  return server;
+}
+
+/** Result of reading a pasted MCP configuration. */
+export interface McpImport {
+  servers: PluginMcpForm[];
+  error?: string;
+}
+
+/**
+ * Read MCP servers from pasted text: `{"mcpServers": {...}}` (Claude,
+ * Cursor), `{"servers": {...}}` (VS Code), a map of named servers, a single
+ * server object, a URL or a command line such as `npx -y <package>`.
+ */
+export function parseMcpConfig(text: string): McpImport {
+  const source = (text ?? "").trim();
+  if (!source) return { servers: [], error: "Paste a configuration first." };
+  if (source.startsWith("{") || source.startsWith("[")) {
+    let data: unknown;
+    try {
+      data = JSON.parse(source);
+    } catch {
+      return { servers: [], error: "This is not valid JSON." };
+    }
+    const record = (data && typeof data === "object" ? data : {}) as Record<
+      string,
+      unknown
+    >;
+    const isServer = (value: unknown) =>
+      !!value &&
+      typeof value === "object" &&
+      ("command" in (value as object) || "url" in (value as object));
+    let entries: Array<[string, unknown]>;
+    if (isServer(record)) entries = [["", record]];
+    else {
+      const map = (record.mcpServers ??
+        record.servers ??
+        record.mcp_servers ??
+        record) as Record<string, unknown>;
+      entries = Object.entries(map ?? {}).filter(([, value]) =>
+        isServer(value),
+      );
+    }
+    if (!entries.length)
+      return {
+        servers: [],
+        error: "No MCP server found. Expected `command` or `url` entries.",
+      };
+    return {
+      servers: entries.map(([name, value]) =>
+        serverFromConfig(name, value as Record<string, unknown>),
+      ),
+    };
+  }
+  if (/^https?:\/\//i.test(source)) {
+    return { servers: [serverFromConfig("", { url: source })] };
+  }
+  const line = source.replace(/^(claude|codex)\s+mcp\s+add\b.*?\s--\s+/, "");
+  try {
+    splitCommandLine(line);
+  } catch (cause) {
+    return { servers: [], error: (cause as Error).message };
+  }
+  const server = emptyMcpForm("command");
+  server.commandLine = line;
+  server.name = serverNameFrom(line);
+  return { servers: [server] };
+}
+
+// ---------------------------------------------------------------------------
+// Validation (mirrors backend/apps/plugins/services.py)
+// ---------------------------------------------------------------------------
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const KEY_RE = /^[a-z0-9_]+(?:[a-z0-9_-]*[a-z0-9_])?$/i;
-/**
- * A name is slug-derivable when `slugify` maps it to a valid URL slug.
- * Guards names like `!!!` whose derived slug would be empty (backend 400).
- */
+const SUPPORTED_PLACEHOLDER =
+  /\{\{\s*credential\.([A-Za-z0-9_.-]{1,128})\s*\}\}/g;
+
 function isDerivableSlug(name: string): boolean {
   const slug = slugify(name);
   return !!slug && slug.length <= 255 && SLUG_RE.test(slug);
 }
-/** A stdio command must be a single executable (no whitespace/shell metacharacters). */
-function hasCommandMetacharacters(command: string): boolean {
-  if (/\s/.test(command)) return true;
-  if (command.includes("\0")) return true;
-  return /[;|&$`]/.test(command);
-}
-const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
-const SUPPORTED_PLACEHOLDER_RE =
-  /\{\{\s*credential\.([A-Za-z0-9_.-]{1,128})\s*\}\}/g;
-const GENERIC_PLACEHOLDER_RE = /\{\{|\}\}/;
 
 /** How `validatePluginForm` names a skill, e.g. "Skill #2". */
 export function skillLabel(index: number): string {
@@ -556,322 +989,200 @@ export function generalErrors(errors: string[]): string[] {
   );
 }
 
-/** Client-side validation; mirrors the backend rules (see backend/apps/plugins/services.py). */
+/** Extract `credential.KEY` references from a value. */
+export function referencedPlaceholderKeys(value: string): string[] {
+  return [...value.matchAll(SUPPORTED_PLACEHOLDER)].map((match) => match[1]!);
+}
+
+function validateCommand(mcp: PluginMcpForm, label: string): string[] {
+  const line = mcp.commandLine.trim();
+  if (!line) return [`${label}: enter the command that starts the server.`];
+  let argv: string[];
+  try {
+    argv = splitCommandLine(line);
+  } catch (cause) {
+    return [`${label}: ${(cause as Error).message}`];
+  }
+  const executable = argv[0] ?? "";
+  if (!executable || /[;|&$`]/.test(executable))
+    return [
+      `${label}: the command must start with a program, not shell syntax.`,
+    ];
+  if (argv.length > 65 || argv.some((arg) => arg.length > 1024))
+    return [`${label}: the command is too long.`];
+  return [];
+}
+
+function validateUrl(mcp: PluginMcpForm, label: string): string[] {
+  const url = mcp.url.trim();
+  if (!/^https?:\/\//i.test(url)) return [`${label}: enter an http(s) URL.`];
+  try {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password || parsed.hash)
+      return [`${label}: the URL must not contain a user name or #fragment.`];
+  } catch {
+    return [`${label}: the URL is not valid.`];
+  }
+  return url.length > 2048 ? [`${label}: the URL is too long.`] : [];
+}
+
+function validateVariables(
+  mcp: PluginMcpForm,
+  label: string,
+  requirementKeys: Set<string>,
+): string[] {
+  const errors: string[] = [];
+  const command = mcp.kind === "command";
+  const field = command ? "variable" : "header";
+  const seen = new Set<string>();
+  for (const row of mcp.variables) {
+    const key = row.key.trim();
+    if (!key) {
+      if (row.value.trim()) errors.push(`${label}: a ${field} needs a name.`);
+      continue;
+    }
+    if (!(command ? ENV_NAME : HEADER_NAME).test(key) || key.length > 256)
+      errors.push(`${label}: "${key}" is not a valid ${field} name.`);
+    const folded = command ? key : key.toLowerCase();
+    if (seen.has(folded)) errors.push(`${label}: "${key}" is set twice.`);
+    seen.add(folded);
+    if (row.value.length > 4096)
+      errors.push(`${label}: the value of "${key}" is too long.`);
+    if (row.secret) {
+      if (row.source === "value" && !row.value && !row.credentialId)
+        errors.push(`${label}: enter the secret value of "${key}".`);
+      if (row.source === "credential" && !row.credentialId)
+        errors.push(`${label}: choose the credential for "${key}".`);
+      continue;
+    }
+    for (const ref of referencedPlaceholderKeys(row.value)) {
+      if (!requirementKeys.has(ref))
+        errors.push(
+          `${label}: "${key}" uses unknown credential "${ref}"; add it under Advanced.`,
+        );
+    }
+    const stripped = row.value.replace(SUPPORTED_PLACEHOLDER, "");
+    if (/\{\{|\}\}/.test(stripped))
+      errors.push(
+        `${label}: "${key}" contains an unsupported placeholder (only ${PLACEHOLDER_EXAMPLE}).`,
+      );
+    if (
+      command &&
+      ["DISPLAY", "XAUTHORITY"].includes(key) &&
+      mcp.desktop !== "none"
+    )
+      errors.push(`${label}: the managed desktop sets ${key} itself.`);
+  }
+  if (
+    mcp.authType === "oauth" &&
+    mcp.variables.some(
+      (row) => row.key.trim().toLowerCase() === "authorization",
+    )
+  )
+    errors.push(`${label}: sign-in manages the Authorization header.`);
+  return errors;
+}
+
+/** Client-side validation of the whole form. */
 export function validatePluginForm(form: PluginFormModel): string[] {
   const errors: string[] = [];
-  if (!form.name.trim()) {
-    errors.push("Plugin name is required.");
-  } else if (form.name.trim().length > 255) {
-    errors.push("Plugin name must be at most 255 characters.");
-  } else if (!isDerivableSlug(form.name)) {
-    errors.push(
-      "Plugin name must contain letters or digits so an identifier can be derived.",
-    );
-  }
-  if (form.description.trim().length > 10000) {
-    errors.push("Plugin description is too long (max 10000 characters).");
-  }
+  const name = form.name.trim();
+  if (!name) errors.push("Enter a plugin name.");
+  else if (name.length > 255) errors.push("The plugin name is too long.");
+  else if (!isDerivableSlug(name))
+    errors.push("The plugin name needs letters or digits.");
+  if (form.description.trim().length > 10000)
+    errors.push("The plugin description is too long.");
 
-  form.skills.forEach((skill, i) => {
-    const label = skillLabel(i);
-    if (!skill.name.trim()) errors.push(`${label}: name is required.`);
-    else if (skill.name.trim().length > 255)
-      errors.push(`${label}: name is too long.`);
-    else if (!isDerivableSlug(skill.name)) {
-      errors.push(
-        `${label}: name must contain letters or digits so an identifier can be derived.`,
-      );
-    }
-    if (!skill.body.trim())
-      errors.push(`${label}: body (Markdown) is required.`);
+  form.skills.forEach((skill, index) => {
+    const label = skillLabel(index);
+    const parsed = parseSkillMarkdown(skill.body);
+    const skillName = skill.name.trim() || parsed.name;
+    if (!skillName) errors.push(`${label}: enter a name.`);
+    else if (!isDerivableSlug(skillName))
+      errors.push(`${label}: the name needs letters or digits.`);
+    if (!parsed.body.trim()) errors.push(`${label}: write its instructions.`);
     else if (skill.body.length > 200000)
-      errors.push(`${label}: body is too long.`);
+      errors.push(`${label}: the instructions are too long.`);
+    if (skill.description.trim().length > 1024)
+      errors.push(`${label}: the description must be at most 1024 characters.`);
   });
 
   const requirementKeys = new Set(
     form.requirements.map((r) => r.reqKey.trim()).filter(Boolean),
   );
-  const oauthRequirementKeys = form.requirements
-    .filter((req) => req.credentialType === "mcp_oauth")
-    .map((req) => req.reqKey.trim());
-
-  form.mcps.forEach((mcp, i) => {
-    const label = mcpLabel(mcp, i);
-    if (!mcp.name.trim()) errors.push(`${label}: name is required.`);
-    else if (mcp.name.trim().length > 255)
-      errors.push(`${label}: name is too long.`);
-    else if (!isDerivableSlug(mcp.name)) {
-      errors.push(
-        `${label}: name must contain letters or digits so an identifier can be derived.`,
-      );
-    }
-    if (mcp.desktop && mcp.desktop !== "none") {
-      if (mcp.transport !== "stdio")
-        errors.push(`${label}: managed desktop requires stdio transport.`);
-      if (
-        mcp.env.some((row) =>
-          ["DISPLAY", "XAUTHORITY"].includes(row.key.trim()),
-        )
-      ) {
-        errors.push(
-          `${label}: managed desktop supplies DISPLAY and XAUTHORITY; remove those env entries or select no managed desktop.`,
-        );
-      }
-    }
-    if (mcp.transport === "stdio") {
-      const command = mcp.command.trim();
-      if (!command) {
-        errors.push(`${label}: command is required for stdio transport.`);
-      } else if (command.length > 1024 || hasCommandMetacharacters(command)) {
-        errors.push(
-          `${label}: command must be a single executable (no spaces or shell metacharacters like ; | & $ \` ).`,
-        );
-      }
-      if (
-        parseArgsText(mcp.argsText).some(
-          (a) => a.length > 1024 || a.includes("\x00"),
-        )
-      ) {
-        errors.push(
-          `${label}: args must not contain null bytes and must be at most 1024 characters each.`,
-        );
-      }
-      if (mcp.url.trim())
-        errors.push(`${label}: URL must be empty for stdio transport.`);
-    } else {
-      const url = mcp.url.trim();
-      if (!/^https?:\/\//i.test(url)) {
-        errors.push(
-          `${label}: URL must be an http(s) URL for http/sse transports.`,
-        );
-      } else if (!isSafeHttpUrl(url)) {
-        errors.push(`${label}: URL must not contain userinfo or a fragment.`);
-      } else if (url.length > 2048) {
-        errors.push(`${label}: URL is too long (max 2048 characters).`);
-      }
-      if (mcp.command.trim() || parseArgsText(mcp.argsText).length > 0) {
-        errors.push(
-          `${label}: command/args must be empty for http/sse transports.`,
-        );
-      }
-    }
+  const oauthKeys = new Set(
+    form.requirements
+      .filter((r) => r.credentialType === "mcp_oauth" && r.required)
+      .map((r) => r.reqKey.trim()),
+  );
+  const serverNames = new Set<string>();
+  form.mcps.forEach((mcp, index) => {
+    const label = mcpLabel(mcp, index);
+    const serverName = mcp.name.trim();
+    if (!serverName) errors.push(`${label}: enter a name.`);
+    else if (!isDerivableSlug(serverName))
+      errors.push(`${label}: the name needs letters or digits.`);
+    else if (serverNames.has(slugify(serverName)))
+      errors.push(`${label}: another MCP server has the same name.`);
+    serverNames.add(slugify(serverName));
+    errors.push(
+      ...(mcp.kind === "command"
+        ? validateCommand(mcp, label)
+        : validateUrl(mcp, label)),
+    );
+    errors.push(...validateVariables(mcp, label, requirementKeys));
     if (mcp.authType === "oauth") {
-      if (mcp.transport === "stdio")
-        errors.push(`${label}: OAuth is only supported for HTTP transports.`);
-      const requirement = form.requirements.find(
-        (req) => req.reqKey.trim() === mcp.oauthRequirementKey.trim(),
-      );
-      if (!mcp.oauthRequirementKey.trim())
-        errors.push(
-          `${label}: select a required MCP OAuth credential requirement.`,
-        );
-      else if (
-        !requirement ||
-        !requirement.required ||
-        !oauthRequirementKeys.includes(mcp.oauthRequirementKey.trim())
-      ) {
-        errors.push(
-          `${label}: OAuth must reference a required MCP OAuth credential service.`,
-        );
-      }
-      if (
-        mcp.headers.some(
-          (row) => row.key.trim().toLowerCase() === "authorization",
-        )
-      ) {
-        errors.push(`${label}: OAuth manages the Authorization header.`);
-      }
-    } else if (mcp.oauthRequirementKey.trim()) {
-      errors.push(
-        `${label}: OAuth requirement key must be empty when authentication is disabled.`,
-      );
-    }
-    const activeRows = mcp.transport === "stdio" ? mcp.env : mcp.headers;
-    const mappingErrors = validateMappingRows(
-      activeRows,
-      label,
-      mcp.transport === "stdio" ? "env" : "headers",
-      requirementKeys,
-    );
-    errors.push(...mappingErrors);
-    // The unused mapping still round-trips through backend validation,
-    // so surface its errors too (backend never injects it at runtime).
-    const inactiveRows = mcp.transport === "stdio" ? mcp.headers : mcp.env;
-    const inactiveErrors = validateMappingRows(
-      inactiveRows,
-      label,
-      mcp.transport === "stdio" ? "headers" : "env",
-      requirementKeys,
-    );
-    errors.push(...inactiveErrors);
-    const startup = Number(mcp.startupTimeout);
-    const request = Number(mcp.requestTimeout);
-    if (!Number.isFinite(startup) || startup < 1 || startup > 600) {
-      errors.push(
-        `${label}: startup timeout must be between 1 and 600 seconds.`,
-      );
-    }
-    if (!Number.isFinite(request) || request < 1 || request > 600) {
-      errors.push(
-        `${label}: request timeout must be between 1 and 600 seconds.`,
-      );
+      if (mcp.kind !== "url")
+        errors.push(`${label}: sign-in is only available for URL servers.`);
+      if (!oauthKeys.has(mcp.oauthRequirementKey.trim()))
+        errors.push(`${label}: choose the OAuth credential to sign in with.`);
     }
   });
 
   const seenKeys = new Set<string>();
   const seenServices = new Set<string>();
-  form.requirements.forEach((req, i) => {
+  form.requirements.forEach((req, index) => {
     const key = req.reqKey.trim();
-    const label = requirementLabel(req, i);
-    if (!key) {
-      errors.push(`${label}: key is required.`);
-    } else if (key.length > 255 || !KEY_RE.test(key)) {
-      errors.push(
-        `${label}: key must be a stable identifier (letters, digits, dashes, underscores).`,
-      );
-    } else if (seenKeys.has(key)) {
-      errors.push(`${label}: duplicate key.`);
-    } else {
-      seenKeys.add(key);
-    }
-    if (req.description.trim().length > 2000) {
-      errors.push(`${label}: description is too long (max 2000 characters).`);
-    }
-    if (req.credentialType === "mcp_oauth" && !req.required) {
-      errors.push(
-        `${label}: MCP OAuth credential requirements must be required.`,
-      );
-    }
+    const label = requirementLabel(req, index);
+    if (!key) errors.push(`${label}: enter a key.`);
+    else if (key.length > 255 || !KEY_RE.test(key))
+      errors.push(`${label}: use letters, digits, dashes or underscores.`);
+    else if (seenKeys.has(key)) errors.push(`${label}: the key is used twice.`);
+    else seenKeys.add(key);
+    if (req.description.trim().length > 2000)
+      errors.push(`${label}: the description is too long.`);
     if (!req.serviceId) {
-      errors.push(`${label}: select an existing credential service.`);
-    } else if (seenServices.has(req.serviceId)) {
-      errors.push(`${label}: duplicate credential service in requirements.`);
-    } else {
-      seenServices.add(req.serviceId);
-      const service = form.availableServices?.find(
-        (entry) => entry.id === req.serviceId,
+      errors.push(`${label}: choose a credential service.`);
+      return;
+    }
+    if (seenServices.has(req.serviceId))
+      errors.push(`${label}: the credential service is used twice.`);
+    seenServices.add(req.serviceId);
+    const service = form.availableServices?.find(
+      (entry) => entry.id === req.serviceId,
+    );
+    if (form.availableServices && !service)
+      errors.push(`${label}: the credential service is not available here.`);
+    if (req.credentialType === "mcp_oauth") {
+      if (!req.required)
+        errors.push(`${label}: OAuth credentials must be required.`);
+      const servers = form.mcps.filter(
+        (mcp) =>
+          mcp.authType === "oauth" && mcp.oauthRequirementKey.trim() === key,
       );
-      if (form.availableServices && !service) {
-        errors.push(
-          `${label}: selected credential service is unavailable in this organization.`,
-        );
-      }
-      if (service && service.credential_type !== req.credentialType) {
-        errors.push(
-          `${label}: requirement type must match the selected credential service.`,
-        );
-      }
-      if (req.credentialType === "mcp_oauth") {
-        if (service && service.credential_type !== "mcp_oauth") {
+      if (servers.length !== 1)
+        errors.push(`${label}: use it for exactly one signed-in MCP server.`);
+      for (const server of servers) {
+        if (
+          service?.oauth_server_url &&
+          server.url.trim() !== service.oauth_server_url
+        )
           errors.push(
-            `${label}: OAuth requirements must use an MCP OAuth service.`,
+            `${label}: the server URL must be ${service.oauth_server_url}.`,
           );
-        }
-        const matchingOAuthServers = form.mcps.filter(
-          (entry) =>
-            entry.authType === "oauth" &&
-            entry.oauthRequirementKey.trim() === key,
-        );
-        if (matchingOAuthServers.length !== 1) {
-          errors.push(
-            `${label}: MCP OAuth service must be used by exactly one OAuth MCP server.`,
-          );
-        }
-        for (const server of matchingOAuthServers) {
-          if (
-            service?.oauth_server_url &&
-            server.url.trim() !== service.oauth_server_url
-          ) {
-            errors.push(
-              `${label}: OAuth MCP URL must exactly match the selected service endpoint (${service.oauth_server_url}).`,
-            );
-          }
-        }
       }
     }
   });
-
   return errors;
-}
-
-/** Reject userinfo (`user@host`) and `#fragment` URLs client-side. */
-function isSafeHttpUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    if (parsed.username || parsed.password) return false;
-    if (parsed.hash) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function validateMappingRows(
-  rows: KeyValueRow[],
-  label: string,
-  field: string,
-  requirementKeys: Set<string>,
-): string[] {
-  const errors: string[] = [];
-  const seen = new Set<string>();
-  const isEnv = field === "env";
-  for (const row of rows) {
-    const key = row.key.trim();
-    if (!key) continue;
-    if (key.length > 256) {
-      errors.push(
-        `${label}: ${field} key "${key}" is too long (max 256 characters).`,
-      );
-      continue;
-    }
-    if (isEnv && !ENV_VAR_RE.test(key.toUpperCase())) {
-      // Backend accepts arbitrary mapping keys; env vars are conventionally
-      // UPPER_SNAKE_CASE — warn-level strictness would be friendlier, but
-      // keep it an error to match the placeholder-credential drift risk.
-      errors.push(`${label}: env key "${key}" must look like OPENAI_API_KEY.`);
-    }
-    if (!isEnv && !HEADER_NAME_RE.test(key)) {
-      errors.push(
-        `${label}: header name "${key}" contains invalid characters.`,
-      );
-    }
-    if (seen.has(key)) {
-      errors.push(`${label}: duplicate ${field} key "${key}".`);
-    } else {
-      seen.add(key);
-    }
-    if (row.value.length > 4096) {
-      errors.push(
-        `${label}: ${field} value for "${key}" is too long (max 4096 characters).`,
-      );
-    }
-    const referenced = referencedPlaceholderKeys(row.value);
-    for (const ref of referenced) {
-      if (!requirementKeys.has(ref)) {
-        errors.push(
-          `${label}: ${field} "${key}" references unknown credential "${ref}" (add a matching requirement key, e.g. ${PLACEHOLDER_EXAMPLE}).`,
-        );
-      }
-    }
-    const stripped = row.value.replace(SUPPORTED_PLACEHOLDER_RE, "");
-    SUPPORTED_PLACEHOLDER_RE.lastIndex = 0;
-    if (GENERIC_PLACEHOLDER_RE.test(stripped)) {
-      errors.push(
-        `${label}: ${field} "${key}" contains an unsupported placeholder (only ${PLACEHOLDER_EXAMPLE} is allowed).`,
-      );
-    }
-  }
-  return errors;
-}
-
-/** Extract `credential.KEY` references from a mapping value. */
-export function referencedPlaceholderKeys(value: string): string[] {
-  const keys: string[] = [];
-  SUPPORTED_PLACEHOLDER_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = SUPPORTED_PLACEHOLDER_RE.exec(value)) !== null) {
-    keys.push(match[1]!);
-  }
-  SUPPORTED_PLACEHOLDER_RE.lastIndex = 0;
-  return keys;
 }

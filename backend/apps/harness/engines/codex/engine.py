@@ -14,6 +14,7 @@ from functools import partial
 from typing import Any, TypeVar
 
 import anyio
+import structlog
 
 from ...access.base import WorkspaceAccessor, sanitize_exec_workdir
 from ...access.guest import guest_of
@@ -49,6 +50,8 @@ from .session_store import (
     state_action,
 )
 from .tools import ManagedToolInvoker
+
+log = structlog.get_logger(__name__)
 
 _T = TypeVar("_T")
 
@@ -446,14 +449,35 @@ class CodexEngine:
         fingerprint = hashlib.sha256(
             json.dumps(signatures, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        if (
-            self.external_session_id
-            and self.engine_state.get("codex_tools") != fingerprint
-        ):
-            raise CodexRecoveryError(
-                "Codex tool signatures changed; fork or start a new conversation"
-            )
-        self.allowed = {spec["name"] for spec in schemas}
+        current_dynamic = sorted(
+            spec["name"]
+            for spec in schemas
+            if "code_mode" not in self.tools.get(spec["name"]).omit_tools_from
+        )
+        # A thread keeps the dynamic tools it started with. When plugins were
+        # enabled, disabled or edited since, resume with that original set:
+        # tools that disappeared answer with an error, tools added later
+        # arrive with the next new chat. Native relay servers follow the
+        # current registry on every run.
+        thread_dynamic = current_dynamic
+        if self.external_session_id:
+            stored = self.engine_state.get("codex_dynamic_tools")
+            if isinstance(stored, list):
+                thread_dynamic = [str(name) for name in stored]
+            if self.engine_state.get("codex_tools") != fingerprint:
+                log.info(
+                    "codex_tool_set_changed",
+                    session_id=opts.session_id,
+                    added=sorted(set(current_dynamic) - set(thread_dynamic)),
+                    removed=sorted(set(thread_dynamic) - set(current_dynamic)),
+                )
+                fingerprint = str(self.engine_state.get("codex_tools") or fingerprint)
+        self.allowed = {
+            spec["name"]
+            for spec in schemas
+            if spec["name"] in thread_dynamic
+            or "code_mode" in self.tools.get(spec["name"]).omit_tools_from
+        }
         native_groups: dict[str, list[dict[str, Any]]] = {}
         native_names: dict[str, dict[str, str]] = {}
         dynamic_schemas = []
@@ -581,7 +605,10 @@ class CodexEngine:
             # Empty external ID means a state-only owner-fenced update before
             # the first launch. Execution must not manufacture a thread binding.
             await self._bind(
-                provider_id=provider, codex_dirty=True, codex_tools=fingerprint
+                provider_id=provider,
+                codex_dirty=True,
+                codex_tools=fingerprint,
+                codex_dynamic_tools=thread_dynamic,
             )
             argv = runtime_argv(binary, settings)
             stream = await asyncio.wait_for(
@@ -635,7 +662,10 @@ class CodexEngine:
             thread = response["thread"]
             self.thread_id = str(uuid.UUID(thread["id"]))
             await self._bind(
-                provider_id=provider, codex_dirty=True, codex_tools=fingerprint
+                provider_id=provider,
+                codex_dirty=True,
+                codex_tools=fingerprint,
+                codex_dynamic_tools=thread_dynamic,
             )
             # Captures cumulative baseline without counting resumed historical
             # usage. Subsequent updates are absolute totals, not token deltas.

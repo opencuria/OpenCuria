@@ -3,9 +3,11 @@ import React, {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { AppState, type AppStateStatus } from "react-native";
 import { createClient, type OpenCuriaClient } from "@opencuria/client";
@@ -819,6 +821,81 @@ export function SessionProvider({
   );
   return (
     <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
+  );
+}
+
+/**
+ * The session shared by every React root of the process: OpenCuria's own
+ * screen and the companion drawn over an open app (`apps/companion`). One
+ * root owns it (sign-in, client, live connection, token refresh); the others
+ * relay its value, so there is never a second client refreshing the same
+ * tokens. When the owner goes away, a remaining root takes over.
+ */
+const hub: { owner: symbol | null; value: SessionContextValue | null } = {
+  owner: null,
+  value: null,
+};
+const hubListeners = new Set<() => void>();
+
+function notifyHub(): void {
+  for (const listener of [...hubListeners]) listener();
+}
+
+function subscribeHub(listener: () => void): () => void {
+  hubListeners.add(listener);
+  return () => hubListeners.delete(listener);
+}
+
+/** Publishes the owning root's session to the other roots. */
+function HubPublisher({ id }: { id: symbol }): null {
+  const value = useContext(SessionContext);
+  useLayoutEffect(() => {
+    if (hub.owner === null) hub.owner = id;
+    return () => {
+      if (hub.owner !== id) return;
+      hub.owner = null;
+      hub.value = null;
+      notifyHub();
+    };
+  }, [id]);
+  useEffect(() => {
+    if (hub.owner !== id) return;
+    hub.value = value;
+    notifyHub();
+  }, [id, value]);
+  return null;
+}
+
+/**
+ * The session of a React root: its own `SessionProvider` when no other root
+ * owns the session yet, else the owner's value. Every root renders this
+ * instead of `SessionProvider`.
+ */
+export function SessionScope({
+  children,
+}: React.PropsWithChildren): React.JSX.Element | null {
+  const [id] = useState(() => Symbol("session-root"));
+  const owner = useSyncExternalStore(
+    subscribeHub,
+    () => hub.owner,
+    () => hub.owner,
+  );
+  const shared = useSyncExternalStore(
+    subscribeHub,
+    () => hub.value,
+    () => hub.value,
+  );
+  if (owner === null || owner === id)
+    return (
+      <SessionProvider>
+        <HubPublisher id={id} />
+        {children}
+      </SessionProvider>
+    );
+  // The owner publishes its first value right after its first render.
+  if (!shared) return null;
+  return (
+    <SessionContext.Provider value={shared}>{children}</SessionContext.Provider>
   );
 }
 

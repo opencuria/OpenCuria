@@ -18,16 +18,17 @@ import anyio
 import structlog
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
 
+from apps.plugins.skills import PluginSkillService
 from apps.runners.services import get_runner_service
 from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from apps.runners.services.workspace_plugin_runtime import (
     WorkspacePluginRuntimeService,
 )
-from apps.skills.services import SkillService
 from common import realtime
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
+from .computer_use.session_host import session_hosts
 from .conversation_events import ConversationEvents
 from .conversation_service import ConversationService
 from .interaction_service import InteractionService
@@ -93,7 +94,7 @@ class HarnessService:
         parts: type[HarnessPartRepository] | None = None,
         todos: type[TodoRepository] | None = None,
         permissions: PermissionService | None = None,
-        skills: SkillService | None = None,
+        skills: PluginSkillService | None = None,
         workspace_admission: WorkspaceAdmissionService | None = None,
         plugin_runtime: WorkspacePluginRuntimeService | None = None,
         emit: EmitFn | None = None,
@@ -118,7 +119,7 @@ class HarnessService:
         self.history = ProviderHistoryService(messages=self.messages, parts=self.parts)
         self.todos = todos or TodoRepository
         self.permissions = permissions or PermissionService()
-        self.skills = skills or SkillService()
+        self.skills = skills or PluginSkillService()
         self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
         self.plugin_runtime = plugin_runtime or WorkspacePluginRuntimeService()
         self._emit = emit
@@ -426,7 +427,7 @@ class HarnessService:
         get_agent(resolved_agent)  # raises KeyError for unknown agents
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
-        normalized_skills = SkillService.normalize_ids(skill_ids)
+        normalized_skills = PluginSkillService.normalize_ids(skill_ids)
         if normalized_skills and user_id is not None:
             self.skills.resolve_bodies(
                 normalized_skills,
@@ -549,7 +550,7 @@ class HarnessService:
         Runs inherit the selection, so skills deleted since must not wedge
         every later prompt of the chat.
         """
-        stored = SkillService.normalize_ids(list(session.skill_ids or []))
+        stored = PluginSkillService.normalize_ids(list(session.skill_ids or []))
         if not stored or user_id is None:
             return stored
         return self.skills.filter_available_ids(
@@ -578,9 +579,12 @@ class HarnessService:
             await self.abort_run(session.id)
         # A closing attempt with unconfirmed runner cleanup must survive deletion.
         await self._ensure_external_attempt_reconciled(session, force=True)
+        deleted_ids = await sync_to_async(self.sessions.list_descendant_ids)(session.id)
         await sync_to_async(self.sessions.delete)(session)
         self.run_registry.clear_abort(str(session.id))
         self._forget_run(str(session.id))
+        # Deleted chats (and cascaded subagents) keep no Computer Use REPL.
+        await session_hosts.close_sessions(deleted_ids, reason="chat_deleted")
         if session.parent_id is None:
             await self.conversation_events.emit(session.workspace_id)
 
@@ -684,7 +688,7 @@ class HarnessService:
                 None,
             )
         effective_skill_ids = (
-            SkillService.normalize_ids(skill_ids)
+            PluginSkillService.normalize_ids(skill_ids)
             if skill_ids is not None
             else await sync_to_async(self._available_session_skill_ids)(
                 session,
@@ -1018,7 +1022,11 @@ class HarnessService:
         try:
             await self._run_cancellation().shutdown()
         finally:
-            await providers.shutdown(contexts)
+            try:
+                await providers.shutdown(contexts)
+            finally:
+                # Runs are settled: release the chats' kept Computer Use REPLs.
+                await session_hosts.close_all(reason="shutdown")
 
     async def request_stop(self, session_id: uuid.UUID) -> None:
         """Fence an older claimed admission before its worker waiter is cancelled.

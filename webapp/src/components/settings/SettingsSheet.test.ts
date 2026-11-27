@@ -75,28 +75,15 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: () => authMock,
 }))
 
-const skillStoreMock = {
-  skills: [],
-  loading: false,
-  error: null as string | null,
-  fetchSkills: vi.fn(),
-  createSkill: vi.fn(),
-  updateSkill: vi.fn(),
-  deleteSkill: vi.fn(),
-}
-
-vi.mock('@/stores/skills', () => ({
-  useSkillStore: () => skillStoreMock,
-}))
-
 vi.mock('@/stores/plugins', () => ({
   usePluginStore: () => ({
     plugins: [],
-    globalPlugins: [],
-    orgPlugins: [],
-    orgEnabledPlugins: [],
+    availablePlugins: [],
     loading: false,
     error: null,
+    lastError: null,
+    loadedOrgId: 'org-1',
+    togglingIds: [],
     reload: vi.fn(),
     fetchPlugins: vi.fn(),
     createPlugin: vi.fn(),
@@ -241,7 +228,6 @@ describe('SettingsSheet', () => {
       'general',
       'provider',
       'agents',
-      'skills',
       'credentials',
       'plugins',
       'api-keys',
@@ -253,6 +239,15 @@ describe('SettingsSheet', () => {
     ]) {
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
     }
+    // Skills live inside plugins.
+    expect(wrapper.find('[data-testid="settings-nav-skills"]').exists()).toBe(false)
+  })
+
+  it('opens Plugins for old skills links', async () => {
+    const wrapper = mountSheet()
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'skills' } }))
+    await settleAsyncComponents()
+    expect(wrapper.findComponent({ name: 'PluginsPanel' }).exists()).toBe(true)
   })
 
   it('has no organization push configuration tab for admins', () => {
@@ -273,7 +268,7 @@ describe('SettingsSheet', () => {
       'windows',
     ])
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(false)
-    for (const tab of ['provider', 'skills', 'credentials', 'plugins', 'api-keys', 'images'])
+    for (const tab of ['provider', 'credentials', 'plugins', 'api-keys', 'images'])
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
     expect(wrapper.find('[data-testid="settings-nav-notifications"]').exists()).toBe(false)
     authMock.isAdmin = true

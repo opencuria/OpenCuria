@@ -452,8 +452,10 @@ def _options(ctx: ToolContext) -> dict[str, Any]:
                 ],
             }
         )
-        for plugin in PluginService().list_visible(org_id=ctx.organization_id)
-        if plugin["org_enabled"] and plugin["enabled"] and plugin["published"]
+        for plugin in PluginService().list_visible(
+            org_id=ctx.organization_id, user=ctx.user, admin=ctx.is_admin
+        )
+        if plugin["available"]
     ]
     return data
 
@@ -469,7 +471,7 @@ def _options(ctx: ToolContext) -> dict[str, Any]:
         Windows images list the minimum resources they need), runners with
         resource defaults and limits, credentials the user can attach (API
         tokens, SSH keys, env files; names only, never secrets) and the
-        plugins enabled for the organization with the credentials they require.
+        plugins workspaces can enable with the credentials they require.
     """,
 )
 async def workspace_options(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

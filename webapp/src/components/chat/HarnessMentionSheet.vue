@@ -95,6 +95,11 @@ watch(
           {{ candidate.kind }}
         </span>
         <span class="min-w-0 flex-1 truncate">{{ candidate.label }}</span>
+        <span
+          v-if="candidate.detail"
+          class="max-w-[40%] shrink-0 truncate text-xs text-muted-foreground"
+          >{{ candidate.detail }}</span
+        >
       </button>
     </div>
   </div>

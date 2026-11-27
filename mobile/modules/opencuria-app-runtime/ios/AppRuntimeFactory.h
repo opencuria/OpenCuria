@@ -13,8 +13,10 @@ NS_ASSUME_NONNULL_BEGIN
  lets `registerModules` pick the Expo modules, confines React Native's
  networking (fetch, XMLHttpRequest, uploads, images) to `canReadFile` for
  `file:` URLs, reports fatal JavaScript errors instead of letting React Native
- abort the whole OpenCuria process, and leaves React Native's process-wide
- provider of third-party Fabric components with OpenCuria's own factory.
+ abort the whole OpenCuria process, leaves React Native's process-wide
+ provider of third-party Fabric components with OpenCuria's own factory, and
+ runs the inspector script that reports the app's logs and requests to the
+ app companion (`onInspectorReport`).
  */
 NS_SWIFT_NAME(AppRuntimeFactory)
 @interface OCAppRuntimeFactory : EXReactNativeFactory
@@ -30,6 +32,12 @@ NS_SWIFT_NAME(AppRuntimeFactory)
 
 /// Called with the message of a fatal JavaScript error.
 @property (nonatomic, copy, nullable) void (^onFatalError)(NSString *message);
+
+/// The inspector script (`inspector/app-inspector.js`), run before the bundle.
+@property (nonatomic, copy, nullable) NSString *inspectorScript;
+
+/// Called (JS thread) with each JSON event the inspector script reports.
+@property (nonatomic, copy, nullable) void (^onInspectorReport)(NSString *json);
 
 /// Ends the React instance; dropping its host invalidates it (RCTHost dealloc).
 /// Swift cannot set `rootViewFactory.reactHost`: `RCTHost` is C++-only there.

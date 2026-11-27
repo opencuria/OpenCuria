@@ -165,9 +165,12 @@ def _create_workspace(ctx) -> Workspace:
     return Workspace.objects.create(runner=runner, name="w", created_by=ctx["user"])
 
 
-def _minimal_plugin_body(name: str = "My Plugin") -> dict:
+def _minimal_plugin_body(
+    name: str = "My Plugin", *, scope: str = "organization"
+) -> dict:
     return {
         "name": name,
+        "scope": scope,
         "skills": [
             {"name": "Guide", "body": "# guide", "position": 0},
         ],
@@ -183,13 +186,26 @@ def _minimal_plugin_body(name: str = "My Plugin") -> dict:
 
 
 @pytest.mark.django_db
-def test_member_can_list_but_not_create(client: Client):
+def test_member_creates_personal_but_not_organization_plugins(client: Client):
     ctx = _ctx(role=MembershipRole.MEMBER)
     response = client.get("/api/v1/plugins/", **ctx["headers"])
     assert response.status_code == 200
 
     response = _post(client, "/api/v1/plugins/", ctx["headers"], _minimal_plugin_body())
     assert response.status_code == 403
+    assert response.json()["code"] == "forbidden"
+    assert not Plugin.objects.filter(organization=ctx["org"]).exists()
+
+    body = _minimal_plugin_body()
+    del body["scope"]
+    response = _post(client, "/api/v1/plugins/", ctx["headers"], body)
+    assert response.status_code == 201, response.content[:500]
+    payload = response.json()
+    assert payload["scope"] == "personal"
+    assert payload["organization_id"] is None
+    assert payload["available"] is True
+    assert payload["editable"] is True
+    assert Plugin.objects.get(id=payload["id"]).owner_id == ctx["user"].id
 
 
 @pytest.mark.django_db
@@ -240,7 +256,8 @@ def test_nested_requirement_service_shape_is_rejected(client: Client):
         content_type="application/json",
         **ctx["headers"],
     )
-    assert response.status_code == 422, response.content[:500]
+    assert response.status_code == 400, response.content[:500]
+    assert "needs service_id or new_service" in response.json()["detail"]
 
 
 @pytest.mark.django_db
@@ -300,6 +317,7 @@ def test_oauth_plugin_references_existing_service_endpoint(client: Client):
     body = {
         "name": "OAuth plugin",
         "slug": "oauth-plugin",
+        "scope": "organization",
         "mcp_servers": [
             {
                 "name": "MCP",
@@ -350,6 +368,7 @@ def test_plugin_rejects_oauth_endpoint_change(client: Client):
     body = {
         "name": "OAuth Rename",
         "slug": "oauth-rename",
+        "scope": "organization",
         "skills": [{"name": "Guide", "slug": "guide", "body": "# Guide"}],
         "mcp_servers": [
             {
@@ -393,10 +412,14 @@ def test_create_plugin_invalid_mcp_is_400_and_atomic(client: Client):
     ctx = _ctx()
     body = _minimal_plugin_body("Broken")
     body["mcp_servers"] = [{"name": "Bad", "transport": "stdio"}]
-    count_before = Plugin.objects.filter(organization=ctx["org"]).count()
+    count_before = Plugin.objects.count()
     response = _post(client, "/api/v1/plugins/", ctx["headers"], body)
     assert response.status_code == 400
-    assert Plugin.objects.filter(organization=ctx["org"]).count() == count_before
+    assert Plugin.objects.count() == count_before
+    del body["scope"]
+    response = _post(client, "/api/v1/plugins/", ctx["headers"], body)
+    assert response.status_code == 400
+    assert Plugin.objects.count() == count_before
 
 
 @pytest.mark.django_db
@@ -491,10 +514,14 @@ def test_builtin_transport_is_reserved(client: Client):
         "name": "Impostor",
         "mcp_servers": [{"name": "Server", "transport": "builtin"}],
     }
-    response = _post(client, "/api/v1/plugins/", ctx["headers"], body)
-    assert response.status_code == 400
-    assert "builtin" not in response.json()["detail"]
+    for scope in ("personal", "organization"):
+        response = _post(
+            client, "/api/v1/plugins/", ctx["headers"], {**body, "scope": scope}
+        )
+        assert response.status_code == 400
+        assert "builtin" not in response.json()["detail"]
     assert not Plugin.objects.filter(organization=ctx["org"]).exists()
+    assert not Plugin.objects.filter(owner=ctx["user"]).exists()
 
 
 @pytest.mark.django_db

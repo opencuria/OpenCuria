@@ -25,9 +25,11 @@ final class AppRuntimeDelegate: RCTDefaultReactNativeFactoryDelegate {
  Runs one installed app full screen in its own React instance, like an Expo Go
  experience: its JavaScript bundle from local storage, every native module
  from OpenCuria. The instance ends with this controller. Shaking, a
- three-finger long press and the floating menu button open the app menu, each
- as switched on there (`AppMenuTriggers`); a note at the bottom says how when
- the app opens.
+ three-finger long press and the floating menu button open the app companion
+ (`AppCompanionHost`: OpenCuria's chat for the app's workspace and
+ recordings), each as switched on (`AppMenuTriggers`); a note at the bottom
+ says how when the app opens. Without OpenCuria's factory the native app menu
+ shows instead.
  */
 final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationControllerDelegate {
   /// How long the close note waits for the app's first screen.
@@ -59,6 +61,17 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
     self?.showMenu()
   }
 
+  private lazy var companion = AppCompanionHost(launch: launch)
+
+  private lazy var touchObserver: AppTouchObserver = {
+    let observer = AppTouchObserver(target: nil, action: nil)
+    observer.onTouch = { [weak self] touch, phase in
+      guard let self, let content = self.rootView else { return }
+      AppRecorder.shared.touch(touch, phase: phase, content: content, layer: self.companion.layer)
+    }
+    return observer
+  }()
+
   init(launch: AppLaunch) {
     self.launch = launch
     self.sandbox = AppSandbox(launch: launch)
@@ -86,11 +99,16 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
   override func viewDidLoad() {
     super.viewDidLoad()
     AppRuntimeViewController.current = self
+    AppRecorder.shared.reset()
     AppGateway.open(launch.gateway)
     AppFileAccess.open(sandbox.files)
     view.backgroundColor = launch.backgroundColor ?? .systemBackground
     view.addGestureRecognizer(menuGesture)
+    view.addGestureRecognizer(touchObserver)
     view.addSubview(menuButton)
+    companion.layer.frame = view.bounds
+    companion.layer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    view.addSubview(companion.layer)
     triggersObserver = AppMenuTriggers.shared.$enabled.sink { [weak self] enabled in
       self?.applyTriggers(enabled)
     }
@@ -122,7 +140,8 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
   /// Arm the ways that open the app menu (`enabled` is the new value).
   private func applyTriggers(_ enabled: Set<AppMenuTrigger>) {
     menuGesture.isEnabled = enabled.contains(.threeFingerPress)
-    menuButton.isOn = enabled.contains(.button)
+    // The companion covers the button while it shows.
+    menuButton.isOn = enabled.contains(.button) && companion.layer.touchMode == .none
   }
 
   override var canBecomeFirstResponder: Bool {
@@ -176,6 +195,9 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
     }
     let files = sandbox.files
     factory.canReadFile = { url in files.canRead(url) }
+    // Reports the app's logs and requests to the companion's recordings.
+    factory.inspectorScript = AppInspector.script
+    factory.onInspectorReport = { json in AppRecorder.shared.report(json) }
     factory.onFatalError = { [weak self] message in
       guard let self, self.instance == id else { return }
       self.showError(message)
@@ -224,6 +246,8 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
   }
 
   func close(animated: Bool = true) {
+    companion.destroy()
+    AppRecorder.shared.stop()
     stop()
     AppGateway.close(launch.gateway)
     AppFileAccess.close(sandbox.files)
@@ -277,6 +301,7 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
 
   private func showError(_ message: String) {
     guard isViewLoaded else { return }
+    AppRecorder.shared.reportFatal(message)
     stop()
     // Without React Native's stack and component stack, as on Android.
     let text = message
@@ -314,6 +339,10 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
   /// The app menu as a sheet: half height, pulled up to full height when needed.
   private func showMenu() {
     guard isViewLoaded, view.window != nil, presentedViewController == nil else { return }
+    if companion.isAvailable, companion.open() {
+      applyTriggers(AppMenuTriggers.shared.enabled)
+      return
+    }
     let menu = UIHostingController(rootView: AppMenuView(
       name: launch.name,
       icon: launch.iconPath.flatMap(UIImage.init(contentsOfFile:)),
@@ -342,6 +371,57 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
   /// The menu was swiped away.
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
     claimShake()
+  }
+
+  // MARK: App companion
+
+  /// Which touches the companion takes (`AppCompanionLayer`).
+  func setCompanionTouchMode(_ mode: String, regions: [Double]) {
+    companion.layer.setTouchMode(AppCompanionLayer.TouchMode(rawValue: mode) ?? .none, regions: regions)
+    applyTriggers(AppMenuTriggers.shared.enabled)
+    if companion.layer.touchMode == .none {
+      claimShake()
+    }
+  }
+
+  /// Reload, from the companion's menu.
+  func reloadFromCompanion() {
+    restart()
+  }
+
+  /// Start observing the app for a recording; the content's size in pixels.
+  func startObservation(id: String) throws -> [String: Any] {
+    try AppRecorder.shared.start(id: id)
+    let bounds = rootView?.bounds ?? view.bounds
+    let scale = view.window?.screen.scale ?? UIScreen.main.scale
+    return [
+      "width": Double(bounds.width * scale),
+      "height": Double(bounds.height * scale),
+      "platform": "ios"
+    ]
+  }
+
+  /// A frame of the app's content for the recording being observed.
+  func captureFrame(
+    index: Int,
+    previousFrameId: String?,
+    completion: @escaping (Result<[String: Any], Error>) -> Void
+  ) {
+    guard let content = rootView else {
+      completion(.failure(AppLaunchError.invalid("The app is not running.")))
+      return
+    }
+    AppRecorder.shared.capture(
+      content: content,
+      background: view.backgroundColor ?? .systemBackground,
+      index: index,
+      previousFrameId: previousFrameId,
+      completion: completion
+    )
+  }
+
+  func stopObservation() {
+    AppRecorder.shared.stop()
   }
 
   /// A small note at the bottom on how to close the app; it fades after a few seconds.

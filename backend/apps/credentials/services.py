@@ -74,23 +74,75 @@ class CredentialServiceSvc:
     def __init__(self) -> None:
         self.services = CredentialServiceRepository
 
-    def list_services(self, *, org_id: uuid.UUID | None = None):
-        """Return visible credential service definitions, including OAuth."""
+    def list_services(self, *, org_id: uuid.UUID | None = None, user=None):
+        """Return visible credential service definitions, including OAuth.
+
+        With *user*, their personal services are included.
+        """
         return (
             self.services.list_all()
             if org_id is None
-            else self.services.list_visible_to_org(org_id)
+            else self.services.list_visible_to_org(org_id, getattr(user, "id", None))
         )
 
-    def get_service(self, service_id: uuid.UUID, *, org_id: uuid.UUID | None = None):
+    def get_service(
+        self, service_id: uuid.UUID, *, org_id: uuid.UUID | None = None, user=None
+    ):
         """Return a single credential service or raise."""
         if org_id is not None:
-            svc = self.services.get_visible_by_id(service_id, org_id)
+            svc = self.services.get_visible_by_id(
+                service_id, org_id, getattr(user, "id", None)
+            )
         else:
             svc = self.services.get_by_id(service_id)
         if svc is None:
             raise NotFoundError("CredentialService", str(service_id))
         return svc
+
+    def create_secret_service(
+        self,
+        *,
+        name: str,
+        env_var_name: str,
+        owner=None,
+        organization_id: uuid.UUID | None = None,
+        description: str = "",
+    ):
+        """Create a plain secret (``env``) service for a plugin.
+
+        Personal (*owner*) or organization services; organization services
+        are activated right away. Name and slug get a numeric suffix when
+        taken in that scope.
+        """
+        env = re.sub(r"[^A-Z0-9_]", "_", (env_var_name or "").strip().upper())
+        if not env or not re.match(r"[A-Z_]", env[0]):
+            env = f"SECRET_{env}".rstrip("_")
+        base = slugify(name) or slugify(env) or "secret"
+        slug, index = base[:240], 2
+        while (
+            self.services.get_personal_by_slug(slug, owner.id)
+            if owner is not None
+            else self.services.get_org_by_slug(slug, organization_id)
+        ):
+            slug, index = f"{base[:236]}-{index}", index + 1
+        service = self.services.create(
+            name=name.strip()[:255] or env,
+            slug=slug,
+            description=description.strip(),
+            credential_type=CredentialType.ENV,
+            env_var_name=env,
+            target_path="",
+            label="",
+            organization_id=None if owner is not None else organization_id,
+            owner=owner,
+        )
+        if owner is None and organization_id is not None:
+            from .repositories import OrgCredentialServiceActivationRepository
+
+            OrgCredentialServiceActivationRepository.ensure_activated(
+                organization_id, [service.id]
+            )
+        return service
 
     def create_service(
         self,
@@ -308,7 +360,7 @@ class CredentialSvc:
         When ``org_id`` is given, the service must be visible in that org
         (global or org-owned); otherwise any existing service resolves.
         """
-        service = self._get_service_or_raise(service_id, org_id=org_id)
+        service = self._get_service_or_raise(service_id, org_id=org_id, user=user)
         self._assert_service_active(service, org_id)
         if service.credential_type == CredentialType.MCP_OAUTH:
             raise ValueError("MCP OAuth credentials must be created via OAuth connect")
@@ -344,6 +396,8 @@ class CredentialSvc:
     ):
         """Create an org-scoped credential. Caller must verify admin role."""
         service = self._get_service_or_raise(service_id, org_id=organization_id)
+        if service.owner_id is not None:
+            raise ValueError("Personal credential services take personal credentials")
         self._assert_service_active(service, organization_id)
         if service.credential_type == CredentialType.MCP_OAUTH:
             raise ValueError("MCP OAuth credentials must be created via OAuth connect")
@@ -389,6 +443,33 @@ class CredentialSvc:
         if not cred.public_key:
             raise NotFoundError("PublicKey", str(credential_id))
         return cred.public_key
+
+    def get_visible_credential(
+        self, credential_id: uuid.UUID, *, user, org_id: uuid.UUID
+    ) -> Credential:
+        """Return a credential the user may use in this org, or raise."""
+        cred = self.credentials.get_by_id(credential_id)
+        if (
+            cred is None
+            or cred.service.credential_type == CredentialType.PROVIDER_SECRET
+            or not self._is_visible(cred, user=user, org_id=org_id)
+        ):
+            raise NotFoundError("Credential", str(credential_id))
+        return cred
+
+    def list_by_ids(self, credential_ids: list[uuid.UUID]) -> list[Credential]:
+        """Load credentials (with service) for server-side resolution only."""
+        return self.credentials.list_by_ids(credential_ids)
+
+    def can_edit(self, credential, *, user, org_id: uuid.UUID, is_admin: bool) -> bool:
+        """Whether the user may change the credential's value."""
+        try:
+            self._assert_can_edit(
+                credential, user=user, org_id=org_id, is_admin=is_admin
+            )
+        except (AuthenticationError, NotFoundError):
+            return False
+        return True
 
     # -- Update -------------------------------------------------------------
 
@@ -587,6 +668,8 @@ class CredentialSvc:
             raise ConflictError("Workspace owner and organization are required")
         for credential in credentials:
             if credential.service.organization_id not in {None, org_id}:
+                raise NotFoundError("Credential", str(credential.id))
+            if credential.service.owner_id not in {None, user.id}:
                 raise NotFoundError("Credential", str(credential.id))
             if credential.user_id is not None:
                 if (
@@ -812,8 +895,11 @@ class CredentialSvc:
 
     @staticmethod
     def _assert_service_active(service, org_id: uuid.UUID | None) -> None:
-        """Require visible org services to be activated before new credentials."""
-        if org_id is None:
+        """Require visible org services to be activated before new credentials.
+
+        Personal services are always active for their owner.
+        """
+        if org_id is None or service.owner_id is not None:
             return
         from .repositories import OrgCredentialServiceActivationRepository
 
@@ -823,9 +909,11 @@ class CredentialSvc:
         if service.id not in active_ids:
             raise ValueError("Credential service is inactive for this organization")
 
-    def _get_service_or_raise(self, service_id: uuid.UUID, *, org_id=None):
+    def _get_service_or_raise(self, service_id: uuid.UUID, *, org_id=None, user=None):
         if org_id is not None:
-            service = self.service_repo.get_visible_by_id(service_id, org_id)
+            service = self.service_repo.get_visible_by_id(
+                service_id, org_id, getattr(user, "id", None)
+            )
         else:
             service = self.service_repo.get_by_id(service_id)
         if service is None:
@@ -845,6 +933,8 @@ class CredentialSvc:
     def _is_visible(self, credential, *, user, org_id: uuid.UUID) -> bool:
         """Return True if the credential is visible to the user in this org."""
         if credential.service.organization_id not in {None, org_id}:
+            return False
+        if credential.service.owner_id not in {None, user.id}:
             return False
         if credential.user_id is not None:
             return credential.user_id == user.id and credential.organization_id is None

@@ -67,6 +67,10 @@ def _platforms(sizes: dict[str, int]) -> list[str]:
         process. OpenCuria starts the process and workspace on demand and
         uses the port it listens on (`:<port>` picks one); such requests
         need the phone online.
+        Feedback: the user can record themselves using the app while talking;
+        the chat then gets a timeline.md with timestamped speech, taps,
+        screenshots and the app's logs. Give interactive elements a testID so
+        it names what was tapped.
         Build first, in project_path:
         `npx expo export --platform android --platform ios`
     """,

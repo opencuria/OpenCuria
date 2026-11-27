@@ -31,6 +31,7 @@ import type {
   NativeSegmentedPickerProps,
   OptionRowMetrics,
 } from "./selection.types";
+import { useInk } from "./ink";
 import { useTheme } from "./theme";
 
 /** A title3 symbol beside a body label (17 pt). */
@@ -43,16 +44,19 @@ export const OPTION_ROW: OptionRowMetrics = {
   lineHeight: 22,
 };
 
-/** UISegmentedControl for a few mutually exclusive, always visible choices. */
+/**
+ * UISegmentedControl for a few mutually exclusive, always visible choices; on
+ * glass it follows the glass's light or dark look.
+ */
 export function NativeSegmentedPicker(
   props: NativeSegmentedPickerProps,
 ): React.JSX.Element {
-  const { theme } = useTheme();
+  const ink = useInk();
   return (
     <Host
       matchContents={{ vertical: true }}
-      colorScheme={theme.scheme}
-      seedColor={theme.primary}
+      colorScheme={ink.scheme}
+      seedColor={ink.primary}
       ignoreSafeArea="all"
     >
       <Picker

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any
 from uuid import uuid4
@@ -22,6 +22,11 @@ from apps.plugins.runtime_snapshot import (
 from ..access.environment import ExecutionEnvironmentAccessor
 from ..access.guest import guest_of
 from ..agent_desktop import AgentDesktop
+from ..computer_use.session_host import (
+    HostAttachment,
+    connection_fingerprint,
+    session_hosts,
+)
 from ..tools.base import ToolRegistry
 from ..tools.desktop import DesktopTool
 from .connection import (
@@ -57,16 +62,78 @@ def _record_skip(
     )
 
 
-class McpRuntime:
-    """Owns one harness run's MCP connections (no cross-workspace pool)."""
+def _is_computer_use(plugin: Any, server: Any) -> bool:
+    """Whether *server* is the Computer Use REPL (managed desktop kind)."""
+    return server.tool_policy.get("desktop_kind") == "computeruse" or (
+        plugin.slug == "computer-use" and server.slug == "cua_repl"
+    )
 
-    def __init__(self, *, scope_enabled: bool = True) -> None:
+
+def _discard(callbacks: list[Any], callback: Any) -> None:
+    """Remove *callback* by identity if still registered."""
+    for index, item in enumerate(callbacks):
+        if item is callback:
+            del callbacks[index]
+            return
+
+
+@dataclass
+class _ServerEntry:
+    """A guest-resolved server with its rendered configuration for one run."""
+
+    plugin: Any
+    server: Any
+    env: dict[str, str] = field(repr=False)
+    headers: dict[str, str] = field(repr=False)
+    oauth_credential_id: Any = field(default=None, repr=False)
+
+
+@dataclass
+class RuntimeChange:
+    """What a mid-run :meth:`McpRuntime.refresh` changed."""
+
+    added_tools: list[str] = field(default_factory=list)
+    removed_tools: list[str] = field(default_factory=list)
+    failed: list[dict[str, str]] = field(default_factory=list)
+    #: Servers that only change with the next message (managed desktop).
+    deferred: list[str] = field(default_factory=list)
+    #: Tools of edited servers that were reopened under the same names.
+    restarted_tools: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(
+            self.added_tools
+            or self.removed_tools
+            or self.failed
+            or self.deferred
+            or self.restarted_tools
+        )
+
+
+class McpRuntime:
+    """Owns one harness run's MCP connections (no cross-workspace pool).
+
+    The chat's Computer Use connection and desktop are borrowed from its kept
+    host (:mod:`apps.harness.computer_use.session_host`) when *session_host*
+    is set; the run detaches instead of closing them.
+    """
+
+    def __init__(
+        self, *, scope_enabled: bool = True, session_host: bool = True
+    ) -> None:
         self._stack = AsyncExitStack()
         self.connections: list[McpServerConnection] = []
         self.skipped: list[dict[str, str]] = []
         self.desktop: AgentDesktop | None = None
         self.agent_scopes: DesktopAgentScopes | None = None
         self._scope_enabled = scope_enabled
+        self._session_host = session_host
+        #: server ID -> version of every server this run attempted to open.
+        self._known: dict[Any, str] = {}
+        #: Live servers added mid-run, one child runtime each, by server ID.
+        self._children: dict[Any, McpRuntime] = {}
+        #: Every child in creation order (live and retired); closed in reverse.
+        self._child_order: list[McpRuntime] = []
 
     async def execution_accessor(self, accessor: Any) -> Any:
         """Give all three engines the binding before their processes start."""
@@ -98,12 +165,20 @@ class McpRuntime:
         including servers with duplicate normalized names within their own
         discovery result or collisions with already-kept names (first server
         wins deterministically, the colliding server is closed and skipped).
+        With a *session_id*, the Computer Use server and the run's desktop come
+        from the chat's kept host unless another run of the chat holds it.
         """
         snapshot = prepared.snapshot
         guest = guest_of(accessor)
+        self._known.update(
+            {
+                server.id: server.updated_at
+                for plugin in snapshot.plugins
+                for server in plugin.mcp_servers
+            }
+        )
         computer_use_declared = any(
-            server.tool_policy.get("desktop_kind") == "computeruse"
-            or (plugin.slug == "computer-use" and server.slug == "cua_repl")
+            _is_computer_use(plugin, server)
             for plugin in snapshot.plugins
             for server in plugin.mcp_servers
             if server.resources.desktop is not None and server.runs_on(guest.name)
@@ -120,87 +195,77 @@ class McpRuntime:
                     runtime_options=runtime_options,
                 )
             )
+        keep = self._session_host and bool(session_id)
+        if keep and not computer_use_declared:
+            # Computer Use was removed from the workspace: drop the kept REPL.
+            await session_hosts.close_idle(session_id, reason="server_removed")
         if not snapshot.plugins:
             return
         owner_id = owner_id or str(uuid4())
         owner_task = asyncio.current_task()
+        run_context = {
+            "session_id": session_id,
+            "turn_id": turn_id or owner_id,
+            **dict(runtime_options or {}),
+        }
         await self._stack.__aenter__()
         try:
-            seen: set[str] = set()
-            core = {str(name).strip().lower() for name in (core_tool_names or [])}
-            for plugin in snapshot.plugins:
-                plaintexts = prepared.plaintexts_for(plugin.id)
-                for configured in plugin.mcp_servers:
-                    try:
-                        server = configured.for_guest(guest.name)
-                    except McpServerUnavailableError as exc:
-                        _record_skip(
-                            self.skipped,
-                            plugin=plugin.slug,
-                            server=configured.slug,
-                            error=exc,
-                        )
-                        continue
-                    try:
-                        rendered_env, rendered_headers = (
-                            plugin_runtime.render_server_config(
-                                plugin, server, plaintexts
-                            )
-                        )
-                    except plugin_runtime.PluginCredentialConfigError:
-                        raise
-                    except Exception as exc:
-                        _record_skip(
-                            self.skipped,
-                            plugin=plugin.slug,
-                            server=server.slug,
-                            error=exc,
-                        )
-                        continue
-                    oauth_credential_id = prepared.oauth_credentials.get(server.id)
-                    if server.auth_type == "oauth" and not oauth_credential_id:
-                        _record_skip(
-                            self.skipped,
-                            plugin=plugin.slug,
-                            server=server.slug,
-                            error=McpServerHealthError(
-                                "MCP OAuth credential is disconnected"
-                            ),
-                        )
-                        continue
-                    connection = McpServerConnection(
-                        plugin_id=plugin.id,
-                        plugin_slug=plugin.slug,
-                        plugin_name=plugin.name,
-                        server_id=server.id,
-                        server_slug=server.slug,
-                        server_name=server.name,
-                        transport=server.transport,
-                        tool_policy=dict(server.tool_policy),
-                        run_context={
-                            "session_id": session_id,
-                            "turn_id": turn_id or owner_id,
-                            **dict(runtime_options or {}),
-                        },
-                        command=(
-                            [server.command, *list(server.args)]
-                            if (server.transport or "").lower() == "stdio"
-                            else []
-                        ),
-                        cwd=server.cwd or "/workspace",
-                        env=rendered_env,
-                        url=server.url or "",
-                        headers=rendered_headers,
-                        oauth_credential_id=oauth_credential_id,
-                        oauth_service_id=server.oauth_service_id,
+            entries = self._resolve_servers(prepared, guest.name)
+            kept_entry = (
+                next(
+                    (
+                        entry
+                        for entry in entries
+                        if entry.server.resources.desktop is not None
+                        and _is_computer_use(entry.plugin, entry.server)
+                    ),
+                    None,
+                )
+                if keep
+                else None
+            )
+            attachment: HostAttachment | None = None
+            if kept_entry is not None:
+                try:
+                    attachment = await self._attach_host(
+                        kept_entry,
+                        accessor=accessor,
                         workspace_id=snapshot.workspace_id,
                         organization_id=snapshot.organization_id,
-                        startup_timeout_seconds=float(
-                            server.startup_timeout_seconds or 30
-                        ),
-                        request_timeout_seconds=float(
-                            server.request_timeout_seconds or 60
-                        ),
+                        session_id=session_id,
+                        recording_owner=owner_id,
+                        task=owner_task,
+                        run_context=run_context,
+                    )
+                except Exception as exc:
+                    _record_skip(
+                        self.skipped,
+                        plugin=kept_entry.plugin.slug,
+                        server=kept_entry.server.slug,
+                        error=exc,
+                    )
+                    entries = [entry for entry in entries if entry is not kept_entry]
+                if attachment is None:
+                    # Busy (another run of this chat) or failed: per-run path.
+                    kept_entry = None
+                else:
+                    self.desktop = attachment.host.desktop
+                    # Detach only after every per-run connection has closed.
+                    self._stack.push_async_callback(attachment.detach)
+            seen: set[str] = set()
+            core = {str(name).strip().lower() for name in (core_tool_names or [])}
+            for entry in entries:
+                plugin, server = entry.plugin, entry.server
+                kept = entry is kept_entry
+                if kept:
+                    assert attachment is not None
+                    connection = attachment.host.connection
+                else:
+                    connection = self._new_connection(
+                        entry,
+                        workspace_id=snapshot.workspace_id,
+                        organization_id=snapshot.organization_id,
+                        run_context=run_context,
                     )
                     desktop = getattr(
                         getattr(server, "resources", None), "desktop", None
@@ -267,40 +332,47 @@ class McpRuntime:
                         except Exception:  # pragma: no cover - best effort
                             pass
                         continue
-                    try:
-                        tools = self._tools_for_connection(connection)
-                        names = [tool.name for tool in tools]
-                        lowered = [name.strip().lower() for name in names]
-                        # Validate this server's names together before registering
-                        # any of them, as well as against core + kept servers.
-                        check_name_collisions(names, existing=[*core, *seen])
-                    except McpServerHealthError:
-                        # Deterministic: keep the first server that claimed a
-                        # name; skip + close the colliding server. This also
-                        # rejects aliases created by name normalization within
-                        # one server, without dropping any other connection.
+                try:
+                    tools = self._tools_for_connection(connection)
+                    names = [tool.name for tool in tools]
+                    lowered = [name.strip().lower() for name in names]
+                    # Validate this server's names together before registering
+                    # any of them, as well as against core + kept servers.
+                    check_name_collisions(names, existing=[*core, *seen])
+                except McpServerHealthError:
+                    # Deterministic: keep the first server that claimed a
+                    # name; skip + close the colliding server. This also
+                    # rejects aliases created by name normalization within
+                    # one server, without dropping any other connection.
+                    # A kept connection stays open for the chat's next run.
+                    _record_skip(
+                        self.skipped,
+                        plugin=plugin.slug,
+                        server=server.slug,
+                        error=McpServerHealthError(
+                            "MCP tool name collision; server skipped"
+                        ),
+                    )
+                    if not kept:
                         connection.healthy = False
-                        _record_skip(
-                            self.skipped,
-                            plugin=plugin.slug,
-                            server=server.slug,
-                            error=McpServerHealthError(
-                                "MCP tool name collision; server skipped"
-                            ),
-                        )
                         try:
                             await connection.aclose()
                         except Exception:  # pragma: no cover - best effort
                             pass
-                        continue
-                    connection.harness_tools = tools
-                    if connection.agent_desktop is not None:
-                        connection.agent_desktop.before_stop.append(
-                            connection.stop_desktop_work
+                    continue
+                connection.harness_tools = tools
+                if connection.agent_desktop is not None and not kept:
+                    stop_work = connection.stop_desktop_work
+                    connection.agent_desktop.before_stop.append(stop_work)
+                    if attachment is not None:
+                        # The kept desktop outlives this run's connections.
+                        self._stack.callback(
+                            _discard, connection.agent_desktop.before_stop, stop_work
                         )
-                    self.connections.append(connection)
+                self.connections.append(connection)
+                if not kept:
                     self._stack.push_async_callback(connection.aclose)
-                    seen.update(lowered)
+                seen.update(lowered)
             if self.skipped:
                 log.warning(
                     "mcp_discovery_health",
@@ -314,6 +386,247 @@ class McpRuntime:
                 pass
             self.connections = []
             raise
+
+    def _resolve_servers(
+        self, prepared: PreparedPluginRuntime, guest_name: str
+    ) -> list[_ServerEntry]:
+        """Resolve guest overrides and credentials; record unusable servers."""
+        entries: list[_ServerEntry] = []
+        for plugin in prepared.snapshot.plugins:
+            plaintexts = prepared.plaintexts_for(plugin.id)
+            for configured in plugin.mcp_servers:
+                try:
+                    server = configured.for_guest(guest_name)
+                except McpServerUnavailableError as exc:
+                    _record_skip(
+                        self.skipped,
+                        plugin=plugin.slug,
+                        server=configured.slug,
+                        error=exc,
+                    )
+                    continue
+                try:
+                    rendered_env, rendered_headers = (
+                        plugin_runtime.render_server_config(plugin, server, plaintexts)
+                    )
+                except plugin_runtime.PluginCredentialConfigError:
+                    raise
+                except Exception as exc:
+                    _record_skip(
+                        self.skipped, plugin=plugin.slug, server=server.slug, error=exc
+                    )
+                    continue
+                oauth_credential_id = prepared.oauth_credentials.get(server.id)
+                if server.auth_type == "oauth" and not oauth_credential_id:
+                    _record_skip(
+                        self.skipped,
+                        plugin=plugin.slug,
+                        server=server.slug,
+                        error=McpServerHealthError(
+                            "MCP OAuth credential is disconnected"
+                        ),
+                    )
+                    continue
+                entries.append(
+                    _ServerEntry(
+                        plugin=plugin,
+                        server=server,
+                        env=rendered_env,
+                        headers=rendered_headers,
+                        oauth_credential_id=oauth_credential_id,
+                    )
+                )
+        return entries
+
+    @staticmethod
+    def _new_connection(
+        entry: _ServerEntry,
+        *,
+        workspace_id: Any,
+        organization_id: Any,
+        run_context: dict[str, Any],
+    ) -> McpServerConnection:
+        """Build an unopened connection for *entry*."""
+        plugin, server = entry.plugin, entry.server
+        return McpServerConnection(
+            plugin_id=plugin.id,
+            plugin_slug=plugin.slug,
+            plugin_name=plugin.name,
+            server_id=server.id,
+            server_slug=server.slug,
+            server_name=server.name,
+            transport=server.transport,
+            tool_policy=dict(server.tool_policy),
+            run_context=dict(run_context),
+            command=(
+                [server.command, *list(server.args)]
+                if (server.transport or "").lower() == "stdio"
+                else []
+            ),
+            cwd=server.cwd or "/workspace",
+            env=dict(entry.env),
+            url=server.url or "",
+            headers=dict(entry.headers),
+            oauth_credential_id=entry.oauth_credential_id,
+            oauth_service_id=server.oauth_service_id,
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            startup_timeout_seconds=float(server.startup_timeout_seconds or 30),
+            request_timeout_seconds=float(server.request_timeout_seconds or 60),
+        )
+
+    async def _attach_host(
+        self,
+        entry: _ServerEntry,
+        *,
+        accessor: Any,
+        workspace_id: Any,
+        organization_id: Any,
+        session_id: str,
+        recording_owner: str,
+        task: asyncio.Task | None,
+        run_context: dict[str, Any],
+    ) -> HostAttachment | None:
+        """Borrow the chat's kept Computer Use host, starting one if needed."""
+        server = entry.server
+        connection = self._new_connection(
+            entry,
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            run_context=run_context,
+        )
+        connection.desktop_activation = server.resources.desktop.activation
+        fingerprint = connection_fingerprint(
+            connection,
+            server_version=server.updated_at,
+            runtime_artifact=dict(server.runtime_artifact or {}),
+        )
+
+        async def open_connection(kept: McpServerConnection) -> None:
+            if server.runtime_artifact:
+                artifact = await accessor.ensure_runtime_artifact(
+                    server.runtime_artifact["id"],
+                    server.runtime_artifact["version"],
+                )
+                kept.command = [artifact["path"], *list(server.args)]
+            await kept.open(accessor)
+            # A broken tool contract must not be kept for later runs.
+            kept.model_tools()
+
+        return await session_hosts.attach(
+            session_id=session_id,
+            workspace_id=str(workspace_id),
+            connection=connection,
+            fingerprint=fingerprint,
+            accessor=accessor,
+            open_connection=open_connection,
+            run_context=run_context,
+            recording_owner=recording_owner,
+            task=task,
+        )
+
+    def _connection_for(self, server_id: Any) -> McpServerConnection | None:
+        """The live (not retired) connection of *server_id*, if any."""
+        for connection in self.connections:
+            if connection.server_id == server_id and connection.healthy:
+                return connection
+        child = self._children.get(server_id)
+        return child.connections[0] if child and child.connections else None
+
+    async def refresh(
+        self,
+        *,
+        prepared: PreparedPluginRuntime,
+        accessor: Any,
+        registry: ToolRegistry,
+        session_id: str = "",
+        turn_id: str = "",
+        runtime_options: dict[str, Any] | None = None,
+    ) -> RuntimeChange:
+        """Apply plugin changes made while the run is going.
+
+        Servers that are new or changed (by ``updated_at``) are opened and
+        their tools registered in *registry*; servers that disappeared are
+        retired: their tools are unregistered at once, their connections
+        close with the run. Connections nest anyio cancel scopes in the run's
+        task and must close in reverse opening order, so none is closed out
+        of order mid-run. Each server is attempted once per version, so a
+        broken server is not retried every step. Managed desktop servers keep
+        their state until the next message.
+        """
+        change = RuntimeChange()
+        desired = {
+            server.id: (plugin, server)
+            for plugin in prepared.snapshot.plugins
+            for server in plugin.mcp_servers
+        }
+        for server_id, version in list(self._known.items()):
+            entry = desired.get(server_id)
+            if entry is not None and entry[1].updated_at == version:
+                continue
+            connection = self._connection_for(server_id)
+            if connection is not None and connection.agent_desktop is not None:
+                change.deferred.append(connection.server_name)
+                continue
+            if connection is not None:
+                for tool in connection.harness_tools:
+                    if registry.unregister(tool.name) is not None:
+                        change.removed_tools.append(tool.name)
+                # Retired: never registered again, closed with the run.
+                connection.healthy = False
+            self._children.pop(server_id, None)
+            del self._known[server_id]
+        for server_id, (plugin, server) in desired.items():
+            if server_id in self._known:
+                continue
+            if server.resources.desktop is not None:
+                change.deferred.append(server.name)
+                continue
+            self._known[server_id] = server.updated_at
+            child = McpRuntime(scope_enabled=False, session_host=False)
+            delta = replace(
+                prepared,
+                snapshot=replace(
+                    prepared.snapshot,
+                    plugins=(replace(plugin, mcp_servers=(server,)),),
+                ),
+            )
+            try:
+                await child.setup(
+                    prepared=delta,
+                    accessor=accessor,
+                    core_tool_names=registry.names(),
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    runtime_options=runtime_options,
+                )
+            except Exception as exc:
+                _record_skip(
+                    change.failed, plugin=plugin.slug, server=server.slug, error=exc
+                )
+                await child.aclose()
+                continue
+            change.failed.extend(child.skipped)
+            if not child.connections:
+                await child.aclose()
+                continue
+            self._children[server_id] = child
+            self._child_order.append(child)
+            change.added_tools.extend(child.register_tools(registry))
+        # A restarted server keeps its tool names: report neither side.
+        restarted = set(change.added_tools) & set(change.removed_tools)
+        change.restarted_tools = [n for n in change.added_tools if n in restarted]
+        change.added_tools = [n for n in change.added_tools if n not in restarted]
+        change.removed_tools = [n for n in change.removed_tools if n not in restarted]
+        if change:
+            log.info(
+                "mcp_runtime_refreshed",
+                added=len(change.added_tools),
+                removed=len(change.removed_tools),
+                failed=change.failed,
+                deferred=change.deferred,
+            )
+        return change
 
     @staticmethod
     def _tools_for_connection(connection: McpServerConnection) -> list[McpTool]:
@@ -374,6 +687,8 @@ class McpRuntime:
             await self.agent_scopes.aclose()
         for connection in self.connections:
             await connection.finish()
+        for child in self._child_order:
+            await child.finish()
         paths = [
             connection.recording_path
             for connection in self.connections
@@ -395,6 +710,14 @@ class McpRuntime:
                 "in this workspace and check its runtime health."
             )
 
+    async def close_children(self) -> None:
+        """Close servers added mid-run, newest first (in the task that opened
+        them; see :class:`apps.harness.mcp_client.reload.PluginReloader`)."""
+        children, self._child_order = self._child_order, []
+        self._children = {}
+        for child in reversed(children):
+            await child.aclose()
+
     async def aclose(self) -> None:
         """Close all connections (idempotent, never raises).
 
@@ -408,6 +731,7 @@ class McpRuntime:
                 if self.agent_scopes is not None:
                     await self.agent_scopes.aclose()
             finally:
+                await self.close_children()
                 await self._stack.aclose()
         except Exception:  # pragma: no cover - best effort
             log.warning("mcp_runtime_close_failed")
@@ -442,8 +766,15 @@ async def _open_desktop_scope(
     turn_id: str,
     runtime_options: dict[str, Any] | None,
 ) -> AsyncIterator[DesktopScopeResources]:
-    """Compose one child runtime, including same-task, shielded MCP teardown."""
-    runtime = McpRuntime(scope_enabled=False)
+    """Compose one child runtime and tear it down in the task that opened it.
+
+    ``setup`` leaves the SDK sessions' cancel scopes entered in this task, and
+    anyio exits scopes strictly in reverse order. Only finalization, which
+    exits no scope, is shielded so that a cancelled actor still confirms its
+    recordings. ``aclose`` then unwinds the SDK scopes with no scope stacked
+    on top of them; the release RPCs it runs shield themselves.
+    """
+    runtime = McpRuntime(scope_enabled=False, session_host=False)
     resources = DesktopScopeResources(ToolRegistry())
     try:
         await runtime.setup(
@@ -458,8 +789,8 @@ async def _open_desktop_scope(
         runtime.register_tools(resources.tools)
         yield resources
     finally:
-        with anyio.CancelScope(shield=True):
-            try:
+        try:
+            with anyio.CancelScope(shield=True):
                 resources.recordings.extend(await runtime.finish())
-            finally:
-                await runtime.aclose()
+        finally:
+            await runtime.aclose()

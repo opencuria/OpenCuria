@@ -1,22 +1,23 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Pencil, Plus, Puzzle, Trash2 } from '@lucide/vue'
+import {
+  ArrowLeft,
+  BookText,
+  ChevronRight,
+  Globe,
+  KeyRound,
+  Lock,
+  Pencil,
+  Plus,
+  Puzzle,
+  Terminal,
+  Trash2,
+} from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
-import DetailHeader from '@/components/common/DetailHeader.vue'
-import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import EmptyState from '@/components/common/EmptyState.vue'
-import SettingsSection from './SettingsSection.vue'
-import PluginEditorDialog from './PluginEditorDialog.vue'
-import { usePluginStore } from '@/stores/plugins'
-import { useAuthStore } from '@/stores/auth'
-import {
-  canTogglePlugin,
-  pluginAvailability,
-  type Plugin,
-} from '@opencuria/chat-core/plugins'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   Dialog,
   DialogContent,
@@ -25,6 +26,28 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import CopyButton from '@/components/common/CopyButton.vue'
+import DetailHeader from '@/components/common/DetailHeader.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import SettingsSection from './SettingsSection.vue'
+import PluginEditorDialog from './PluginEditorDialog.vue'
+import { usePluginStore } from '@/stores/plugins'
+import { useAuthStore } from '@/stores/auth'
+import {
+  PLUGIN_SCOPES,
+  canTogglePlugin,
+  credentialSourceLabel,
+  mcpEndpoint,
+  mcpTransportLabel,
+  pluginAvailability,
+  pluginContents,
+  pluginScopeLabel,
+  pluginsOfScope,
+  serverVariableList,
+  type Plugin,
+  type PluginScope,
+} from '@opencuria/chat-core/plugins'
 
 const props = defineProps<{ initialPluginId?: string; contextVersion?: number }>()
 const emit = defineEmits<{ 'detail-change': [open: boolean] }>()
@@ -54,6 +77,19 @@ const editingPlugin = ref<Plugin | null>(null)
 const deletingPlugin = ref<Plugin | null>(null)
 const deleting = ref(false)
 const expandedSkills = ref<string[]>([])
+
+const SECTION_TITLES: Record<PluginScope, string> = {
+  personal: 'Your plugins',
+  organization: 'Organization',
+  builtin: 'Built-in',
+}
+const sections = computed(() =>
+  PLUGIN_SCOPES.map((scope) => ({
+    scope,
+    title: SECTION_TITLES[scope],
+    plugins: pluginsOfScope(pluginStore.plugins, scope),
+  })).filter((section) => section.scope === 'personal' || section.plugins.length),
+)
 
 watch(
   () => authStore.activeOrganizationId,
@@ -106,7 +142,9 @@ function createPlugin(): void {
   editingPlugin.value = null
   editorOpen.value = true
 }
-
+function onSaved(plugin: Plugin): void {
+  if (!editingPlugin.value) openPlugin(plugin)
+}
 async function handleToggle(plugin: Plugin, active: boolean): Promise<void> {
   await pluginStore.toggleActivation(plugin.id, active)
 }
@@ -116,69 +154,62 @@ async function handleDelete(): Promise<void> {
   const ok = await pluginStore.deletePlugin(deletingPlugin.value.id)
   deleting.value = false
   if (ok) {
-    selectedId.value = null
+    backToList()
     deletingPlugin.value = null
   }
 }
-function toggleSkill(id: string): void {
-  expandedSkills.value = expandedSkills.value.includes(id)
-    ? expandedSkills.value.filter((entry) => entry !== id)
-    : [...expandedSkills.value, id]
+function setSkillOpen(id: string, value: boolean): void {
+  expandedSkills.value = value
+    ? [...expandedSkills.value, id]
+    : expandedSkills.value.filter((entry) => entry !== id)
 }
-function mcpEndpoint(server: Plugin['mcp_servers'][number]): string {
-  return server.transport === 'stdio'
-    ? [server.command, ...server.args].filter(Boolean).join(' ')
-    : server.url
-}
-
-function transportLabel(transport: string): string {
-  if (transport === 'builtin') return 'Built-in'
-  return transport === 'streamable_http'
-    ? 'Streamable HTTP'
-    : transport === 'stdio'
-      ? 'STDIO'
-      : transport.toUpperCase()
-}
-
-function credentialTypeLabel(type: string): string {
-  return type === 'mcp_oauth' ? 'OAuth' : type.toUpperCase()
+/** "Not released" or "Unpublished" for admins; nothing when usable. */
+function availabilityNote(plugin: Plugin): string {
+  if (!isAdmin.value || plugin.scope === 'personal') return ''
+  const status = pluginAvailability(plugin)
+  return status === 'Available' ? '' : status
 }
 </script>
 
 <template>
   <div class="min-w-0 space-y-6">
-    <div v-if="detailOpen && selectedPlugin" class="min-w-0 space-y-5" data-testid="plugin-detail">
+    <div v-if="detailOpen && selectedPlugin" class="min-w-0 space-y-6" data-testid="plugin-detail">
       <DetailHeader
         :title="selectedPlugin.name"
-        back-label="Back to plugins"
+        back-label="Plugins"
         :icon="Puzzle"
         :description="selectedPlugin.description"
         @back="backToList"
       >
         <template #meta>
-          <span v-if="isAdmin" class="inline-flex items-center gap-1.5"
-            ><span
-              class="size-1.5 rounded-full"
-              :class="selectedPlugin.org_enabled ? 'bg-success' : 'bg-muted-foreground'"
-            />{{ pluginAvailability(selectedPlugin) }}</span
-          >
-          <span>{{ selectedPlugin.is_global ? 'Global' : 'Organization' }}</span>
+          <span>{{ pluginScopeLabel(selectedPlugin.scope) }}</span>
+          <span v-if="pluginContents(selectedPlugin)" aria-hidden="true">·</span>
+          <span v-if="pluginContents(selectedPlugin)">{{ pluginContents(selectedPlugin) }}</span>
         </template>
-        <template v-if="isAdmin" #actions>
-          <Switch
-            :model-value="selectedPlugin.org_enabled"
-            :disabled="
-              !canTogglePlugin(selectedPlugin) || pluginStore.togglingIds.includes(selectedPlugin.id)
-            "
-            :aria-label="
-              selectedPlugin.org_enabled
-                ? `Disable ${selectedPlugin.name}`
-                : `Enable ${selectedPlugin.name}`
-            "
-            :data-testid="`plugin-toggle-${selectedPlugin.id}`"
-            @update:model-value="(value) => handleToggle(selectedPlugin!, Boolean(value))"
-          />
-          <template v-if="!selectedPlugin.is_global">
+        <template #actions>
+          <label
+            v-if="isAdmin && selectedPlugin.scope !== 'personal'"
+            class="flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs"
+          >
+            <span>{{
+              selectedPlugin.org_enabled ? 'Available to members' : 'Not released'
+            }}</span>
+            <Switch
+              :model-value="selectedPlugin.org_enabled"
+              :disabled="
+                !canTogglePlugin(selectedPlugin) ||
+                pluginStore.togglingIds.includes(selectedPlugin.id)
+              "
+              :aria-label="
+                selectedPlugin.org_enabled
+                  ? `Withdraw ${selectedPlugin.name}`
+                  : `Release ${selectedPlugin.name}`
+              "
+              :data-testid="`plugin-toggle-${selectedPlugin.id}`"
+              @update:model-value="(value) => handleToggle(selectedPlugin!, Boolean(value))"
+            />
+          </label>
+          <template v-if="selectedPlugin.editable">
             <Button
               variant="outline"
               size="sm"
@@ -187,8 +218,9 @@ function credentialTypeLabel(type: string): string {
               ><Pencil /> Edit</Button
             >
             <Button
-              variant="destructive"
+              variant="ghost"
               size="sm"
+              class="text-muted-foreground hover:text-destructive"
               data-testid="plugin-delete-detail"
               @click="deletingPlugin = selectedPlugin"
               ><Trash2 /> Delete</Button
@@ -197,109 +229,141 @@ function credentialTypeLabel(type: string): string {
         </template>
       </DetailHeader>
 
-      <section aria-label="Skills" class="space-y-2">
-        <h3 class="text-sm font-semibold">Skills ({{ selectedPlugin.skills.length }})</h3>
-        <div
-          v-if="!selectedPlugin.skills.length"
-          class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
-        >
-          No skills.
-        </div>
-        <div
-          v-for="skill in [...selectedPlugin.skills].sort((a, b) => a.position - b.position)"
-          :key="skill.id"
-          class="rounded-md border border-border"
-        >
-          <button
-            type="button"
-            class="flex w-full items-center justify-between gap-3 p-3 text-left text-sm font-medium"
-            :aria-expanded="expandedSkills.includes(skill.id)"
-            @click="toggleSkill(skill.id)"
-          >
-            <span>{{ skill.name }}</span
-            ><span class="text-xs text-muted-foreground">{{
-              expandedSkills.includes(skill.id) ? 'Hide' : 'Show'
-            }}</span>
-          </button>
-          <pre
-            v-if="expandedSkills.includes(skill.id)"
-            class="whitespace-pre-wrap break-words border-t border-border px-3 py-3 font-sans text-sm text-muted-foreground"
-            >{{ skill.body }}</pre
-          >
-        </div>
-      </section>
+      <p
+        v-if="!selectedPlugin.skills.length && !selectedPlugin.mcp_servers.length"
+        class="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground"
+      >
+        This plugin is empty.{{
+          selectedPlugin.editable ? ' Edit it to add skills or MCP servers.' : ''
+        }}
+      </p>
 
-      <section aria-label="MCP servers" class="space-y-2">
-        <h3 class="text-sm font-semibold">MCP servers ({{ selectedPlugin.mcp_servers.length }})</h3>
-        <div
-          v-if="!selectedPlugin.mcp_servers.length"
-          class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
-        >
-          No MCP servers.
-        </div>
-        <div
-          v-for="server in selectedPlugin.mcp_servers"
-          :key="server.id"
-          class="rounded-md border border-border p-3"
-        >
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="text-sm font-medium">{{ server.name }}</span
-            ><Badge variant="outline">{{ transportLabel(server.transport) }}</Badge
-            ><Badge v-if="server.auth_type === 'oauth'" variant="secondary">OAuth</Badge>
-          </div>
-          <p
-            v-if="mcpEndpoint(server)"
-            class="mt-1 break-all font-mono text-xs text-muted-foreground"
+      <SettingsSection v-if="selectedPlugin.skills.length" title="Skills" aria-label="Skills">
+        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <Collapsible
+            v-for="skill in [...selectedPlugin.skills].sort((a, b) => a.position - b.position)"
+            :key="skill.id"
+            :open="expandedSkills.includes(skill.id)"
+            @update:open="setSkillOpen(skill.id, $event)"
           >
-            {{ mcpEndpoint(server) }}
-          </p>
+            <CollapsibleTrigger
+              class="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            >
+              <BookText :size="16" class="mt-0.5 shrink-0 text-muted-foreground" />
+              <span class="min-w-0 flex-1">
+                <span class="block text-sm font-medium">{{ skill.name }}</span>
+                <span
+                  v-if="skill.description"
+                  class="mt-0.5 block text-sm text-muted-foreground"
+                  :class="expandedSkills.includes(skill.id) ? undefined : 'line-clamp-1'"
+                  >{{ skill.description }}</span
+                >
+              </span>
+              <ChevronRight
+                :size="15"
+                class="mt-0.5 shrink-0 text-muted-foreground transition-transform"
+                :class="expandedSkills.includes(skill.id) ? 'rotate-90' : undefined"
+              />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <pre
+                class="mx-4 mb-4 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground/90"
+                >{{ skill.body }}</pre
+              >
+            </CollapsibleContent>
+          </Collapsible>
         </div>
-      </section>
+      </SettingsSection>
 
-      <section aria-label="Credential services" class="space-y-2">
-        <h3 class="text-sm font-semibold">
-          Credential services ({{ selectedPlugin.credential_requirements.length }})
-        </h3>
-        <div
-          v-if="!selectedPlugin.credential_requirements.length"
-          class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
-        >
-          No credential services required.
-        </div>
-        <div
-          v-for="requirement in selectedPlugin.credential_requirements"
-          :key="requirement.id"
-          class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3"
-        >
-          <div class="min-w-0 space-y-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="text-sm font-medium">{{ requirement.service_name }}</span
-              ><Badge variant="outline">{{ credentialTypeLabel(requirement.credential_type) }}</Badge
-              ><Badge :variant="requirement.required ? 'secondary' : 'outline'">{{
-                requirement.required ? 'Required' : 'Optional'
-              }}</Badge>
+      <SettingsSection
+        v-if="selectedPlugin.mcp_servers.length"
+        title="MCP servers"
+        aria-label="MCP servers"
+      >
+        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <div v-for="server in selectedPlugin.mcp_servers" :key="server.id" class="px-4 py-3">
+            <div class="flex items-center gap-3">
+              <component
+                :is="server.transport === 'stdio' ? Terminal : Globe"
+                :size="16"
+                class="shrink-0 text-muted-foreground"
+              />
+              <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ server.name }}</span>
+              <Badge v-if="server.auth_type === 'oauth'" variant="secondary">OAuth</Badge>
+              <Badge variant="outline">{{ mcpTransportLabel(server.transport) }}</Badge>
             </div>
-            <p v-if="requirement.description" class="text-sm text-muted-foreground">
-              {{ requirement.description }}
-            </p>
+            <div
+              v-if="mcpEndpoint(server)"
+              class="mt-2 flex items-center gap-1 rounded-md bg-muted/50 pl-3 pr-1 ml-7"
+            >
+              <code class="min-w-0 flex-1 truncate py-1.5 font-mono text-xs">{{
+                mcpEndpoint(server)
+              }}</code>
+              <CopyButton :text="mcpEndpoint(server)" label="Copy" />
+            </div>
+            <div
+              v-if="serverVariableList(server).length"
+              class="mt-2 ml-7 flex flex-wrap gap-1.5"
+            >
+              <Badge
+                v-for="variable in serverVariableList(server)"
+                :key="variable.name"
+                variant="outline"
+                class="font-mono"
+                :title="variable.secret ? `${variable.name} comes from a credential` : undefined"
+                ><Lock v-if="variable.secret" />{{ variable.name }}</Badge
+              >
+            </div>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            :data-testid="`plugin-add-credential-${requirement.service_id}`"
-            @click="addCredential(requirement.service_id)"
-            >Add Credential</Button
-          >
         </div>
-      </section>
+      </SettingsSection>
+
+      <SettingsSection
+        v-if="selectedPlugin.credential_requirements.length"
+        title="Credentials"
+        aria-label="Credentials"
+      >
+        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <div
+            v-for="requirement in selectedPlugin.credential_requirements"
+            :key="requirement.id"
+            class="flex flex-wrap items-center gap-3 px-4 py-3"
+          >
+            <KeyRound :size="16" class="shrink-0 text-muted-foreground" />
+            <div class="min-w-0 flex-1">
+              <p class="text-sm font-medium">
+                {{ requirement.service_name }}
+                <span v-if="!requirement.required" class="text-xs font-normal text-muted-foreground"
+                  >· optional</span
+                >
+              </p>
+              <p class="text-xs text-muted-foreground" :data-testid="`plugin-credential-source-${requirement.key}`">
+                {{ credentialSourceLabel(requirement)
+                }}<template v-if="requirement.description">
+                  · {{ requirement.description }}</template
+                >
+              </p>
+            </div>
+            <Button
+              v-if="!requirement.credential_id"
+              size="sm"
+              variant="outline"
+              :data-testid="`plugin-add-credential-${requirement.service_id}`"
+              @click="addCredential(requirement.service_id)"
+              >Add credential</Button
+            >
+          </div>
+        </div>
+      </SettingsSection>
     </div>
+
     <SettingsSection
       v-else
-      description="Browse reusable skills and MCP server bundles available to this organization."
+      description="Plugins give your agents skills and tools (MCP servers). Enable them per workspace."
     >
-      <template v-if="isAdmin && !selectedPlugin" #actions>
+      <template #actions>
         <Button size="sm" data-testid="plugin-create" @click="createPlugin"
-          ><Plus /> New Plugin</Button
+          ><Plus /> New plugin</Button
         >
       </template>
 
@@ -328,57 +392,72 @@ function credentialTypeLabel(type: string): string {
           ><ArrowLeft /> Back to plugins</Button
         >
       </div>
-      <div
-        v-else-if="!pluginStore.plugins.length"
-        class="overflow-hidden rounded-lg border border-border bg-card"
-      >
-        <EmptyState
-          :icon="Puzzle"
-          title="No plugins yet"
-          description="Plugins available to this organization will appear here."
-        />
-      </div>
-      <div v-else class="grid gap-2 sm:grid-cols-2" data-testid="plugin-catalog">
-        <button
-          v-for="plugin in pluginStore.plugins"
-          :key="plugin.id"
-          type="button"
-          class="group flex min-h-28 flex-col items-start gap-2 rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          :data-testid="`plugin-open-${plugin.id}`"
-          @click="openPlugin(plugin)"
-        >
-          <div class="flex w-full items-center justify-between gap-2">
-            <span class="flex min-w-0 items-center gap-2 text-sm font-semibold"
-              ><Puzzle :size="16" class="shrink-0 text-muted-foreground" /><span class="truncate">{{
-                plugin.name
-              }}</span></span
-            ><Badge variant="outline">{{ plugin.is_global ? 'Global' : 'Organization' }}</Badge>
+      <div v-else class="space-y-6" data-testid="plugin-catalog">
+        <section v-for="section in sections" :key="section.scope" class="space-y-2">
+          <h4 class="text-xs font-medium text-muted-foreground">{{ section.title }}</h4>
+          <div
+            v-if="section.plugins.length"
+            class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+          >
+            <button
+              v-for="plugin in section.plugins"
+              :key="plugin.id"
+              type="button"
+              class="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              :data-testid="`plugin-open-${plugin.id}`"
+              @click="openPlugin(plugin)"
+            >
+              <span
+                class="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+                ><Puzzle :size="17"
+              /></span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center gap-2">
+                  <span class="truncate text-sm font-medium">{{ plugin.name }}</span>
+                  <Badge v-if="availabilityNote(plugin)" variant="outline">{{
+                    availabilityNote(plugin)
+                  }}</Badge>
+                </span>
+                <span
+                  v-if="plugin.description"
+                  class="mt-0.5 block truncate text-xs text-muted-foreground"
+                  >{{ plugin.description }}</span
+                >
+              </span>
+              <span class="hidden shrink-0 text-xs text-muted-foreground sm:block">{{
+                pluginContents(plugin) || 'Empty'
+              }}</span>
+              <ChevronRight :size="15" class="shrink-0 text-muted-foreground" />
+            </button>
           </div>
-          <p class="line-clamp-2 text-sm text-muted-foreground">
-            {{ plugin.description || 'No description provided.' }}
-          </p>
-          <div class="mt-auto flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            <Badge v-if="isAdmin" :variant="plugin.org_enabled ? 'secondary' : 'outline'">{{ pluginAvailability(plugin) }}</Badge>
-            <span>{{ plugin.skills.length }} {{ plugin.skills.length === 1 ? 'skill' : 'skills' }} ·</span>
-            <span>{{ plugin.mcp_servers.length }} {{ plugin.mcp_servers.length === 1 ? 'MCP server' : 'MCP servers' }} ·</span>
-            <span>{{ plugin.credential_requirements.length }} {{ plugin.credential_requirements.length === 1 ? 'service' : 'services' }}</span>
+          <div
+            v-else
+            class="overflow-hidden rounded-lg border border-dashed border-border"
+          >
+            <EmptyState
+              :icon="Puzzle"
+              title="No plugins of your own yet"
+              description="Create one, or ask an agent to build a plugin for you."
+            >
+              <template #action>
+                <Button size="sm" variant="outline" data-testid="plugin-create-empty" @click="createPlugin"
+                  ><Plus /> New plugin</Button
+                >
+              </template>
+            </EmptyState>
           </div>
-        </button>
+        </section>
       </div>
     </SettingsSection>
 
-    <PluginEditorDialog v-if="isAdmin" v-model:open="editorOpen" :plugin="editingPlugin" />
-    <Dialog
-      v-if="isAdmin"
-      :open="!!deletingPlugin"
-      @update:open="(value) => !value && (deletingPlugin = null)"
-    >
+    <PluginEditorDialog v-model:open="editorOpen" :plugin="editingPlugin" @saved="onSaved" />
+    <Dialog :open="!!deletingPlugin" @update:open="(value) => !value && (deletingPlugin = null)">
       <DialogContent
         ><DialogHeader
-          ><DialogTitle>Delete Plugin</DialogTitle
+          ><DialogTitle>Delete plugin</DialogTitle
           ><DialogDescription
-            >Delete {{ deletingPlugin?.name }}? Its skills, MCP servers, and requirements will be
-            removed. This cannot be undone.</DialogDescription
+            >Delete {{ deletingPlugin?.name }}? Workspaces lose its skills and MCP servers. This
+            cannot be undone.</DialogDescription
           ></DialogHeader
         ><DialogFooter
           ><Button variant="outline" :disabled="deleting" @click="deletingPlugin = null"

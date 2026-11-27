@@ -18,7 +18,7 @@ type Execution = {
   finish: (error?: Error) => void;
 };
 
-/** Supervise one run's persistent worker without executing model code here. */
+/** Supervise one chat session's persistent worker without executing model code here. */
 export class Supervisor {
   private worker?: ChildProcess;
   private native?: NativeClient;
@@ -26,12 +26,26 @@ export class Supervisor {
   private ended = false;
   private finishing?: Promise<void>;
   private context?: RuntimeContext;
+  private endedTurns = new Set<string>();
 
   bindContext(context: RuntimeContext): void {
     if (!context.session_id || !context.turn_id) throw new CuaError('INVALID_CONTEXT', 'A backend session and turn identity are required');
-    if (this.context && (this.context.session_id !== context.session_id || this.context.turn_id !== context.turn_id)) throw new CuaError('INVALID_CONTEXT', 'A runtime cannot change its owning turn');
-    // Retain the first identity; execute also compares desktop generations.
+    // A runtime belongs to one chat session; its turns may change.
+    if (this.context && this.context.session_id !== context.session_id) throw new CuaError('INVALID_CONTEXT', 'A runtime cannot change its owning session');
     this.context ??= context;
+  }
+
+  /** End or interrupt a turn: running code stops, JS state stays for later turns. */
+  async endTurn(turnId: string, reason: string): Promise<void> {
+    if (reason === 'Stop' && turnId) {
+      this.endedTurns.add(turnId);
+      if (this.endedTurns.size > 256) this.endedTurns.delete(this.endedTurns.values().next().value as string);
+    }
+    const active = this.active;
+    if (active && (reason !== 'Stop' || active.context.turn_id === turnId)) {
+      active.finish(new CuaError('CANCELLED', 'JavaScript was cancelled because the turn ended; state was reset and effects may already have occurred', 'unknown'));
+    }
+    await this.finishing;
   }
 
   private startWorker(): ChildProcess {
@@ -63,7 +77,8 @@ export class Supervisor {
       if (!text) return;
       active.textBytes += Buffer.byteLength(text);
       const channel = active.textChannels.get(name);
-      if (channel) channel.text += text;
+      // Separate consecutive CUA observations (state, find, waitFor) by lines.
+      if (channel) channel.text += name?.startsWith('cua.') && channel.text && !channel.text.endsWith('\n') ? `\n${text}` : text;
       else {
         const block = { type: 'text' as const, text };
         active.textChannels.set(name, block);
@@ -107,7 +122,8 @@ export class Supervisor {
   }
 
   async execute(args: Record<string, unknown>, context: RuntimeContext, signal?: AbortSignal): Promise<CallToolResult> {
-    if (this.ended) return errorResult(new CuaError('TURN_ENDED', 'This runtime cannot resume an ended turn'));
+    if (this.ended) return errorResult(new CuaError('TURN_ENDED', 'This runtime has ended'));
+    if (this.endedTurns.has(context.turn_id)) return errorResult(new CuaError('TURN_ENDED', 'This runtime cannot resume an ended turn'));
     if (this.active || this.finishing) return errorResult(new CuaError('BUSY', 'Another JavaScript execution is active'));
     const code = args.code;
     const timeout = args.timeout_ms ?? DEFAULT_TIMEOUT_MS;
@@ -115,8 +131,17 @@ export class Supervisor {
     if (Buffer.byteLength(code) > MAX_CODE_BYTES) return errorResult(new CuaError('INVALID_ARGUMENT', 'code exceeds 64 KiB'));
     if (!Number.isSafeInteger(timeout) || (timeout as number) < 1 || (timeout as number) > MAX_TIMEOUT_MS) return errorResult(new CuaError('INVALID_ARGUMENT', 'timeout_ms must be a positive execution timeout'));
     if (!context.session_id || !context.turn_id) return errorResult(new CuaError('INVALID_CONTEXT', 'A backend session and turn identity are required'));
-    if (this.context && (this.context.session_id !== context.session_id || this.context.turn_id !== context.turn_id)) return errorResult(new CuaError('INVALID_CONTEXT', 'A runtime cannot change its owning turn'));
-    if (this.context && (this.context.generation !== context.generation || this.context.epoch !== context.epoch || this.context.input_generation !== context.input_generation)) await this.reset();
+    if (this.context && this.context.session_id !== context.session_id) return errorResult(new CuaError('INVALID_CONTEXT', 'A runtime cannot change its owning session'));
+    // A restarted display or runner closes every window: only the desktop
+    // driver restarts. Variables and helper functions stay; app bindings
+    // report that they must be bound again. Input ownership changes (another
+    // agent typed in between) keep everything.
+    let notice = '';
+    if (this.context && this.worker && (this.context.generation !== context.generation || this.context.epoch !== context.epoch)) {
+      await this.native?.close();
+      this.native = undefined;
+      notice = '[The desktop restarted since the previous call: its windows are new, so bind apps again with cua.getApp(...). Variables and functions are kept.]\n';
+    }
     this.context = context;
     const worker = this.startWorker();
     const startedAt = performance.now();
@@ -145,6 +170,10 @@ export class Supervisor {
               content: active.content.length ? active.content : [{ type: 'text', text: '' }],
               isError: false,
             };
+            // Keep what the code printed before it failed: the agent needs it.
+            if (error instanceof CuaError && ['JAVASCRIPT_ERROR', 'TIMEOUT'].includes(error.code) && active.content.length) {
+              result.content = [...active.content, ...result.content];
+            }
             result._meta = { ...result._meta, 'codex/nodeReplExecutionDurationMs': Math.round(performance.now() - startedAt) };
             if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) resolve(errorResult(new CuaError('OUTPUT_LIMIT', 'Computer use response exceeded 6 MiB', 'possible')));
             else resolve(result);
@@ -154,6 +183,7 @@ export class Supervisor {
       const cancel = () => active.finish(new CuaError('CANCELLED', 'JavaScript was cancelled; state was reset and effects may already have occurred', 'unknown'));
       const timer = setTimeout(() => active.finish(new CuaError('TIMEOUT', 'JavaScript timed out; state was reset and effects may already have occurred', 'unknown')), timeout as number);
       this.active = active;
+      if (notice) this.content(active, { type: 'text', text: notice }, 'cua.notice');
       if (signal?.aborted) { cancel(); return; }
       signal?.addEventListener('abort', cancel, { once: true });
       worker.send({ type: 'execute', id: active.id, code, timeout, context });

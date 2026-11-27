@@ -74,7 +74,6 @@ it("shows the profile, organization and every settings area like ChatGPT's setti
   for (const title of [
     "Provider & Models",
     "Agents",
-    "Skills",
     "Plugins",
     "Credentials",
     "Workspace policy",
@@ -112,7 +111,6 @@ it("shows members only the areas they can change something in", () => {
     ).toBeNull();
   for (const title of [
     "Provider & Models",
-    "Skills",
     "Plugins",
     "Credentials",
     "Captured images",
@@ -151,6 +149,22 @@ it("closes an admin-only page when the user is no longer an admin", async () => 
   );
   expect(await screen.findByText("Page unavailable")).toBeTruthy();
   expect(screen.queryByTestId("settings-policy")).toBeNull();
+});
+
+it("lets members create their own plugins", async () => {
+  const client = mockClient({
+    plugins: { list: jest.fn(async () => []) },
+    credentials: { listServices: jest.fn(async () => []) },
+  });
+  render(
+    <ThemeProvider>
+      <SettingsScreen {...screenProps("member")} client={client} />
+    </ThemeProvider>,
+  );
+  fireEvent.press(screen.getByRole("link", { name: /^Plugins/ }));
+  fireEvent.press(await screen.findByTestId("empty-new-plugin"));
+  expect(await screen.findByTestId("settings-plugin-editor")).toBeTruthy();
+  expect(screen.queryByText("Page unavailable")).toBeNull();
 });
 
 it("switches organizations from the card and confirms signing out", () => {

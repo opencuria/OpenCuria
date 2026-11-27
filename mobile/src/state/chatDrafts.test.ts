@@ -5,6 +5,8 @@ import {
   DRAFT_SAVE_DELAY_MS,
   MAX_SAVED_DRAFTS,
   SAVED_DRAFT_MAX_AGE_MS,
+  chatDraftStore,
+  retainChatDraftStore,
 } from "./chatDrafts";
 
 const NOW = Date.parse("2026-11-18T12:00:00Z");
@@ -109,5 +111,37 @@ describe("ChatDraftStore", () => {
     store.setItem("k", "text");
     await store.flush();
     expect(store.getItem("k")).toBe("text");
+  });
+});
+
+describe("chatDraftStore", () => {
+  it("gives every root of an account one store and tells them of edits", async () => {
+    const device = account();
+    const main = chatDraftStore(device);
+    const companion = chatDraftStore(device);
+    expect(companion).toBe(main);
+    const releaseMain = retainChatDraftStore(device, main);
+    const releaseCompanion = retainChatDraftStore(device, companion);
+    const changed = vi.fn();
+    const unsubscribe = main.subscribe(changed);
+    await main.ready;
+
+    companion.setItem("chat-input-w1-s1", "From the app");
+    expect(changed).toHaveBeenCalledWith("chat-input-w1-s1");
+    expect(main.getItem("chat-input-w1-s1")).toBe("From the app");
+    unsubscribe();
+
+    // The last release saves and forgets the store; the next user loads again.
+    releaseCompanion();
+    await Promise.resolve();
+    expect(chatDraftStore(device)).toBe(main);
+    releaseMain();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(device.saved.map((item) => item.text)).toEqual(["From the app"]);
+    expect(chatDraftStore(device)).not.toBe(main);
+  });
+
+  it("keeps drafts without an account apart per caller", () => {
+    expect(chatDraftStore(null)).not.toBe(chatDraftStore(null));
   });
 });

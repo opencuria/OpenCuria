@@ -1268,15 +1268,20 @@ async def test_execute_run_with_skills_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
     """start_run must keep skill-body ORM calls off the event loop."""
-    from apps.skills.models import Skill
+    from apps.plugins.models import OrgPluginActivation, Plugin, PluginSkill
 
     org_id = harness_workspace.runner.organization_id
     user_id = harness_workspace.created_by_id
-    skill = Skill.objects.create(
+    plugin = Plugin.objects.create(
+        name="Conventions", slug="conventions", organization_id=org_id
+    )
+    OrgPluginActivation.objects.create(organization_id=org_id, plugin=plugin)
+    skill = PluginSkill.objects.create(
+        plugin=plugin,
         name="Hints",
+        slug="hints",
+        description="Typing rules.",
         body="Always use type hints.",
-        organization_id=org_id,
-        created_by_id=user_id,
     )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
@@ -1319,6 +1324,7 @@ async def test_execute_run_with_skills_without_sync_orm(
     assert assistant.finish == "stop"
     assert assistant.content == "hello"
     assert captured
+    assert captured[0][0].startswith('---\nname: hints\ndescription: "Typing rules."')
     assert "Always use type hints." in captured[0][0]
 
 

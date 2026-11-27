@@ -9,7 +9,7 @@ import {
 } from "react-native-safe-area-context";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ThemeProvider, useTheme } from "../src/ui/theme";
-import { SessionProvider } from "../src/screens/SessionContext";
+import { SessionScope } from "../src/screens/SessionContext";
 import { NotificationProvider } from "../src/notifications/NotificationContext";
 import { ToastHost } from "../src/ui/ToastHost";
 import { AppsWidgetProvider } from "../src/widgets/AppsWidgetProvider";
@@ -21,7 +21,7 @@ export default function RootLayout(): React.JSX.Element {
         <KeyboardProvider>
           <ThemeProvider initialMode="system" persist>
             <NativeStatusBar />
-            <SessionProvider>
+            <SessionScope>
               <NotificationProvider>
                 <AppsWidgetProvider>
                   <Stack
@@ -32,7 +32,7 @@ export default function RootLayout(): React.JSX.Element {
                   <ToastHost />
                 </AppsWidgetProvider>
               </NotificationProvider>
-            </SessionProvider>
+            </SessionScope>
           </ThemeProvider>
         </KeyboardProvider>
       </SafeAreaProvider>

@@ -63,6 +63,8 @@ from .runtime_state import (
     ClaudeRuntimeState,
     validate_claude_skills,
 )
+from .sdk_server import DynamicSdkServer
+from .servers import PLUGIN_SERVER_NAME, SERVER_NAME
 from .transcript_media import strip_transcript_media
 from .transport import ClaudeWorkspaceTransport
 
@@ -151,6 +153,11 @@ class ClaudeEngine:
         self._agent: AgentDefinition | None = None
         self._bridge: PermissionBridge | None = None
         self._mode = "build"
+        self._client: Any = None
+        self._plugin_server: DynamicSdkServer | None = None
+        self._sdk_calls_in_flight: dict[str, int] = {}
+        self._plugin_tools_pending = False
+        self._sdk_server_tools: dict[str, dict[str, str]] = {}
         self._model = ""
         self._cwd = HARNESS_WORKSPACE_ROOT
         self._steps = 0
@@ -474,7 +481,9 @@ class ClaudeEngine:
             for item in schemas
         ]
 
-    def _sdk_tools(self, schemas: list[dict[str, Any]]) -> list[Any]:
+    def _sdk_tools(
+        self, schemas: list[dict[str, Any]], server: str = SERVER_NAME
+    ) -> list[Any]:
         from claude_agent_sdk import tool as sdk_tool
 
         definitions = []
@@ -507,9 +516,147 @@ class ClaudeEngine:
                     wire_name,
                     str(wire_schema.get("description") or wire_name),
                     wire_schema.get("input_schema") or {"type": "object"},
-                )(self._mcp_handler(wire_name, registry_name))
+                )(self._counted(self._mcp_handler(wire_name, registry_name), server))
             )
         return definitions
+
+    def _counted(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+        server: str,
+    ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+        """Track calls per server and apply plugin changes before replying.
+
+        A call that changed the workspace's plugins (e.g. ``plugin_create``)
+        publishes their tools before its result reaches the CLI, so the next
+        model request of the same turn already offers them.
+        """
+
+        async def handle(arguments: dict[str, Any]) -> dict[str, Any]:
+            self._sdk_calls_in_flight[server] = (
+                self._sdk_calls_in_flight.get(server, 0) + 1
+            )
+            try:
+                result = await handler(arguments)
+            finally:
+                self._sdk_calls_in_flight[server] -= 1
+            note = await self._apply_plugin_changes(server)
+            if note:
+                content = list(result.get("content") or [])
+                note_block = {"type": "text", "text": note}
+                result = {**result, "content": [*content, note_block]}
+            return result
+
+        return handle
+
+    async def _apply_plugin_changes(self, calling_server: str) -> str:
+        """Pick up plugin changes; return a note for the model, if any."""
+        options = self._options
+        if options is None or options.refresh_plugins is None or self._client is None:
+            return ""
+        try:
+            change = await options.refresh_plugins()
+        except Exception:
+            log.warning("claude_plugin_refresh_failed", exc_info=True)
+            return ""
+        if change and change.tools_changed:
+            self._plugin_tools_pending = True
+        if self._plugin_tools_pending:
+            await self._publish_plugin_tools(calling_server)
+        return change.message(self._claude_tool_name) if change else ""
+
+    def _claude_tool_name(self, registry_name: str) -> str:
+        """The name Claude Code knows a registry tool by."""
+        for server, names in self._sdk_server_tools.items():
+            wire = names.get(registry_name)
+            if wire:
+                return f"mcp__{server}__{wire}"
+        return registry_name
+
+    async def _publish_plugin_tools(self, calling_server: str) -> None:
+        """Offer tools added mid-run on the plugin server and refresh it.
+
+        The CLI re-reads a server's tools only when the server is (re)added
+        through the ``mcp_set_servers`` control request; re-adding cuts calls
+        in flight on that server, so it waits while any is running. Tools
+        known at the start stay on ``opencuria``; removed ones answer with an
+        error there. Uses control internals of the pinned SDK
+        (``catalog.SDK_VERSION``), covered by a real-CLI test.
+        """
+        from claude_agent_sdk._internal.sdk_mcp_bridge import SdkMcpBridge
+
+        if self._sdk_calls_in_flight.get(PLUGIN_SERVER_NAME, 0) or (
+            calling_server == PLUGIN_SERVER_NAME
+        ):
+            return
+        self._plugin_tools_pending = False
+        agent, options = self._agent, self._options
+        schemas = self._schemas(
+            agent,
+            self._mode,
+            max(0, int(options.depth or 0)),
+            options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH,
+        )
+        fixed = set(self._sdk_server.tool_names)
+        definitions = [
+            definition
+            for definition in self._sdk_tools(
+                self._bridge_schemas_for_sdk(schemas), PLUGIN_SERVER_NAME
+            )
+            if definition.name not in fixed
+        ]
+        self._sdk_server_tools[PLUGIN_SERVER_NAME] = {
+            self._wire_to_registry[definition.name]: definition.name
+            for definition in definitions
+        }
+        query = self._client._query
+        registered = self._plugin_server is not None
+        if self._plugin_server is None:
+            if not definitions:
+                return
+            self._plugin_server = DynamicSdkServer(PLUGIN_SERVER_NAME)
+            instance = self._plugin_server.config["instance"]
+            query.sdk_mcp_servers[PLUGIN_SERVER_NAME] = instance
+            query._sdk_mcp_bridges[PLUGIN_SERVER_NAME] = SdkMcpBridge(
+                PLUGIN_SERVER_NAME, instance
+            )
+        if not self._plugin_server.set_tools(definitions) and registered:
+            return
+        servers = {SERVER_NAME: {"type": "sdk", "name": SERVER_NAME}}
+        try:
+            if registered:
+                await query._send_control_request(
+                    {"subtype": "mcp_set_servers", "servers": servers}
+                )
+            if definitions:
+                servers[PLUGIN_SERVER_NAME] = {
+                    "type": "sdk",
+                    "name": PLUGIN_SERVER_NAME,
+                }
+                await query._send_control_request(
+                    {"subtype": "mcp_set_servers", "servers": servers}
+                )
+                await self._await_plugin_server()
+            log.info("claude_plugin_tools_published", tools=len(definitions))
+        except Exception as exc:
+            log.warning("claude_plugin_tools_publish_failed", error=type(exc).__name__)
+
+    async def _await_plugin_server(self, timeout: float = 15.0) -> None:
+        """Wait until the CLI finished connecting the plugin server."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            status = await self._client.get_mcp_status()
+            state = next(
+                (
+                    entry.get("status")
+                    for entry in status.get("mcpServers", [])
+                    if entry.get("name") == PLUGIN_SERVER_NAME
+                ),
+                "pending",
+            )
+            if state != "pending":
+                return
+            await asyncio.sleep(0.1)
 
     async def _native_pre_tool(
         self,
@@ -1606,13 +1753,20 @@ class ClaudeEngine:
                 ClaudeAgentOptions,
                 ClaudeSDKClient,
                 ResultError,
-                create_sdk_mcp_server,
             )
         except ImportError as exc:
             raise RuntimeError("claude-agent-sdk is not installed") from exc
-        sdk_server = create_sdk_mcp_server(
-            "opencuria", version="1.0.0", tools=self._sdk_tools(sdk_schemas)
-        )
+        self._sdk_calls_in_flight = {}
+        self._plugin_tools_pending = False
+        self._plugin_server = None
+        self._client = None
+        self._sdk_server = DynamicSdkServer(SERVER_NAME)
+        self._sdk_server.set_tools(self._sdk_tools(sdk_schemas))
+        self._sdk_server_tools = {
+            SERVER_NAME: {
+                registry: wire for wire, registry in self._wire_to_registry.items()
+            }
+        }
         native_cli_tools = native_tools_for_claude(
             tools=self.tools,
             agent=agent,
@@ -1633,7 +1787,7 @@ class ClaudeEngine:
             env=mirror_env,
             can_use_tool=self._can_use_tool,
             hooks=self._permission_hooks(),
-            mcp_servers={"opencuria": sdk_server},
+            mcp_servers={SERVER_NAME: self._sdk_server.config},
             session_store=self.session_store,
             session_store_flush="eager",
             resume=self.external_session_id or None,
@@ -1722,6 +1876,7 @@ class ClaudeEngine:
             # Let the SDK own the input-stream lifecycle: its async-iterable
             # connect path keeps stdin available through task continuations,
             # then closes it once the session reaches idle.
+            self._client = client
             await client.connect(inputs())
             terminal = None
             output = ""
@@ -1870,6 +2025,8 @@ class ClaudeEngine:
             self._options = None
             self._agent = None
             self._bridge = None
+            self._client = None
+            self._plugin_server = None
             self._wire_to_registry.clear()
             self._tool_events.clear()
             self._tool_results.clear()

@@ -10,7 +10,6 @@ from apps.harness.conversation_service import ConversationService
 from apps.harness.engines.service import EngineCatalogService
 from apps.harness.providers.base import ProviderError
 from apps.scheduled_tasks.services import ScheduledTaskService
-from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, NotFoundError
 
 from .. import resolve
@@ -73,7 +72,7 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
         )
     )
     data["engines"] = _engines(ctx)
-    counts["skills"] = len(SkillService().list_skills(user, ctx.organization_id))
+    counts["skills"] = len(resolve.list_skills(ctx))
     data["counts"] = counts
     return data
 

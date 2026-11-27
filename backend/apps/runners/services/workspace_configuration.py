@@ -226,6 +226,7 @@ class WorkspaceConfigurationService:
                     credential,
                     workspace_id=workspace.id,
                     org_id=workspace.runner.organization_id,
+                    owner_id=workspace.created_by_id,
                 )
             )
         return gaps

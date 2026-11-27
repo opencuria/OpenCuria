@@ -9,8 +9,8 @@ import pytest
 from apps.harness.models import HarnessSession
 from apps.harness.repositories import HarnessSessionRepository
 from apps.harness.session_settings_service import SessionSettingsService
+from apps.plugins.services import PluginService
 from apps.runners.models import Workspace
-from apps.skills.services import SkillService
 from common.exceptions import ConflictError, NotFoundError
 
 pytestmark = pytest.mark.django_db
@@ -140,24 +140,41 @@ def test_invalid_setting_keeps_persistence_and_notifications(
 def test_skill_selection_validates_visibility_and_keeps_order(
     session: HarnessSession, harness_workspace: Workspace
 ) -> None:
-    """Only visible skills can replace the selection; clearing stays valid."""
+    """Only usable plugin skills can replace the selection; clearing stays valid."""
     owner = harness_workspace.created_by
-    skills = SkillService()
-    first = skills.create_personal_skill(name="First", body="First body", user=owner)
-    second = skills.create_personal_skill(name="Second", body="Second body", user=owner)
+    plugins = PluginService()
+    personal = plugins.create_plugin(
+        org_id=session.organization_id,
+        user=owner,
+        name="Mine",
+        skills=[
+            {"name": "First", "body": "First body"},
+            {"name": "Second", "body": "Second body"},
+        ],
+    )
+    first, second = (skill["id"] for skill in personal["skills"])
+    unreleased = plugins.create_plugin(
+        org_id=session.organization_id,
+        user=owner,
+        admin=True,
+        scope="organization",
+        name="Team",
+        skills=[{"name": "Team", "body": "Team body"}],
+    )["skills"][0]["id"]
     service = SessionSettingsService()
     kwargs = {"user_id": owner.id, "organization_id": session.organization_id}
 
     updated = service.update_skill_ids(
-        session.id, [f" {second.id} ", str(first.id), str(second.id), ""], **kwargs
+        session.id, [f" {second} ", str(first), str(second), ""], **kwargs
     )
-    assert updated.skill_ids == [str(second.id), str(first.id)]
-    with pytest.raises(ValueError, match="not found or not accessible"):
-        service.update_skill_ids(session.id, [str(uuid.uuid4())], **kwargs)
+    assert updated.skill_ids == [str(second), str(first)]
+    for missing in (uuid.uuid4(), unreleased):
+        with pytest.raises(ValueError, match="not found or not accessible"):
+            service.update_skill_ids(session.id, [str(missing)], **kwargs)
     with pytest.raises(ValueError, match="Invalid skill_id"):
         service.update_skill_ids(session.id, ["invalid"], **kwargs)
     session.refresh_from_db()
-    assert session.skill_ids == [str(second.id), str(first.id)]
+    assert session.skill_ids == [str(second), str(first)]
 
     assert service.update_skill_ids(session.id, [], **kwargs).skill_ids == []
     session.refresh_from_db()

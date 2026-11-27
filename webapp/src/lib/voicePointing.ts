@@ -9,27 +9,23 @@ import { shallowRef } from 'vue'
 import { workspaceFiles } from '@/services/workspaceFiles'
 import { isTrustedDesktopMessage } from '@/lib/desktopSurfaceRecovery'
 import { createSecureUuid } from '@/lib/secureUuid'
-import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from '@opencuria/chat-core/voiceInput'
-
-export interface PointerTarget {
-  kind: 'image' | 'desktop'
-  path: string
-  width: number
-  height: number
-}
-
-export interface PointerSample {
-  t_ms: number
-  event: 'move' | 'down' | 'up' | 'leave'
-  x: number | null
-  y: number | null
-  target: PointerTarget | null
-}
-
-export interface PointingResult {
-  pointers: PointerSample[]
-  frames: { t_ms: number; path: string }[]
-}
+import { VOICE_MAX_DURATION_MS } from '@opencuria/chat-core/voiceInput'
+import {
+  FrameCadence,
+  PointerTimeline,
+  VISUAL_FRAME_INTERVAL_MS,
+  VISUAL_MAX_FRAME_BYTES,
+  VISUAL_MAX_PENDING_UPLOADS,
+  VISUAL_MAX_TOTAL_BYTES,
+  VISUAL_SAMPLE_INTERVAL_MS,
+  frameAt,
+  imagePixel,
+  isWorkspacePath,
+  recordingFrameName,
+  recordingFramesDirectory,
+  type PointerSample,
+  type PointingResult,
+} from '@opencuria/chat-core/visualRecording'
 
 export const activePointingWorkspace = shallowRef<string | null>(null)
 export const pointingError = shallowRef<string | null>(null)
@@ -37,12 +33,6 @@ export const pointingError = shallowRef<string | null>(null)
 export const pointingEngaged = shallowRef(false)
 const desktops = new Map<string, () => HTMLIFrameElement | null>()
 let activeOwner: symbol | null = null
-const MAX_FRAME_BYTES = 2 * 1024 * 1024
-// Frames are uploaded as they arrive; only metadata and in-flight uploads stay in memory.
-const MAX_TOTAL_BYTES = 256 * 1024 * 1024
-const FRAME_INTERVAL_MS = 500
-const MAX_FRAME_INTERVAL_MS = 30_000
-const IDLE_BACKOFF_STEP_MS = 5000
 // The centered hotspot keeps recorded coordinates at the laser's bright core.
 const LASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
@@ -71,22 +61,10 @@ export function imagePoint(
   clientX: number,
   clientY: number,
 ): { x: number; y: number } | null {
-  if (rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null
-  const x = (clientX - rect.left) / rect.width
-  const y = (clientY - rect.top) / rect.height
-  if (x < 0 || x >= 1 || y < 0 || y >= 1) return null
-  return {
-    x: Math.min(width - 1, Math.floor(x * width)),
-    y: Math.min(height - 1, Math.floor(y * height)),
-  }
-}
-
-function workspaceImagePath(path: string | undefined): path is string {
-  return (
-    !!path &&
-    path.startsWith('/workspace/') &&
-    !/[\\\u0000-\u001f]/.test(path) &&
-    !path.split('/').some((part, index) => index > 0 && ['', '.', '..'].includes(part))
+  return imagePixel(
+    { x: clientX, y: clientY },
+    { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+    { width, height },
   )
 }
 
@@ -140,7 +118,7 @@ export function captureDesktopFrame(
         !(data.blob instanceof Blob) ||
         data.blob.type !== 'image/jpeg' ||
         data.blob.size === 0 ||
-        data.blob.size > MAX_FRAME_BYTES ||
+        data.blob.size > VISUAL_MAX_FRAME_BYTES ||
         !Number.isInteger(data.width) ||
         data.width < 1 ||
         data.width > 32768 ||
@@ -202,7 +180,7 @@ export function startPointing(
   pointingError.value = null
   pointingEngaged.value = false
   activePointingWorkspace.value = workspaceId
-  const pointers: PointerSample[] = []
+  const pointers = new PointerTimeline()
   const frames: PointingResult['frames'] = []
   const frameSizes = new Map<string, { width: number; height: number }>()
   const abort = new AbortController()
@@ -220,14 +198,12 @@ export function startPointing(
   let pendingCapture: Promise<void> | null = null
   const pendingUploads = new Set<Promise<void>>()
   let totalBytes = 0
-  let lastActivityMs = originMs
-  let nextCaptureMs = -Infinity
+  const cadence = new FrameCadence(originMs)
   let previousFrameId: string | undefined
   let lastDesktopPosition: { x: number; y: number } | null = null
   const activity = (): void => {
     if (stopped || failure) return
-    lastActivityMs = performance.now()
-    nextCaptureMs = Math.min(nextCaptureMs, lastActivityMs + FRAME_INTERVAL_MS)
+    cadence.activity(performance.now())
   }
   let cursorImage: HTMLImageElement | null = null
   const cursorStyle = document.createElement('style')
@@ -296,7 +272,7 @@ export function startPointing(
       desktopPoint = null
       lastDesktopPosition = null
       previousFrameId = undefined
-      nextCaptureMs = -Infinity
+      cadence.reset()
     }
     observedViewer = iframe
     if (iframe) observe(iframe, true)
@@ -311,14 +287,7 @@ export function startPointing(
       return empty()
     if (desktopPoint && observedViewer) {
       showImageCursor(null)
-      // Usually the latest frame: walk backwards without copying the recording history.
-      let frame: PointingResult['frames'][number] | undefined
-      for (let index = frames.length - 1; index >= 0; index--) {
-        if (frames[index]!.t_ms <= t_ms) {
-          frame = frames[index]
-          break
-        }
-      }
+      const frame = frameAt(frames, t_ms)
       const size = frame && frameSizes.get(frame.path)
       if (frame && size?.width === desktopPoint.width && size.height === desktopPoint.height)
         return {
@@ -339,7 +308,7 @@ export function startPointing(
     if (
       image &&
       image.dataset.voiceWorkspace === workspaceId &&
-      workspaceImagePath(image.dataset.voiceImagePath)
+      isWorkspacePath(image.dataset.voiceImagePath)
     ) {
       const point = imagePoint(
         image.getBoundingClientRect(),
@@ -372,22 +341,8 @@ export function startPointing(
     }
     const point = resolvePoint(t_ms)
     if (point.target) engage()
-    const previous = pointers[pointers.length - 1]
-    const samePoint =
-      previous?.x === point.x &&
-      previous?.y === point.y &&
-      previous?.target?.kind === point.target?.kind &&
-      previous?.target?.path === point.target?.path &&
-      previous?.target?.width === point.target?.width &&
-      previous?.target?.height === point.target?.height
-    // A point remains valid until the next event. Preserve clicks and the first
-    // leave, but omit idle heartbeats and activity on unrelated UI surfaces.
-    if ((!point.target && !previous?.target) || (samePoint && event === 'move')) return
-    if (pointers.length >= VOICE_MAX_POINTERS) {
+    if (pointers.add({ t_ms, event, ...point }) === 'full')
       fail(new Error('The pointing recording reached its event limit.'))
-      return
-    }
-    pointers.push({ t_ms, event, ...point })
   }
   const pointer = (event: PointerEvent): void => {
     if (
@@ -483,10 +438,8 @@ export function startPointing(
     if (!desktopRequested || pendingCapture || !iframe) return
     // Observation stays live at 500 ms, independently of the capture cadence.
     // Every five seconds without speech or mouse activity doubles the interval.
-    const idleSteps = Math.floor((performance.now() - lastActivityMs) / IDLE_BACKOFF_STEP_MS)
-    const interval = Math.min(MAX_FRAME_INTERVAL_MS, FRAME_INTERVAL_MS * 2 ** idleSteps)
-    if (performance.now() < nextCaptureMs) return
-    nextCaptureMs = performance.now() + interval
+    if (!cadence.due(performance.now())) return
+    cadence.captured(performance.now())
     pendingCapture = (async () => {
       const frame = await captureDesktopFrame(iframe, abort.signal, previousFrameId)
       const t_ms = Math.round(frame.capturedAt - originEpoch)
@@ -494,14 +447,13 @@ export function startPointing(
       if (t_ms < 0 || t_ms > elapsed() + 100)
         throw new Error('The desktop returned an invalid frame timestamp.')
       if ('unchanged' in frame) return
-      if (pendingUploads.size >= 8)
+      if (pendingUploads.size >= VISUAL_MAX_PENDING_UPLOADS)
         throw new Error('Desktop uploads are too slow to keep recording.')
       totalBytes += frame.blob.size
-      if (totalBytes > MAX_TOTAL_BYTES)
+      if (totalBytes > VISUAL_MAX_TOTAL_BYTES)
         throw new Error('The visual recording reached its size limit.')
-      const directory = `/workspace/.opencuria/recordings/${recordingId}/frames`
-      const index = frames.length
-      const filename = `${String(index).padStart(6, '0')}.jpg`
+      const directory = recordingFramesDirectory(recordingId)
+      const filename = recordingFrameName(frames.length)
       const path = `${directory}/${filename}`
       frameSizes.set(path, { width: frame.width, height: frame.height })
       frames.push({ t_ms, path })
@@ -536,8 +488,8 @@ export function startPointing(
         pendingCapture = null
       })
   }
-  const sampleTimer = setInterval(() => sample('move'), 100)
-  const frameTimer = setInterval(capture, FRAME_INTERVAL_MS)
+  const sampleTimer = setInterval(() => sample('move'), VISUAL_SAMPLE_INTERVAL_MS)
+  const frameTimer = setInterval(capture, VISUAL_FRAME_INTERVAL_MS)
   const listeners = ['pointermove', 'pointerdown', 'pointerup'] as const
   for (const name of listeners) document.addEventListener(name, pointer, true)
   document.addEventListener('pointerout', onOut, true)
@@ -576,8 +528,7 @@ export function startPointing(
       if (failure && visual()) throw failure
       // Plain dictation: nothing was pointed at, so nothing visual is attached.
       if (!engaged) return null
-      pointers.sort((a, b) => a.t_ms - b.t_ms)
-      return { pointers, frames }
+      return { pointers: pointers.result(), frames }
     },
     cancel() {
       cancelled = true

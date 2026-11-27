@@ -7,6 +7,7 @@ import * as SecureStore from "expo-secure-store";
 import {
   OFFLINE_AFTER_MS,
   SessionProvider,
+  SessionScope,
   useSession,
 } from "./SessionContext";
 
@@ -658,5 +659,53 @@ describe("SessionProvider", () => {
     });
     expect(client.realtime.setActive).toHaveBeenCalledWith(true);
     await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("shares one session between React roots and hands it over when the owner goes", async () => {
+    const client = makeClient();
+    const successor = makeClient();
+    clients.push(client, successor);
+    const main = jest.fn();
+    const companion = jest.fn();
+    const mainRoot = render(
+      <SessionScope>
+        <Harness onValue={main} />
+      </SessionScope>,
+    );
+    await waitFor(() => expect(main.mock.lastCall?.[0].booting).toBe(false));
+    await act(async () => {
+      await main.mock.lastCall![0].login(
+        "https://curia.example",
+        "user@example.test",
+        "secret",
+      );
+    });
+    // The companion over an open app relays the owner's session: same client.
+    render(
+      <SessionScope>
+        <Harness onValue={companion} />
+      </SessionScope>,
+    );
+    await waitFor(() =>
+      expect(companion.mock.lastCall?.[0].client).toBe(client),
+    );
+    expect(companion.mock.lastCall?.[0].user.email).toBe("user@example.test");
+    expect(mockCreateClient).toHaveBeenCalledTimes(1);
+
+    // Without the owner, the companion signs in from the saved session.
+    jest
+      .mocked(SecureStore.getItemAsync)
+      .mockResolvedValue(
+        jest.mocked(SecureStore.setItemAsync).mock.lastCall![1] as string,
+      );
+    mainRoot.unmount();
+    await waitFor(() =>
+      expect(companion.mock.lastCall?.[0].client).toBe(successor),
+    );
+    await waitFor(() =>
+      expect(companion.mock.lastCall?.[0].user?.email).toBe(
+        "user@example.test",
+      ),
+    );
   });
 });

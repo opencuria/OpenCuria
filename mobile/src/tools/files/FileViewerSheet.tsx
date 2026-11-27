@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -6,17 +12,26 @@ import {
   StyleSheet,
   Text,
   View,
+  type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
 import { useVideoPlayer, VideoView } from "expo-video";
 import * as Clipboard from "expo-clipboard";
 import * as Sharing from "expo-sharing";
 import type { OpenCuriaClient } from "@opencuria/client";
+import { previewLines, type Size } from "@opencuria/chat-core/visualRecording";
+import type {
+  VisualSurface,
+  VisualSurfaceSpec,
+} from "@opencuria/chat-core/visualRecorder";
 import { ChatMarkdown } from "../../components/ChatMarkdown";
 import type { ChatMediaResolver } from "../../components/useWorkspaceMedia";
 import type { MediaCache } from "../../platform";
 import { Button } from "../../ui/controls";
 import type { NativeMenuAction } from "../../ui/NativeMenu";
 import { useTheme } from "../../ui/theme";
+import { useRecordingSurface } from "../../voice/useRecordingSurface";
 import { ToolDetailSheet } from "../ToolDetailSheet";
 import {
   BinaryFileError,
@@ -60,8 +75,40 @@ function previewable(path: string): boolean {
 }
 
 /**
+ * Lines a rendered preview shows, estimated while it scrolls, for a
+ * recording's `surface`.
+ */
+function usePreviewView(surface: VisualSurface | null, lineCount: number) {
+  const metrics = useRef({ offset: 0, viewport: 0, content: 0 });
+  const report = useCallback(() => {
+    surface?.view(previewLines(metrics.current, lineCount));
+  }, [lineCount, surface]);
+  useEffect(() => {
+    if (surface) report();
+  }, [report, surface]);
+  return {
+    onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      metrics.current.offset = event.nativeEvent.contentOffset.y;
+      report();
+    },
+    onLayout: (event: LayoutChangeEvent) => {
+      metrics.current.viewport = event.nativeEvent.layout.height;
+      report();
+    },
+    onContentSizeChange: (_width: number, height: number) => {
+      metrics.current.content = height;
+      report();
+    },
+    scrollEventThrottle: 100,
+  };
+}
+
+/**
  * File viewer like t3code's file screen: highlighted source, Markdown, table
  * and media previews, Preview/Source, word wrap, copy and share actions.
+ * While a recording runs, what it shows joins it: lines of source (with the
+ * line under a finger), estimated lines of a rendered preview, an image's
+ * pixels.
  */
 export function FileViewerSheet({
   client,
@@ -212,6 +259,40 @@ export function FileViewerSheet({
     };
   }, [attempt, attachment, client, media, path, workspaceId]);
 
+  // What a running recording sees of this file.
+  const text = content.phase === "text" ? content.file.text : null;
+  const lines = useMemo(
+    () => (text === null ? null : text.split(/\r?\n/)),
+    [text],
+  );
+  const shows =
+    !path || !lines
+      ? null
+      : mode === "preview" && isMarkdownPath(path)
+        ? "markdown"
+        : mode === "preview" && delimiterFor(path)
+          ? "table"
+          : mode === "preview" && isSvgPath(path)
+            ? null
+            : "source";
+  const [imageSize, setImageSize] = useState<Size | null>(null);
+  useEffect(() => setImageSize(null), [path]);
+  const spec = useMemo<VisualSurfaceSpec | null>(() => {
+    if (!path) return null;
+    if (lines && shows)
+      return shows === "source"
+        ? { kind: "file", path, lines }
+        : { kind: "file", path, lines, approximate: true };
+    if (content.phase === "image" && imageSize)
+      return { kind: "image", path, ...imageSize };
+    return null;
+  }, [content.phase, imageSize, lines, path, shows]);
+  const surface = useRecordingSurface(spec);
+  const preview = usePreviewView(
+    shows === "markdown" || shows === "table" ? surface : null,
+    lines?.length ?? 0,
+  );
+
   if (!target) return null;
   const name = path?.split("/").pop() ?? attachment!.filename;
   const folder = path
@@ -219,7 +300,6 @@ export function FileViewerSheet({
     : "";
   const relative = folder.replace(/^\/workspace\/?/, "");
   const canToggle = path && previewable(path) && !isImagePath(path);
-  const text = content.phase === "text" ? content.file.text : null;
   const delimiter = path ? delimiterFor(path) : null;
 
   const share = async () => {
@@ -365,7 +445,14 @@ export function FileViewerSheet({
       />
     );
   else if (content.phase === "image")
-    body = <ImagePreview uri={content.uri} name={name} />;
+    body = (
+      <ImagePreview
+        uri={content.uri}
+        name={name}
+        surface={surface}
+        onSize={setImageSize}
+      />
+    );
   else if (content.phase === "text" && path) {
     const file = content.file;
     const notice = file.truncated ? (
@@ -386,6 +473,7 @@ export function FileViewerSheet({
     if (mode === "preview" && isMarkdownPath(path))
       body = (
         <ScrollView
+          {...preview}
           contentContainerStyle={[
             styles.markdown,
             { paddingBottom: bottomInset + 32 },
@@ -402,6 +490,7 @@ export function FileViewerSheet({
           <DelimitedTable
             rows={parseDelimited(file.text, delimiter)}
             bottomInset={bottomInset}
+            scroll={preview}
           />
         </>
       );
@@ -418,8 +507,10 @@ export function FileViewerSheet({
           <SourceView
             path={path}
             contents={file.text}
+            lines={lines ?? undefined}
             wrap={wrap}
             bottomInset={bottomInset}
+            surface={shows === "source" ? surface : null}
           />
         </View>
       );
@@ -458,9 +549,12 @@ const MAX_TABLE_COLUMNS = 40;
 function DelimitedTable({
   rows,
   bottomInset,
+  scroll,
 }: {
   rows: string[][];
   bottomInset: number;
+  /** Vertical scroll handlers, e.g. a recording's view of the rows. */
+  scroll?: Partial<React.ComponentProps<typeof ScrollView>>;
 }): React.JSX.Element {
   const { theme } = useTheme();
   const columns = Math.min(
@@ -469,7 +563,10 @@ function DelimitedTable({
   );
   return (
     <ScrollView horizontal bounces={false}>
-      <ScrollView contentContainerStyle={{ paddingBottom: bottomInset + 24 }}>
+      <ScrollView
+        {...scroll}
+        contentContainerStyle={{ paddingBottom: bottomInset + 24 }}
+      >
         {rows.map((row, rowIndex) => (
           <View
             key={rowIndex}

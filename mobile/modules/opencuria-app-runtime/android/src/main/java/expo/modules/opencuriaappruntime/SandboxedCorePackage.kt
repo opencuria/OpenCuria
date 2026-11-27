@@ -18,7 +18,8 @@ import java.util.concurrent.Executors
 /**
  * React Native's core modules that open files by URI, confined to the app's
  * [AppFileAccess]. They replace the modules of the same name in
- * `MainReactPackage`, which React Native resolves first.
+ * `MainReactPackage`, which React Native resolves first. Also the app's
+ * inspector, which reports its logs and requests for the app companion.
  */
 internal class SandboxedCorePackage(private val files: AppFileAccess) : BaseReactPackage() {
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? =
@@ -26,6 +27,7 @@ internal class SandboxedCorePackage(private val files: AppFileAccess) : BaseReac
       NativeNetworkingAndroidSpec.NAME ->
         NetworkingModule(reactContext).also { NetworkingSandbox.install(it, files) }
       NativeImageStoreAndroidSpec.NAME -> SandboxImageStoreModule(reactContext, files)
+      AppInspectorModule.NAME -> AppInspectorModule(reactContext)
       else -> null
     }
 
@@ -42,7 +44,16 @@ internal class SandboxedCorePackage(private val files: AppFileAccess) : BaseReac
         isCxxModule = false,
         isTurboModule = true
       )
-    }
+    } + (
+      AppInspectorModule.NAME to ReactModuleInfo(
+        AppInspectorModule.NAME,
+        AppInspectorModule::class.java.name,
+        canOverrideExistingModule = false,
+        needsEagerInit = false,
+        isCxxModule = false,
+        isTurboModule = false
+      )
+    )
   }
 }
 

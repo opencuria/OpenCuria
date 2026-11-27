@@ -37,6 +37,22 @@ describe('HarnessMentionSheet', () => {
     expect(wrapper.get('[role="listbox"]').attributes('aria-label')).toBe('Skill suggestions')
   })
 
+  it('shows the plugin a skill suggestion comes from', () => {
+    const wrapper = mount(HarnessMentionSheet, {
+      props: {
+        candidates: [
+          { kind: 'skill', label: 'Lint rules', insert: 'skill-1', detail: 'Team tools' },
+          fileCandidate(1),
+        ],
+        activeIndex: 0,
+      },
+    })
+    const options = wrapper.findAll('[data-testid="composer-mention-option"]')
+    expect(options[0]!.text()).toContain('Lint rules')
+    expect(options[0]!.text()).toContain('Team tools')
+    expect(options[1]!.text()).toBe('f1.ts')
+  })
+
   it('ignores hover while the pointer stays still', async () => {
     const wrapper = mount(HarnessMentionSheet, {
       props: {

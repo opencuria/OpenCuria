@@ -167,6 +167,9 @@ def test_deferred_constraint_flush_is_postgresql_only():
     flush_plugins = import_module(
         "apps.plugins.migrations.0006_mcp_oauth"
     ).flush_deferred_constraints
+    flush_personal_plugins = import_module(
+        "apps.plugins.migrations.0017_personal_plugins_and_skills"
+    ).flush_deferred_constraints
     sql_calls = []
 
     class Cursor:
@@ -192,10 +195,11 @@ def test_deferred_constraint_flush_is_postgresql_only():
         def __init__(self, vendor):
             self.connection = Connection(vendor)
 
-    for flush in (flush_credentials, flush_plugins):
+    flushes = (flush_credentials, flush_plugins, flush_personal_plugins)
+    for flush in flushes:
         flush(None, Editor("sqlite"))
         flush(None, Editor("postgresql"))
-    assert sql_calls == ["SET CONSTRAINTS ALL IMMEDIATE"] * 2
+    assert sql_calls == ["SET CONSTRAINTS ALL IMMEDIATE"] * len(flushes)
 
 
 @pytest.mark.django_db(transaction=True)

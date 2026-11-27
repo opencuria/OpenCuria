@@ -10,8 +10,10 @@ import { NewCredentialPage } from "./NewCredentialPage";
 import { NewCredentialServicePage } from "./NewCredentialServicePage";
 import { PluginEditorPage } from "./PluginEditorPage";
 import {
+  PluginMcpImportPage,
   PluginMcpPage,
   PluginRequirementPage,
+  PluginRequirementsPage,
   PluginSkillPage,
 } from "./PluginEntryPages";
 import { PluginPage } from "./PluginPage";
@@ -66,6 +68,12 @@ export function renderAccessRoute(
     case "plugin-mcp":
       return first && rest ? (
         <PluginMcpPage draftKey={first} uid={rest} />
+      ) : undefined;
+    case "plugin-mcp-import":
+      return argument ? <PluginMcpImportPage draftKey={argument} /> : undefined;
+    case "plugin-requirements":
+      return argument ? (
+        <PluginRequirementsPage draftKey={argument} />
       ) : undefined;
     case "plugin-requirement":
       return first && rest ? (

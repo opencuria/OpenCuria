@@ -8,6 +8,12 @@ import os
 import uuid
 from typing import Any
 
+from apps.plugins.skill_documents import (
+    parse_skill_markdown,
+    render_skill_markdown,
+    skill_identifier,
+)
+
 from ...access.base import (
     HARNESS_WORKSPACE_ROOT,
     WorkspaceAccessor,
@@ -326,21 +332,32 @@ class ClaudeRuntimeState:
             f"{root}/plugin.json", json.dumps(manifest, separators=(",", ":")).encode()
         )
         names: dict[str, str] = {}
+        used: set[str] = set()
         for index, body in enumerate(skills):
             if not body.strip():
                 continue
-            name = f"opencuria-skill-{index + 1:03d}"
+            # The directory carries the skill's frontmatter name, so the name
+            # Claude Code invokes matches the selected names exactly.
+            document = parse_skill_markdown(body)
+            name = (
+                skill_identifier(document.name)
+                if document.name
+                else f"opencuria-skill-{index + 1:03d}"
+            )
+            base, suffix = name, 2
+            while name in used:
+                name = f"{base[:60]}-{suffix}"
+                suffix += 1
+            used.add(name)
             skill_dir = f"{skills_root}/{name}"
             await self.ensure_managed_dir(skill_dir)
             payload = body.strip()
-            if not payload.startswith("---\n"):
-                payload = (
-                    "---\n"
-                    + "name: "
-                    + name
-                    + "\ndescription: OpenCuria selected skill\n---\n\n"
-                    + payload
-                )
+            if document.name != name:
+                payload = render_skill_markdown(
+                    identifier=name,
+                    description=document.description or "OpenCuria selected skill",
+                    body=document.body,
+                ).strip()
             await self.write_managed_file(f"{skill_dir}/SKILL.md", payload.encode())
             names[f"opencuria-managed-skills:{name}"] = name
         return names

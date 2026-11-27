@@ -67,7 +67,9 @@ def org_ctx(db):
 
 
 def _make_plugin(org, user, *, name="P", slug="p", published=True, enabled=True):
-    return PluginService().create_org_plugin(
+    return PluginService().create_plugin(
+        scope="organization",
+        admin=True,
         org_id=org.id,
         user=user,
         name=name,
@@ -96,7 +98,9 @@ def _make_plugin(org, user, *, name="P", slug="p", published=True, enabled=True)
 
 @pytest.mark.django_db
 def test_snapshot_only_effective_plugins(org_ctx):
-    PluginService().create_org_plugin(
+    PluginService().create_plugin(
+        scope="organization",
+        admin=True,
         org_id=org_ctx["org"].id,
         user=org_ctx["user"],
         name="Hidden",
@@ -368,7 +372,9 @@ def test_missing_required_credential_fails_fast(org_ctx):
 
 @pytest.mark.django_db
 def test_optional_placeholder_referenced_but_missing_is_config_error(org_ctx):
-    created = PluginService().create_org_plugin(
+    created = PluginService().create_plugin(
+        scope="organization",
+        admin=True,
         org_id=org_ctx["org"].id,
         user=org_ctx["user"],
         name="Opt",
@@ -413,7 +419,9 @@ def test_optional_placeholder_referenced_but_missing_is_config_error(org_ctx):
 
 @pytest.mark.django_db
 def test_unknown_placeholder_key_is_config_error(org_ctx):
-    created = PluginService().create_org_plugin(
+    created = PluginService().create_plugin(
+        scope="organization",
+        admin=True,
         org_id=org_ctx["org"].id,
         user=org_ctx["user"],
         name="Bad",
@@ -445,7 +453,9 @@ def test_unknown_placeholder_key_is_config_error(org_ctx):
 
 @pytest.mark.django_db
 def test_literals_preserved_and_unused_mapping_validated(org_ctx):
-    created = PluginService().create_org_plugin(
+    created = PluginService().create_plugin(
+        scope="organization",
+        admin=True,
         org_id=org_ctx["org"].id,
         user=org_ctx["user"],
         name="Lit",
@@ -658,14 +668,17 @@ def test_requirement_service_visibility_and_atomicity(
     payload = {
         "org_id": org_ctx["org"].id,
         "user": org_ctx["user"],
+        "admin": True,
         "name": "Changed",
         "credential_requirements": [{"key": "token", "service_id": str(service_id)}],
     }
 
     def write() -> dict:
         if operation == "create":
-            return service.create_org_plugin(slug="changed", **payload)
-        return service.update_org_plugin(original["id"], **payload)
+            return service.create_plugin(
+                slug="changed", scope="organization", **payload
+            )
+        return service.update_plugin(original["id"], **payload)
 
     if scope in {"global", "current"}:
         result = write()
@@ -770,7 +783,9 @@ def test_seeded_servers_carry_their_windows_deviations(org_ctx):
 
     org, user = org_ctx["org"], org_ctx["user"]
     playwright = Plugin.objects.get(slug="playwright", organization__isnull=True)
-    copy = PluginService().create_org_plugin(
+    copy = PluginService().create_plugin(
+        scope="organization",
+        admin=True,
         org_id=org.id,
         user=user,
         name="Playwright copy",

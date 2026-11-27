@@ -74,10 +74,11 @@ async def test_enabled_plugin_gives_the_agent_every_mcp_tool(world):
         names = runtime.register_tools(ToolRegistry())
 
         assert runtime.skipped == []
-        # The workspace owner is a member: every tool except admin-only ones.
+        # The workspace owner is a member: every tool except admin-only ones;
+        # members manage their personal plugins themselves.
         assert len(names) == len([tool for tool in TOOLS if not tool.admin_only])
         assert "mcp_opencuria_mcp_workspace_list" in names
-        assert "mcp_opencuria_mcp_plugin_create" not in names
+        assert "mcp_opencuria_mcp_plugin_create" in names
         connection = runtime.connections[0]
         context = json.loads(
             (await connection.call_tool("opencuria_context", {})).output

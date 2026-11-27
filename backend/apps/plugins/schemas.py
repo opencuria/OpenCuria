@@ -61,27 +61,53 @@ class RuntimeArtifact(Schema):
 
 
 class PluginSkillIn(Schema):
-    """Nested skill definition for plugin create/replace."""
+    """Nested skill definition for plugin create/replace.
 
-    name: str
+    ``id`` keeps an existing skill (and chat selections of it) across
+    renames. A body starting with SKILL.md frontmatter may fill an empty
+    name or description.
+    """
+
+    id: uuid.UUID | None = None
+    name: str = ""
     slug: str = ""
+    description: str = ""
     body: str
     position: int = 0
 
 
 class PluginSkillOut(Schema):
-    """A plugin skill fragment."""
+    """A skill of a plugin."""
 
     id: uuid.UUID
     name: str
     slug: str
+    description: str = ""
     body: str
     position: int
 
 
-class PluginMcpServerIn(Schema):
-    """Nested MCP server definition for plugin create/replace."""
+class SkillOut(Schema):
+    """A skill the user can select for a chat or scheduled task."""
 
+    id: uuid.UUID
+    name: str
+    description: str
+    plugin_id: uuid.UUID
+    plugin_name: str
+    scope: Literal["personal", "organization", "builtin"]
+
+
+class PluginMcpServerIn(Schema):
+    """Nested MCP server definition for plugin create/replace.
+
+    ``command`` may be a whole command line (``npx -y @acme/mcp``) when
+    ``args`` is empty. Secret values are referenced as
+    ``{{credential.KEY}}`` of a credential requirement. Timeouts are not
+    configurable.
+    """
+
+    id: uuid.UUID | None = None
     name: str
     slug: str = ""
     transport: str = "stdio"
@@ -94,8 +120,6 @@ class PluginMcpServerIn(Schema):
     env: dict[str, str] = {}
     url: str = ""
     headers: dict[str, str] = {}
-    startup_timeout_seconds: int = 30
-    request_timeout_seconds: int = 60
     auth_type: str = "none"
     oauth_requirement_key: str = ""
 
@@ -116,19 +140,34 @@ class PluginMcpServerOut(Schema):
     env: dict[str, str]
     url: str
     headers: dict[str, str]
-    startup_timeout_seconds: int
-    request_timeout_seconds: int
     auth_type: str = "none"
     oauth_requirement_key: str = ""
 
 
+class NewCredentialServiceIn(Schema):
+    """A secret service created with the plugin (personal or organization)."""
+
+    name: str
+    env_var_name: str = ""
+
+
 class PluginCredentialRequirementIn(Schema):
-    """Declare a plugin dependency on an existing visible credential service."""
+    """A credential service the plugin needs, optionally with its credential.
+
+    Name an existing service (``service_id``) or create one
+    (``new_service``). ``credential_id`` links the credential the plugin
+    always uses; ``value`` stores a new value as that credential (or
+    updates the linked one). Without either, each workspace attaches its
+    own credential of the service.
+    """
 
     key: str
     description: str = ""
     required: bool = True
-    service_id: uuid.UUID
+    service_id: uuid.UUID | None = None
+    new_service: NewCredentialServiceIn | None = None
+    credential_id: uuid.UUID | None = None
+    value: str | None = None
 
 
 class PluginCredentialRequirementOut(Schema):
@@ -142,16 +181,20 @@ class PluginCredentialRequirementOut(Schema):
     service_name: str
     service_slug: str
     credential_type: str
+    credential_id: uuid.UUID | None = None
+    credential_name: str = ""
+    credential_scope: str = ""
 
 
 # --- Plugin inputs / outputs ---
 
 
 class PluginCreateIn(Schema):
-    """Payload for creating an org-owned plugin with nested components."""
+    """Payload for creating a personal or organization plugin."""
 
     name: str
     slug: str = ""
+    scope: Literal["personal", "organization"] = "personal"
     description: str = ""
     enabled: bool = True
     published: bool = True
@@ -174,7 +217,12 @@ class PluginUpdateIn(Schema):
 
 
 class PluginOut(Schema):
-    """A plugin with nested components and org activation state."""
+    """A plugin with nested components and availability.
+
+    ``available``: can be enabled in the caller's workspaces (personal
+    plugins always; others once released for the organization).
+    ``editable``: the caller may change or delete it.
+    """
 
     id: uuid.UUID
     name: str
@@ -183,8 +231,11 @@ class PluginOut(Schema):
     enabled: bool
     published: bool
     organization_id: uuid.UUID | None = None
+    scope: Literal["personal", "organization", "builtin"] = "builtin"
     is_global: bool = False
     org_enabled: bool = False
+    available: bool = False
+    editable: bool = False
     skills: list[PluginSkillOut] = []
     mcp_servers: list[PluginMcpServerOut] = []
     credential_requirements: list[PluginCredentialRequirementOut] = []

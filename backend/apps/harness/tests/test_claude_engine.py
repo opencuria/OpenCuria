@@ -708,6 +708,7 @@ async def _run_local_cli_fixture(
     responder: Callable[[dict[str, Any], int], bytes] | None = None,
     child_events: list[tuple[str, dict[str, Any]]] | None = None,
     emit_delay: float = 0.0,
+    refresh_plugins: Callable[[], Any] | None = None,
 ) -> tuple[
     Any,
     list[dict[str, Any]],
@@ -829,6 +830,7 @@ async def _run_local_cli_fixture(
         on_question=on_question,
         on_permission=on_permission,
         steering=steering,
+        refresh_plugins=refresh_plugins,
     )
     try:
         result = await asyncio.wait_for(

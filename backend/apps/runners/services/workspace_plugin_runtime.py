@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import uuid
 
-from apps.plugins.runtime import prepare_workspace_runtime
+from apps.plugins.runtime import (
+    prepare_workspace_runtime,
+    workspace_plugin_fingerprint,
+)
 from apps.plugins.runtime_snapshot import PreparedPluginRuntime
 
 from ..repositories import WorkspaceRepository
@@ -33,3 +36,11 @@ class WorkspacePluginRuntimeService:
         """
         workspace = self.workspaces.get_by_id(workspace_id)
         return prepare_workspace_runtime(workspace=workspace, org_id=organization_id)
+
+    def fingerprint(self, workspace_id: uuid.UUID) -> str:
+        """Return a cheap marker that changes when the workspace's plugins do.
+
+        Running agents compare it between steps to pick up plugins enabled,
+        disabled or edited mid-run (see ``apps.harness.mcp_client.reload``).
+        """
+        return workspace_plugin_fingerprint(workspace_id=workspace_id)

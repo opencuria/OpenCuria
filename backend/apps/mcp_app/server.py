@@ -38,12 +38,13 @@ conversation with an agent inside one workspace; the agent works \
 asynchronously.
 - Start with opencuria_context to see the organization, the user's role and \
 which engines are connected.
-- Refer to workspaces, skills, plugins and scheduled tasks by ID or exact name.
+- Refer to workspaces, plugins, skills and scheduled tasks by ID or exact name.
 - To delegate work: chat_start (or chat_send), then chat_read with \
 wait_seconds until the agent is idle; answer its questions with chat_respond.
-- Skills are reusable Markdown instructions; select them per chat or \
-scheduled task. Plugins bundle skills and MCP servers and are enabled per \
-workspace.
+- Plugins bundle skills (Markdown instructions) and MCP servers (tools) and \
+are enabled per workspace. To give yourself a new tool, create a plugin with \
+plugin_create: it is enabled in your workspace and its tools arrive with your \
+next step. Skills can also be selected per chat or scheduled task.
 """
 
 
@@ -85,8 +86,9 @@ def _gap_hint(gaps: list[dict[str, Any]] | None) -> str:
         for gap in gaps
     )
     return (
-        f" Missing credentials: {missing}. Attach a matching credential with "
-        "workspace_update (credentials), then retry."
+        f" Missing credentials: {missing}. Give the plugin the value with "
+        "plugin_update (the server's secrets) or attach a matching credential "
+        "with workspace_update (credentials), then retry."
     )
 
 

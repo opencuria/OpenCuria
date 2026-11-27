@@ -1,21 +1,31 @@
 """
 Database models for the plugins app.
 
-A ``Plugin`` is either global (``organization`` null, managed by platform
-staff) or org-owned. Plugins carry relational components:
+A ``Plugin`` has one of three scopes:
 
-- ``PluginSkill`` -- Markdown prompt fragments, ordered by ``position``.
+- built-in (``organization`` and ``owner`` null, managed by platform staff),
+- organization (``organization`` set, managed by its admins),
+- personal (``owner`` set, visible to and managed by that user in all of
+  their organizations).
+
+Plugins carry relational components:
+
+- ``PluginSkill`` -- Markdown instructions with a description that tells
+  agents when to load them, ordered by ``position``. Skills only exist
+  inside plugins.
 - ``PluginMcpServer`` -- MCP server definitions (stdio, HTTP/SSE or built-in).
   ``command`` is a single executable; ``args`` are never joined into a
   shell string. ``env``/``headers`` values may contain credential
   placeholders of the form ``{{credential.KEY}}``.
-- ``PluginCredentialRequirement`` -- plugin dependency on an independently
-  managed ``CredentialService``.
+- ``PluginCredentialRequirement`` -- the one link between plugins and
+  credentials: the plugin needs a credential of a ``CredentialService``
+  (n:m), and may name the concrete ``Credential`` to use everywhere. Without
+  one, each workspace attaches its own credential of that service.
 
 Activations:
 
-- ``OrgPluginActivation`` -- row existence means the plugin is released
-  org-wide.
+- ``OrgPluginActivation`` -- row existence means a built-in or organization
+  plugin is released org-wide. Personal plugins need no release.
 - ``WorkspacePluginActivation`` -- per-workspace opt-in. Rows survive org
   deactivation (temporarily ineffective until re-enabled).
 """
@@ -42,7 +52,7 @@ class PluginTransport(models.TextChoices):
 
 
 class Plugin(models.Model):
-    """A plugin definition (global or org-owned)."""
+    """A plugin definition (built-in, organization or personal)."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
@@ -51,7 +61,15 @@ class Plugin(models.Model):
         null=True,
         blank=True,
         related_name="plugins",
-        help_text="Null for global OpenCuria plugins; set for org-owned plugins.",
+        help_text="Null for built-in and personal plugins; set for org plugins.",
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="personal_plugins",
+        help_text="Set for personal plugins (mutually exclusive with organization).",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -80,7 +98,7 @@ class Plugin(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["slug"],
-                condition=models.Q(organization__isnull=True),
+                condition=models.Q(organization__isnull=True, owner__isnull=True),
                 name="unique_global_plugin_slug",
             ),
             models.UniqueConstraint(
@@ -88,14 +106,30 @@ class Plugin(models.Model):
                 condition=models.Q(organization__isnull=False),
                 name="unique_org_plugin_slug",
             ),
+            models.UniqueConstraint(
+                fields=["owner", "slug"],
+                condition=models.Q(owner__isnull=False),
+                name="unique_personal_plugin_slug",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(organization__isnull=False, owner__isnull=False),
+                name="plugin_scope_exclusive",
+            ),
         ]
 
     def __str__(self) -> str:
         return self.name
 
+    @property
+    def scope(self) -> str:
+        """``personal``, ``organization`` or ``builtin``."""
+        if self.owner_id is not None:
+            return "personal"
+        return "organization" if self.organization_id is not None else "builtin"
+
 
 class PluginSkill(models.Model):
-    """A Markdown skill fragment belonging to a plugin."""
+    """Markdown instructions belonging to a plugin (an Agent Skill)."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     plugin = models.ForeignKey(
@@ -105,7 +139,13 @@ class PluginSkill(models.Model):
     )
     name = models.CharField(max_length=255)
     slug = models.SlugField(max_length=255)
-    body = models.TextField(help_text="Markdown content appended to the prompt.")
+    description = models.TextField(
+        blank=True,
+        default="",
+        help_text="What the skill does and when to use it; agents see only this "
+        "until they load the skill.",
+    )
+    body = models.TextField(help_text="Markdown instructions of the skill.")
     position = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -172,8 +212,9 @@ class PluginMcpServer(models.Model):
         default="none",
     )
     oauth_requirement_key = models.SlugField(max_length=255, blank=True, default="")
-    startup_timeout_seconds = models.PositiveIntegerField(default=30)
-    request_timeout_seconds = models.PositiveIntegerField(default=60)
+    # Internal tuning for built-in servers; user-defined servers use defaults.
+    startup_timeout_seconds = models.PositiveIntegerField(default=60)
+    request_timeout_seconds = models.PositiveIntegerField(default=600)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -192,7 +233,7 @@ class PluginMcpServer(models.Model):
 
 
 class PluginCredentialRequirement(models.Model):
-    """A plugin dependency on an independently managed credential service."""
+    """A credential service a plugin needs, optionally with its credential."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     plugin = models.ForeignKey(
@@ -208,6 +249,15 @@ class PluginCredentialRequirement(models.Model):
         "credentials.CredentialService",
         on_delete=models.PROTECT,
         related_name="plugin_requirements",
+    )
+    credential = models.ForeignKey(
+        "credentials.Credential",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="plugin_requirements",
+        help_text="Optional credential of credential_service the plugin always "
+        "uses; otherwise each workspace attaches its own.",
     )
     required = models.BooleanField(default=True)
     description = models.TextField(blank=True, default="")

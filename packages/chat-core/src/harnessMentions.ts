@@ -26,6 +26,8 @@ export interface MentionCandidate {
   label: string;
   /** Token inserted after `@`, or skill id for `kind: 'skill'`. */
   insert: string;
+  /** Secondary text, e.g. the plugin a skill belongs to. */
+  detail?: string;
 }
 
 /** Collect all file paths (excluding directories) from a file-explorer tree. */
@@ -184,20 +186,27 @@ export function detectSlashQuery(text: string, cursor: number): string | null {
  */
 export function filterSkillCandidates(
   query: string,
-  skills: Array<{ id: string; name: string }>,
+  skills: Array<{
+    id: string;
+    name: string;
+    plugin_name?: string;
+    description?: string;
+  }>,
 ): MentionCandidate[] {
   const q = query.toLowerCase();
   return skills
     .filter(
       (skill) =>
         skill.name.toLowerCase().includes(q) ||
-        skill.id.toLowerCase().includes(q),
+        skill.id.toLowerCase().includes(q) ||
+        (skill.plugin_name ?? "").toLowerCase().includes(q),
     )
     .slice(0, 10)
     .map((skill) => ({
       kind: "skill" as const,
       label: skill.name,
       insert: skill.id,
+      ...(skill.plugin_name ? { detail: skill.plugin_name } : {}),
     }));
 }
 

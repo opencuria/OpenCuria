@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
 import {
   ActivityIndicator,
   Alert,
   StyleSheet,
   Text,
   View,
+  type ColorValue,
   type LayoutChangeEvent,
 } from "react-native";
 import Reanimated, {
@@ -27,11 +28,19 @@ import {
   formatVoiceDuration,
   voiceWaveformBars,
 } from "@opencuria/chat-core/voiceInput";
+import type { DictationRecordingKind } from "@opencuria/chat-core/voiceInput";
 import type { VoiceClipStatus } from "@opencuria/chat-core/voiceTranscriptions";
 import { ComposerAction } from "../ui/ComposerAction";
+import { useInk } from "../ui/ink";
 import { IconButton } from "../ui/primitives";
 import { statusColor } from "../ui/statusColors";
 import { useTheme } from "../ui/theme";
+
+/** Time and levels of a running recording, read by what shows them. */
+export interface ComposerVoiceMeter {
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => { elapsedMs: number; levels: readonly number[] };
+}
 
 /** The recording on screen. */
 export interface ComposerVoiceRecording {
@@ -40,6 +49,28 @@ export interface ComposerVoiceRecording {
   elapsedMs: number;
   /** Recent microphone levels (0..1), oldest first. */
   levels: readonly number[];
+  /** When present, time and levels come from here instead. */
+  meter?: ComposerVoiceMeter;
+}
+
+const noMeterSubscription = () => () => undefined;
+const QUIET_METER = { elapsedMs: 0, levels: [] as readonly number[] };
+const quietMeter = () => QUIET_METER;
+
+/** Time and levels of `recording`, live from its meter when it has one. */
+function useRecordingMeter(recording: ComposerVoiceRecording): {
+  elapsedMs: number;
+  levels: readonly number[];
+} {
+  const meter = recording.meter;
+  const live = useSyncExternalStore(
+    meter?.subscribe ?? noMeterSubscription,
+    meter?.getSnapshot ?? quietMeter,
+    meter?.getSnapshot ?? quietMeter,
+  );
+  return meter
+    ? live
+    : { elapsedMs: recording.elapsedMs, levels: recording.levels };
 }
 
 /** A recording of this chat that waits for its text. */
@@ -56,7 +87,17 @@ export interface ComposerVoiceNotice {
 }
 
 /** Takes a transcript of the chat on screen; `send` asks to send it at once. */
-export type ComposerVoiceReceiver = (text: string, send: boolean) => void;
+/** A recording saved beside the transcript, referenced in the draft. */
+export interface ComposerVoiceRecordingRef {
+  path: string;
+  kind: DictationRecordingKind;
+}
+
+export type ComposerVoiceReceiver = (
+  text: string,
+  send: boolean,
+  recording?: ComposerVoiceRecordingRef,
+) => void;
 
 /** Dictation in the composer; the host owns recording and transcription. */
 export interface ComposerVoice {
@@ -81,12 +122,12 @@ const BAR_MIN = 3;
 const BAR_RANGE = 21;
 
 /** Live microphone levels, newest at the trailing edge, as in the webapp. */
-function VoiceWaveform({
+export function VoiceWaveform({
   levels,
   color,
 }: {
   levels: readonly number[];
-  color: string;
+  color: ColorValue;
 }): React.JSX.Element {
   const [width, setWidth] = useState(0);
   const count = Math.ceil((width + BAR_GAP) / (BAR_WIDTH + BAR_GAP));
@@ -117,8 +158,13 @@ function VoiceWaveform({
 }
 
 /** The red recording light, pulsing like the system's while it records. */
-function RecordingLight({ active }: { active: boolean }): React.JSX.Element {
+export function RecordingLight({
+  active,
+}: {
+  active: boolean;
+}): React.JSX.Element {
   const { theme } = useTheme();
+  const ink = useInk();
   const reduceMotion = useReducedMotion();
   const opacity = useSharedValue(1);
   useEffect(() => {
@@ -138,7 +184,7 @@ function RecordingLight({ active }: { active: boolean }): React.JSX.Element {
         {
           backgroundColor: active
             ? statusColor("critical", theme)
-            : theme.subtleText,
+            : ink.subtleText,
         },
         animated,
       ]}
@@ -159,8 +205,9 @@ export function VoiceRecordingBar({
   onCancel: () => void;
   onFinish: (send: boolean) => void;
 }): React.JSX.Element {
-  const { theme } = useTheme();
+  const ink = useInk();
   const live = recording.phase === "recording";
+  const { elapsedMs, levels } = useRecordingMeter(recording);
   return (
     <View
       testID="voice-recording-bar"
@@ -180,7 +227,7 @@ export function VoiceRecordingBar({
         accessibilityRole="text"
         accessibilityLabel={
           live
-            ? `Recording, ${formatVoiceDuration(recording.elapsedMs)}`
+            ? `Recording, ${formatVoiceDuration(elapsedMs)}`
             : recording.phase === "starting"
               ? "Starting microphone"
               : "Saving recording"
@@ -189,15 +236,15 @@ export function VoiceRecordingBar({
       >
         <RecordingLight active={live} />
         {recording.phase === "finishing" ? (
-          <ActivityIndicator size="small" color={theme.mutedText} />
+          <ActivityIndicator size="small" color={ink.mutedText} />
         ) : null}
         <Text
           testID="voice-elapsed"
-          style={[styles.elapsed, { color: theme.text }]}
+          style={[styles.elapsed, { color: ink.text }]}
         >
-          {formatVoiceDuration(recording.elapsedMs)}
+          {formatVoiceDuration(elapsedMs)}
         </Text>
-        <VoiceWaveform levels={recording.levels} color={theme.mutedText} />
+        <VoiceWaveform levels={levels} color={ink.mutedText} />
       </View>
       <ComposerAction
         label="Stop and edit"

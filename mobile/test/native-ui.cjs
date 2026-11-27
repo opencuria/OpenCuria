@@ -919,3 +919,50 @@ exports.SettingsPage = ({
       : exports.NativeForm({ sections, empty }),
   )
 }
+
+// Sheet pages: a UIKit navigation controller / Material bars. Only the top
+// page is on screen; its bar shows back, title, actions and the menu.
+function sheetPage(page, onBack) {
+  const menuActions = page.menu
+    ? page.menu.sections.flatMap((section) => section.actions)
+    : []
+  return h(
+    View,
+    { testID: page.testID },
+    onBack
+      ? h(exports.IconButton, {
+          label: 'Back',
+          onPress: onBack,
+          testID: page.testID ? `${page.testID}-back` : undefined,
+        })
+      : null,
+    h(Text, null, page.title),
+    page.subtitle ? h(Text, null, page.subtitle) : null,
+    ...(page.actions ?? []).map((action) =>
+      h(exports.IconButton, {
+        key: action.id,
+        label: action.label,
+        disabled: action.disabled,
+        onPress: action.onPress,
+        testID: action.testID,
+      }),
+    ),
+    menuActions.length
+      ? h(
+          exports.NativeMenu,
+          {
+            label: page.menu.label,
+            actions: menuActions,
+            onSelect: page.menu.onSelect,
+            testID: page.menu.testID,
+          },
+          h(Text, null, page.menu.label),
+        )
+      : null,
+    page.children,
+  )
+}
+exports.SheetStack = ({ root, detail, detailShown, onDetailShownChange }) =>
+  detail && detailShown
+    ? sheetPage(detail, () => onDetailShownChange(false))
+    : sheetPage(root)

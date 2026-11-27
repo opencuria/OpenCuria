@@ -306,6 +306,61 @@ describe("VoiceTranscriptionQueue", () => {
     expect(queue.getSnapshot()).toEqual([]);
   });
 
+  it("attaches a recording's timeline once, waiting for the network", async () => {
+    const memory = memoryStore();
+    const net = network(true);
+    const transcribe = vi.fn().mockResolvedValue({ text: "Tap here." });
+    const attach = vi
+      .fn()
+      .mockRejectedValueOnce(offline())
+      .mockImplementationOnce(async (_clip, transcript) => ({
+        ...transcript,
+        recording_path: "/workspace/.opencuria/recordings/r/timeline.md",
+      }));
+    const deliver = vi.fn();
+    const queue = new VoiceTranscriptionQueue({
+      store: memory.store,
+      transcribe,
+      attach,
+      deliver,
+      connectivity: net.connectivity,
+    });
+    await queue.add(clip("a"));
+    await flush();
+    expect(queue.getSnapshot()[0]!.status).toMatchObject({
+      kind: "waiting",
+      failure: { kind: "offline" },
+    });
+    // The transcript is kept while the timeline waits.
+    expect(memory.saved()[0]!.transcript).toEqual({ text: "Tap here." });
+    net.set(false);
+    net.set(true);
+    await flush();
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(attach).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }), {
+      text: "Tap here.",
+      recording_path: "/workspace/.opencuria/recordings/r/timeline.md",
+    });
+    expect(queue.getSnapshot()).toEqual([]);
+  });
+
+  it("delivers an empty transcript without attaching anything", async () => {
+    const memory = memoryStore();
+    const attach = vi.fn();
+    const deliver = vi.fn();
+    const queue = new VoiceTranscriptionQueue({
+      store: memory.store,
+      transcribe: vi.fn().mockResolvedValue({ text: " " }),
+      attach,
+      deliver,
+    });
+    await queue.add(clip("a"));
+    await flush();
+    expect(attach).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+
   it("lets the user retry a refused recording and wakes waiting ones", async () => {
     const memory = memoryStore();
     const transcribe = vi

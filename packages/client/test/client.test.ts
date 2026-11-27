@@ -217,6 +217,33 @@ describe("API authentication and errors", () => {
     });
   });
 
+  it.each([
+    [["body", "payload", "pointers", 0, "t_ms"], "pointers.0.t_ms: Not whole"],
+    [["query", "limit"], "limit: Not whole"],
+    [null, "Not whole"],
+  ])(
+    "names the field of a schema validation error (%j)",
+    async (loc, message) => {
+      const detail = [{ type: "int_from_float", loc, msg: "Not whole" }];
+      const client = clientOptions().create(
+        vi.fn(async () => jsonResponse({ detail }, 422)) as any,
+      );
+      await expect(client.api.post("/thing", {})).rejects.toMatchObject({
+        status: 422,
+        message,
+      });
+    },
+  );
+
+  it("keeps the generic message for unreadable error payloads", async () => {
+    const client = clientOptions().create(
+      vi.fn(async () => jsonResponse({ detail: [] }, 422)) as any,
+    );
+    await expect(client.api.get("/thing")).rejects.toMatchObject({
+      message: "Unknown error",
+    });
+  });
+
   it("does not refresh auth endpoints and expires auth once after refresh failure", async () => {
     let refreshCalls = 0;
     const refreshGate = deferred<Response>();

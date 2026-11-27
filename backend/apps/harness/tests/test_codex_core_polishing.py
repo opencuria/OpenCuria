@@ -330,8 +330,13 @@ def test_repository_checkpoint_rollback_closing_and_missing_generation(
 
 
 @pytest.mark.asyncio
-async def test_changed_registry_requires_fork_before_launch() -> None:
-    """Missing plugins or changed signatures never reuse an old thread silently."""
+async def test_changed_registry_resumes_with_the_thread_tool_set() -> None:
+    """Plugins changed since the thread started never break its next turn.
+
+    The thread keeps the dynamic tools it started with: tools registered
+    later are not authorized in it, and the run proceeds to launch (here it
+    stops at the missing accessor instead of a fork error).
+    """
     from apps.harness.engines.codex.engine import CodexEngine
     from apps.harness.tests.test_codex_core_safety import auth
 
@@ -340,9 +345,12 @@ async def test_changed_registry_requires_fork_before_launch() -> None:
         accessor=None,
         auth=auth("openrouter"),
         external_session_id=str(uuid.uuid4()),
-        engine_state={"codex_tools": "old-plugin-schema-fingerprint"},
+        engine_state={
+            "codex_tools": "old-plugin-schema-fingerprint",
+            "codex_dynamic_tools": ["question"],
+        },
     )
-    with pytest.raises(RuntimeError, match="signatures changed; fork"):
+    with pytest.raises(AttributeError, match="ensure_runtime_artifact"):
         await engine.run(
             "Continue",
             "build",
@@ -350,6 +358,9 @@ async def test_changed_registry_requires_fork_before_launch() -> None:
             "build",
             RunOptions(session_id=str(uuid.uuid4())),
         )
+    # todowrite and the process tools are registered now but were not
+    # part of the thread's dynamic tools.
+    assert engine.allowed == {"question"}
 
 
 @pytest.mark.asyncio

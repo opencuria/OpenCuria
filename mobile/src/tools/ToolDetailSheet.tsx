@@ -1,5 +1,7 @@
 import React from "react";
 import { Modal, Platform, View } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { RecordingOverlay } from "../components/RecordingOverlay";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { ModalFrame } from "../ui/ModalFrame";
 import { ToastHost } from "../ui/ToastHost";
@@ -22,7 +24,8 @@ export interface ToolDetailSheetProps {
 /**
  * Viewer presented above the tools sheet, e.g. a file or a diff: a UIKit page
  * sheet with a native navigation bar on iOS (swipe down closes it) and a
- * full-screen system dialog with an AppCompat toolbar on Android.
+ * full-screen system dialog with an AppCompat toolbar on Android. It covers
+ * the composer, so a running recording's bar floats here.
  */
 export function ToolDetailSheet({
   visible,
@@ -45,7 +48,8 @@ export function ToolDetailSheet({
       presentationStyle={Platform.OS === "ios" ? "pageSheet" : undefined}
       onRequestClose={onClose}
     >
-      <View style={{ flex: 1 }}>
+      {/* Modals need their own gesture root (pointing, taps on lines). */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
         <ModalFrame
           title={title}
           subtitle={subtitle}
@@ -62,8 +66,9 @@ export function ToolDetailSheet({
             {children}
           </View>
         </ModalFrame>
+        <RecordingOverlay />
         <ToastHost />
-      </View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }

@@ -37,11 +37,16 @@ class CredentialServiceRepository:
         return CredentialService.objects.exclude(credential_type="provider_secret")
 
     @staticmethod
-    def list_visible_to_org(org_id: uuid.UUID) -> QuerySet[CredentialService]:
+    def list_visible_to_org(
+        org_id: uuid.UUID, user_id: int | None = None
+    ) -> QuerySet[CredentialService]:
+        """Global and organization services, plus *user_id*'s personal ones."""
+        shared = Q(owner__isnull=True) & (
+            Q(organization__isnull=True) | Q(organization_id=org_id)
+        )
+        visible = shared | Q(owner_id=user_id) if user_id is not None else shared
         return (
-            CredentialService.objects.filter(
-                Q(organization__isnull=True) | Q(organization_id=org_id)
-            )
+            CredentialService.objects.filter(visible)
             .exclude(credential_type="provider_secret")
             .order_by("name")
         )
@@ -62,19 +67,23 @@ class CredentialServiceRepository:
 
     @staticmethod
     def get_visible_by_id(
-        service_id: uuid.UUID, org_id: uuid.UUID
+        service_id: uuid.UUID, org_id: uuid.UUID, user_id: int | None = None
     ) -> CredentialService | None:
         return (
-            CredentialServiceRepository.list_visible_to_org(org_id)
+            CredentialServiceRepository.list_visible_to_org(org_id, user_id)
             .filter(id=service_id)
             .first()
         )
 
     @staticmethod
+    def get_personal_by_slug(slug: str, owner_id: int) -> CredentialService | None:
+        return CredentialService.objects.filter(slug=slug, owner_id=owner_id).first()
+
+    @staticmethod
     def get_global_by_slug(slug: str) -> CredentialService | None:
         return (
             CredentialService.objects.exclude(credential_type="provider_secret")
-            .filter(slug=slug, organization__isnull=True)
+            .filter(slug=slug, organization__isnull=True, owner__isnull=True)
             .first()
         )
 
@@ -126,6 +135,7 @@ class CredentialServiceRepository:
         label: str,
         organization_id: uuid.UUID | None = None,
         oauth_server_url: str = "",
+        owner=None,
     ) -> CredentialService:
         return CredentialService.objects.create(
             name=name,
@@ -137,6 +147,7 @@ class CredentialServiceRepository:
             label=label,
             organization_id=organization_id,
             oauth_server_url=oauth_server_url,
+            owner=owner,
         )
 
 
@@ -206,6 +217,14 @@ class CredentialRepository:
             .exclude(service__credential_type="provider_secret")
             .select_related("service", "user", "organization", "oauth_registration")
             .first()
+        )
+
+    @staticmethod
+    def list_by_ids(credential_ids: list[uuid.UUID]) -> list[Credential]:
+        return list(
+            Credential.objects.filter(id__in=credential_ids)
+            .exclude(service__credential_type="provider_secret")
+            .select_related("service", "user", "organization", "oauth_registration")
         )
 
     @staticmethod

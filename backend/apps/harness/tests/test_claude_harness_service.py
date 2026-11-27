@@ -250,21 +250,28 @@ async def test_claude_max_steps_result_is_persisted_as_completed(harness_workspa
     assert attempt.status == "completed"
 
 
+def _personal_skill(workspace, name: str, body: str):
+    """Create a skill in a personal plugin of the workspace owner."""
+    from apps.plugins.models import Plugin, PluginSkill
+
+    plugin = Plugin.objects.create(
+        name=f"{name} plugin",
+        slug=f"plugin-{uuid.uuid4().hex[:8]}",
+        owner_id=workspace.created_by_id,
+    )
+    return PluginSkill.objects.create(
+        plugin=plugin, name=name, slug=f"skill-{uuid.uuid4().hex[:8]}", body=body
+    )
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_claude_start_preflights_oversized_skill_before_messages(
     harness_workspace,
 ):
     """Claude skill limits fail before a user or assistant shell is created."""
-    from apps.skills.models import Skill
-
     service, _registry, _connections, _events = _service(connection_id=uuid.uuid4())
     session = await _new_session(service, harness_workspace)
-    skill = Skill.objects.create(
-        name="Oversized",
-        body="x" * (64 * 1024 + 1),
-        organization_id=session.organization_id,
-        created_by_id=harness_workspace.created_by_id,
-    )
+    skill = _personal_skill(harness_workspace, "Oversized", "x" * (64 * 1024 + 1))
     session.skill_ids = [str(skill.id)]
     session.save(update_fields=["skill_ids"])
 
@@ -286,8 +293,6 @@ async def test_claude_edit_preflights_inherited_skill_before_deleting_suffix(
     harness_workspace,
 ):
     """An invalid inherited selection preserves Claude history and transcript ID."""
-    from apps.skills.models import Skill
-
     service, _registry, _connections, _events = _service(connection_id=uuid.uuid4())
     session = await _new_session(service, harness_workspace)
     for prompt in ("first turn", "second turn"):
@@ -302,11 +307,8 @@ async def test_claude_edit_preflights_inherited_skill_before_deleting_suffix(
     messages_before = HarnessMessageRepository.list_for_session(session.id)
     transcript_id_before = session.external_session_id
     assert transcript_id_before
-    skill = Skill.objects.create(
-        name="Oversized inherited skill",
-        body="x" * (64 * 1024 + 1),
-        organization_id=session.organization_id,
-        created_by_id=harness_workspace.created_by_id,
+    skill = _personal_skill(
+        harness_workspace, "Oversized inherited skill", "x" * (64 * 1024 + 1)
     )
     session.skill_ids = [str(skill.id)]
     session.save(update_fields=["skill_ids"])

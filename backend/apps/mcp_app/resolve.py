@@ -15,9 +15,9 @@ from typing import Any, TypeVar
 
 from apps.credentials.services import CredentialSvc
 from apps.plugins.services import PluginService
+from apps.plugins.skills import PluginSkillService
 from apps.runners.services import get_runner_service
 from apps.scheduled_tasks.services import ScheduledTaskService
-from apps.skills.services import SkillService
 
 from .context import ToolContext
 from .errors import ToolError
@@ -122,32 +122,27 @@ def workspace(ctx: ToolContext, ref: str) -> Any:
     )
 
 
-def skill(ctx: ToolContext, ref: str) -> Any:
-    """Resolve a skill visible to the caller by ID or name."""
-    return pick(
-        SkillService().list_skills(ctx.user, ctx.organization_id),
-        ref,
-        kind="skill",
-        list_tool="skill_list",
-        id_of=lambda s: s.id,
-        names_of=lambda s: [s.name],
+def list_skills(ctx: ToolContext) -> list[Any]:
+    """Return the plugin skills the caller can select (plugin loaded)."""
+    return PluginSkillService().list_usable(
+        user_id=ctx.user.id, organization_id=ctx.organization_id
     )
 
 
 def skill_ids(ctx: ToolContext, refs: list[str] | None) -> list[str]:
-    """Resolve skill references to their ID strings, preserving order."""
+    """Resolve skill references (ID or name) to ID strings, preserving order."""
     if not refs:
         return []
-    visible = SkillService().list_skills(ctx.user, ctx.organization_id)
+    usable = list_skills(ctx)
     resolved: list[str] = []
     for ref in refs:
         found = pick(
-            visible,
+            usable,
             ref,
             kind="skill",
-            list_tool="skill_list",
+            list_tool="plugin_list",
             id_of=lambda s: s.id,
-            names_of=lambda s: [s.name],
+            names_of=lambda s: [s.name, s.slug],
         )
         if str(found.id) not in resolved:
             resolved.append(str(found.id))
@@ -159,20 +154,20 @@ def skill_names(ctx: ToolContext, ids: Iterable[Any]) -> list[str]:
     wanted = [str(value) for value in ids or []]
     if not wanted:
         return []
-    by_id = {
-        str(s.id): s.name
-        for s in SkillService().list_skills(ctx.user, ctx.organization_id)
-    }
+    by_id = {str(s.id): s.name for s in list_skills(ctx)}
     return [by_id[value] for value in wanted if value in by_id]
 
 
 def plugin(ctx: ToolContext, ref: str) -> dict[str, Any]:
     """Resolve a visible plugin by ID, slug or name (serialized dict).
 
-    Members only resolve plugins activated for the organization.
+    Members only resolve their personal plugins and plugins released for
+    the organization.
     """
     return pick(
-        PluginService().list_visible(org_id=ctx.organization_id, admin=ctx.is_admin),
+        PluginService().list_visible(
+            org_id=ctx.organization_id, user=ctx.user, admin=ctx.is_admin
+        ),
         ref,
         kind="plugin",
         list_tool="plugin_list",
@@ -184,7 +179,7 @@ def plugin(ctx: ToolContext, ref: str) -> dict[str, Any]:
 def plugin_ids(ctx: ToolContext, refs: list[str]) -> list[uuid.UUID]:
     """Resolve plugin references to IDs, preserving order."""
     visible = PluginService().list_visible(
-        org_id=ctx.organization_id, admin=ctx.is_admin
+        org_id=ctx.organization_id, user=ctx.user, admin=ctx.is_admin
     )
     resolved: list[uuid.UUID] = []
     for ref in refs:

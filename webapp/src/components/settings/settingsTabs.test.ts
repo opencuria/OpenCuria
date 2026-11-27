@@ -6,7 +6,6 @@ describe('resolveSettingsTab', () => {
     'general',
     'provider',
     'agents',
-    'skills',
     'credentials',
     'plugins',
     'api-keys',
@@ -17,6 +16,10 @@ describe('resolveSettingsTab', () => {
     'windows',
   ])('accepts the current tab %s', (tab) => {
     expect(resolveSettingsTab(tab)).toBe(tab)
+  })
+
+  it('opens Plugins for old skills links', () => {
+    expect(resolveSettingsTab('skills')).toBe('plugins')
   })
 
   it('falls back to general for unknown values', () => {

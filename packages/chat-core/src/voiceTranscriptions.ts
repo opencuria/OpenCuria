@@ -10,6 +10,7 @@ import {
   VOICE_TRANSCRIBE_TIMEOUT_MS,
   isVoiceAbort,
   voiceFailure,
+  type DictationRecordingKind,
   type VoiceFailure,
 } from "./voiceInput";
 
@@ -18,6 +19,19 @@ export interface VoiceTranscriptText {
   text: string;
   /** The text is the verbatim transcript because cleanup failed. */
   cleanup_warning?: string;
+  /** Timed source phrases; kept for recordings with a visual timeline. */
+  segments?: Array<{
+    start_ms: number;
+    end_ms: number;
+    text: string;
+    raw_text?: string;
+  }>;
+  timing?: "provider" | "approximate";
+  raw_text?: string;
+  speech_model?: string;
+  cleanup_model?: string;
+  /** The saved timeline of a recording with visual references. */
+  recording_path?: string;
 }
 
 /**
@@ -194,6 +208,12 @@ export interface VoiceClip<Target = string> {
   send?: boolean;
   /** Kept once known, so a delivery that did not finish never pays twice. */
   transcript?: VoiceTranscriptText;
+  /**
+   * Visual references recorded with the audio (images, files, an open app's
+   * frames, taps and logs), stored by the client next to the audio; `attach`
+   * saves them.
+   */
+  visual?: { kind: DictationRecordingKind; recordingId: string };
 }
 
 export type VoiceClipStatus =
@@ -233,6 +253,17 @@ export interface VoiceQueuePorts<Target = string> {
     clip: VoiceClip<Target>,
     transcript: VoiceTranscriptText,
   ) => Promise<void> | void;
+  /**
+   * One attempt to store what a clip recorded beside its audio (frames, a
+   * timeline) once its text is known; resolves to the transcript with
+   * `recording_path`. Retried like transcription; skipped for clips that
+   * need none (resolve to the transcript unchanged).
+   */
+  attach?: (
+    clip: VoiceClip<Target>,
+    transcript: VoiceTranscriptText,
+    signal: AbortSignal,
+  ) => Promise<VoiceTranscriptText>;
   connectivity?: VoiceConnectivity | null;
 }
 
@@ -433,6 +464,29 @@ export class VoiceTranscriptionQueue<Target = string> {
         if (signal.aborted || !current()) return;
         this.update(id, { clip: { ...current()!, transcript } });
         await this.persist();
+      }
+      const attach = this.ports.attach;
+      if (attach && transcript.text.trim() && !transcript.recording_path) {
+        const known = transcript;
+        transcript = await runVoiceTranscription({
+          transcribe: (attempt) => attach(current()!, known, attempt),
+          signal,
+          connectivity: this.connectivity,
+          timeoutMs: this.options.timeoutMs,
+          retryDelaysMs: this.options.retryDelaysMs,
+          now: this.now,
+          onWait: (wait) =>
+            this.update(id, {
+              status: wait
+                ? { kind: "waiting", ...wait }
+                : { kind: "transcribing" },
+            }),
+        });
+        if (signal.aborted || !current()) return;
+        if (transcript !== known) {
+          this.update(id, { clip: { ...current()!, transcript } });
+          await this.persist();
+        }
       }
       if (signal.aborted || !current()) return;
       await this.ports.deliver(current()!, transcript);

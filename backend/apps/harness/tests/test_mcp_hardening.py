@@ -1070,9 +1070,11 @@ def test_foreign_credential_attach_ignored(db, caplog):
         name="r", api_token_hash=hash_token(_uuid.uuid4().hex), organization=org
     )
     workspace = Workspace.objects.create(runner=runner, name="w", created_by=user)
-    created = PluginService().create_org_plugin(
+    created = PluginService().create_plugin(
         org_id=org.id,
         user=user,
+        scope="organization",
+        admin=True,
         name="FP",
         slug="fp",
         skills=[],

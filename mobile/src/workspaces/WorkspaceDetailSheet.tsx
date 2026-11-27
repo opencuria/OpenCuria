@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Alert } from "react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Modal, Platform, View } from "react-native";
 import {
   UNLISTED_RUNNER_QEMU_LIMITS,
   isDesktopSizeValid,
@@ -17,8 +17,16 @@ import type {
   NativeFormRow,
   NativeFormSection,
 } from "../ui/NativeForm.types";
-import { NativeModal } from "../ui/primitives";
+import type { ModalPrimaryAction } from "../ui/ModalFrame.types";
+import { useTheme } from "../ui/theme";
 import { showToast } from "../ui/toast";
+import { ToastHost } from "../ui/ToastHost";
+import {
+  SettingsNavigationContext,
+  type SettingsNavigation,
+} from "../settings/SettingsContext";
+import { SettingsNavigator } from "../settings/SettingsNavigator";
+import { SettingsPage } from "../settings/SettingsPage";
 import { CaptureImageSheet } from "./CaptureImageSheet";
 import type { WorkspaceCatalog } from "./useWorkspaceCatalog";
 import {
@@ -75,9 +83,13 @@ function settingsInput(workspace: Workspace): WorkspaceSettingsInput {
   };
 }
 
+/** Route of the pushed "Plugins & Credentials" page. */
+const ACCESS_ROUTE = "access";
+
 /**
- * One workspace: status and quick actions on top, then its settings (name,
- * plugins, credentials, resources) and removal, like an iOS settings page.
+ * One workspace: status and quick actions on top, then its settings and
+ * removal, like an iOS settings page. Plugins and credentials live on a
+ * pushed "Plugins & Credentials" page of the sheet's native navigation stack.
  */
 export function WorkspaceDetailSheet(
   props: WorkspaceDetailSheetProps,
@@ -117,6 +129,8 @@ function DetailSheet({
   const [saving, setSaving] = useState(false);
   // Presented above this sheet, so it opens from here rather than the list.
   const [capturing, setCapturing] = useState(false);
+  const [path, setPath] = useState<string[]>([]);
+  const { theme } = useTheme();
   const state = workspaceState(workspace);
   const editable = state.actions.edit && !saving;
   const dirty = isWorkspaceSettingsChanged(current, form, limits);
@@ -195,7 +209,7 @@ function DetailSheet({
     }
   };
 
-  const close = () => {
+  const close = useCallback(() => {
     if (!dirty) {
       onClose();
       return;
@@ -208,7 +222,22 @@ function DetailSheet({
         { text: "Discard", style: "destructive", onPress: onClose },
       ],
     );
-  };
+  }, [dirty, onClose]);
+  const navigation = useMemo<SettingsNavigation>(
+    () => ({
+      push: (next) =>
+        setPath((current) =>
+          current[current.length - 1] === next ? current : [...current, next],
+        ),
+      pop: () => setPath((current) => current.slice(0, -1)),
+      replace: (next) => setPath((current) => [...current.slice(0, -1), next]),
+      popToRoot: () => setPath([]),
+      close,
+      choose: () => undefined,
+      present: () => undefined,
+    }),
+    [close],
+  );
 
   const after = (ok: boolean) => {
     if (ok) void onChanged();
@@ -388,7 +417,23 @@ function DetailSheet({
         ? undefined
         : "Settings can be changed while the workspace is running or stopped and its runner is online.",
     },
-    ...selection.sections,
+    {
+      id: "access",
+      rows: [
+        {
+          kind: "link",
+          id: "access-link",
+          title: "Plugins & Credentials",
+          symbol: "puzzlepiece.extension",
+          subtitle: selection.summary
+            ? (selection.summary.issue ?? selection.summary.text)
+            : "Loading…",
+          subtitleTone: selection.summary?.issue ? "warning" : "muted",
+          busy: !selection.summary,
+          route: ACCESS_ROUTE,
+        },
+      ],
+    },
     {
       id: "resources",
       title: "Resources",
@@ -436,33 +481,72 @@ function DetailSheet({
     },
   ];
 
+  const primaryAction: ModalPrimaryAction = {
+    title: "Save",
+    onPress: () => {
+      void save();
+    },
+    disabled: !dirty || !valid || !editable,
+    busy: saving,
+    testID: "workspace-save",
+  };
+
   return (
-    <NativeModal
+    <Modal
       visible
-      onClose={close}
-      title="Workspace"
-      swipeToDismiss={!dirty}
-      primaryAction={{
-        title: "Save",
-        onPress: () => {
-          void save();
-        },
-        disabled: !dirty || !valid || !editable,
-        busy: saving,
-        testID: "workspace-save",
-      }}
-      testID="workspace-detail-sheet"
-      form={{ sections }}
+      statusBarTranslucent
+      navigationBarTranslucent
+      animationType="slide"
+      presentationStyle="pageSheet"
+      // Unsaved changes keep the sheet until the close button confirms.
+      allowSwipeDismissal={!dirty}
+      // Back pops the sub page on Android before it closes the sheet.
+      onRequestClose={() =>
+        Platform.OS === "android" && path.length ? navigation.pop() : close()
+      }
     >
-      <CaptureImageSheet
-        workspace={capturing ? workspace : null}
-        client={client}
-        catalog={catalog}
-        onClose={() => setCapturing(false)}
-        onCaptured={async () => {
-          await Promise.allSettled([onChanged(), catalog.reload()]);
-        }}
-      />
-    </NativeModal>
+      <SettingsNavigationContext.Provider value={navigation}>
+        <View
+          accessibilityViewIsModal
+          onAccessibilityEscape={path.length ? navigation.pop : close}
+          testID="workspace-detail-sheet"
+          style={{ flex: 1, backgroundColor: theme.background }}
+        >
+          <SettingsNavigator
+            path={path}
+            onPathChange={setPath}
+            root={
+              <SettingsPage
+                root
+                title="Workspace"
+                sections={sections}
+                primaryAction={primaryAction}
+              />
+            }
+            renderRoute={(route) =>
+              route === ACCESS_ROUTE ? (
+                <SettingsPage
+                  title="Plugins & Credentials"
+                  sections={selection.sections}
+                  primaryAction={primaryAction}
+                  testID="workspace-access-page"
+                />
+              ) : null
+            }
+          />
+        </View>
+        <CaptureImageSheet
+          workspace={capturing ? workspace : null}
+          client={client}
+          catalog={catalog}
+          onClose={() => setCapturing(false)}
+          onCaptured={async () => {
+            await Promise.allSettled([onChanged(), catalog.reload()]);
+          }}
+        />
+        {/* Inside the modal root, so VoiceOver can reach its toasts. */}
+        <ToastHost />
+      </SettingsNavigationContext.Provider>
+    </Modal>
   );
 }

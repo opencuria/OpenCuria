@@ -324,6 +324,7 @@ function TaskSheet({
         kind: "toggle",
         id: `task-skill-${skill.id}`,
         label: skill.name,
+        subtitle: skill.plugin_name || undefined,
         value: form.skillIds.includes(skill.id),
         onChange: () => toggleSkill(skill.id),
         disabled: busy,

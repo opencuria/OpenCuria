@@ -128,6 +128,7 @@ describe("AppInstaller", () => {
 
     const installed = await installer.install(v1, {
       ...options(fs),
+      workspaceId: "ws-1",
       onProgress: progress,
     });
 
@@ -137,6 +138,7 @@ describe("AppInstaller", () => {
       versionNumber: 1,
       hasIcon: true,
       scope: "https://curia|org|1",
+      workspaceId: "ws-1",
     });
     expect(progress).toHaveBeenLastCalledWith({ done: 16, total: 16 });
     const layout = appLayout(ROOT, "app-1");
@@ -153,6 +155,12 @@ describe("AppInstaller", () => {
       orientation: "portrait",
       localAssets: {
         [v1.assets[0]!.key]: `${layout.assets}/${v1.assets[0]!.key}.png`,
+      },
+      // The companion over the app chats in the app's workspace.
+      companion: {
+        scope: "https://curia|org|1",
+        workspaceId: "ws-1",
+        versionName: installed.versionName,
       },
     });
     expect(launch.manifest).toMatchObject({

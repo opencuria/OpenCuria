@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import {
   emptyMcpForm,
-  emptyRequirementForm,
   emptySkillForm,
   entryErrors,
   formToCreateIn,
@@ -11,7 +10,10 @@ import {
   requirementLabel,
   skillLabel,
   validatePluginForm,
+  type PluginFormModel,
+  keepUsableCredentials,
 } from "@opencuria/chat-core/pluginForms";
+import type { Credential } from "@opencuria/client";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { errorRows } from "../../../ui/formStates";
 import { showToast } from "../../../ui/toast";
@@ -19,21 +21,26 @@ import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
-import { transportLabel } from "./plugins";
-import { ACTIVE_SERVICES, PLUGINS, loadServices } from "./resources";
+import { mcpFormSubtitle } from "./plugins";
+import {
+  ACTIVE_SERVICES,
+  CREDENTIALS,
+  PLUGINS,
+  loadServices,
+} from "./resources";
 import { usePluginDraft } from "./usePluginDraft";
 
 /**
- * Creates or edits an organization plugin: its name and availability, then
- * one page per skill, MCP server and credential requirement. The plugin is
- * validated as in the webapp before it can be saved.
+ * Creates or edits a plugin: name, description and who can use it, then one
+ * page per skill and MCP server. Credential requirements sit under
+ * Advanced. The draft is validated as in the webapp before it can be saved.
  */
 export function PluginEditorPage({
   draftKey,
 }: {
   draftKey: string;
 }): React.JSX.Element {
-  const { client, resources } = useSettings();
+  const { client, resources, isAdmin, refreshWorkspaces } = useSettings();
   const navigation = useSettingsNavigation();
   const { draft, update } = usePluginDraft(draftKey);
   const services = useResource(resources, ACTIVE_SERVICES, () =>
@@ -61,7 +68,10 @@ export function PluginEditorPage({
     availableServices: services.data ?? [],
   });
   const general = generalErrors(errors);
-  const entryRoute = (kind: string, uid: string) => route(kind, draftKey, uid);
+  const entryRoute = (page: string, uid: string) => route(page, draftKey, uid);
+  const requirementProblems = form.requirements.flatMap((requirement, index) =>
+    entryErrors(errors, requirementLabel(requirement, index)),
+  );
 
   const save = async () => {
     setBusy(true);
@@ -76,25 +86,19 @@ export function PluginEditorPage({
             plugin.id === saved.id ? saved : plugin,
           ),
         );
-        showToast({
-          title: "Plugin updated",
-          message: `"${saved.name}" was saved.`,
-          tone: "success",
-        });
+        showToast({ title: "Plugin saved", tone: "success" });
         navigation.pop();
       } else {
         const created = await client.plugins.create(formToCreateIn(form));
         plugins.set((current) => [...(current ?? []), created]);
-        showToast({
-          title: "Plugin created",
-          message: `"${created.name}" is ready.`,
-          tone: "success",
-        });
+        showToast({ title: "Plugin created", tone: "success" });
         navigation.replace(route("plugin", created.id));
       }
+      // The composer offers the skills of usable plugins.
+      void refreshWorkspaces();
     } catch (cause) {
       showToast({
-        title: pluginId ? "Update failed" : "Creation failed",
+        title: pluginId ? "Saving failed" : "Creation failed",
         message: errorMessage(cause, "Please try again."),
         tone: "error",
       });
@@ -107,21 +111,20 @@ export function PluginEditorPage({
     {
       id: "plugin",
       footer: general[0],
-      footerTone: general.length ? "danger" : "muted",
+      footerTone: "danger",
       rows: [
         {
           kind: "text",
           id: "name",
           label: "Name",
-          placeholder: "Playwright Helper",
           value: form.name,
+          autoFocus: !pluginId,
           onChange: (name) => update((current) => ({ ...current, name })),
         },
         {
           kind: "text",
           id: "description",
           label: "Description",
-          placeholder: "What this plugin provides…",
           value: form.description,
           multiline: true,
           prose: true,
@@ -129,28 +132,59 @@ export function PluginEditorPage({
           onChange: (description) =>
             update((current) => ({ ...current, description })),
         },
-        {
-          kind: "toggle",
-          id: "published",
-          label: "Published",
-          value: form.published,
-          onChange: (published) =>
-            update((current) => ({ ...current, published })),
-        },
-        {
-          kind: "toggle",
-          id: "enabled",
-          label: "Enabled",
-          value: form.enabled,
-          onChange: (enabled) => update((current) => ({ ...current, enabled })),
-        },
       ],
     },
+    // Organization plugins need an admin; the scope is chosen once.
+    ...(!pluginId && isAdmin
+      ? [
+          {
+            id: "scope",
+            footer:
+              form.scope === "organization"
+                ? "Members can use it once you make it available."
+                : undefined,
+            rows: [
+              {
+                kind: "picker" as const,
+                id: "scope",
+                label: "Available to",
+                value: form.scope,
+                groups: [
+                  {
+                    options: [
+                      { value: "personal", label: "Only me" },
+                      {
+                        value: "organization",
+                        label: "Everyone in the organization",
+                      },
+                    ],
+                  },
+                ],
+                onChange: (scope: string) =>
+                  update((current) =>
+                    // Organization plugins share organization credentials only.
+                    keepUsableCredentials(
+                      { ...current, scope: scope as PluginFormModel["scope"] },
+                      (id) =>
+                        scope !== "organization" ||
+                        // Choices were made from the credentials loaded by the server pages.
+                        (
+                          resources.get<Credential[]>(CREDENTIALS).data ?? []
+                        ).some(
+                          (credential) =>
+                            credential.id === id &&
+                            credential.scope === "organization",
+                        ),
+                    ),
+                  ),
+              },
+            ],
+          },
+        ]
+      : []),
     {
       id: "skills",
       title: "Skills",
-      footer:
-        "Markdown fragments injected into harness prompts, in list order.",
       rows: [
         ...form.skills.map((skill, index) => {
           const problems = entryErrors(errors, skillLabel(index));
@@ -158,8 +192,10 @@ export function PluginEditorPage({
             kind: "link" as const,
             id: `skill-${skill.uid}`,
             title: skill.name.trim() || skillLabel(index),
-            subtitle: problems[0],
-            subtitleTone: "danger" as const,
+            subtitle: problems[0] ?? (skill.description.trim() || undefined),
+            subtitleTone: problems.length
+              ? ("danger" as const)
+              : ("muted" as const),
             route: entryRoute("plugin-skill", skill.uid),
           };
         }),
@@ -182,7 +218,6 @@ export function PluginEditorPage({
     {
       id: "servers",
       title: "MCP servers",
-      footer: "Run inside the workspace; localhost means the workspace.",
       rows: [
         ...form.mcps.map((mcp, index) => {
           const problems = entryErrors(errors, mcpLabel(mcp, index));
@@ -190,7 +225,7 @@ export function PluginEditorPage({
             kind: "link" as const,
             id: `server-${mcp.uid}`,
             title: mcp.name.trim() || `MCP server #${index + 1}`,
-            subtitle: problems[0] ?? transportLabel(mcp.transport),
+            subtitle: problems[0] ?? (mcpFormSubtitle(mcp) || undefined),
             subtitleTone: problems.length
               ? ("danger" as const)
               : ("muted" as const),
@@ -208,37 +243,30 @@ export function PluginEditorPage({
             navigation.push(entryRoute("plugin-mcp", mcp.uid));
           },
         },
+        {
+          kind: "button",
+          id: "paste-servers",
+          title: "Paste configuration",
+          symbol: "doc.on.clipboard",
+          onPress: () => navigation.push(route("plugin-mcp-import", draftKey)),
+        },
       ],
     },
     {
-      id: "requirements",
-      title: "Credential requirements",
-      footer:
-        "Reference a requirement in environment variables and headers as {{credential.KEY}}.",
+      id: "advanced",
+      title: "Advanced",
       rows: [
-        ...form.requirements.map((requirement, index) => {
-          const problems = entryErrors(
-            errors,
-            requirementLabel(requirement, index),
-          );
-          const service = services.data?.find(
-            (entry) => entry.id === requirement.serviceId,
-          );
-          return {
-            kind: "link" as const,
-            id: `requirement-${requirement.uid}`,
-            title: requirement.reqKey.trim() || `Requirement #${index + 1}`,
-            subtitle:
-              problems[0] ??
-              [service?.name, requirement.required ? "Required" : "Optional"]
-                .filter(Boolean)
-                .join(" · "),
-            subtitleTone: problems.length
-              ? ("danger" as const)
-              : ("muted" as const),
-            route: entryRoute("plugin-requirement", requirement.uid),
-          };
-        }),
+        {
+          kind: "link",
+          id: "requirements",
+          title: "More credentials",
+          subtitle: requirementProblems[0],
+          subtitleTone: "danger",
+          value: form.requirements.length
+            ? String(form.requirements.length)
+            : undefined,
+          route: route("plugin-requirements", draftKey),
+        },
         ...(services.error
           ? errorRows(
               "services",
@@ -247,20 +275,6 @@ export function PluginEditorPage({
               services.loading,
             )
           : []),
-        {
-          kind: "button",
-          id: "add-requirement",
-          title: "Add requirement",
-          symbol: "plus",
-          onPress: () => {
-            const requirement = emptyRequirementForm();
-            update((current) => ({
-              ...current,
-              requirements: [...current.requirements, requirement],
-            }));
-            navigation.push(entryRoute("plugin-requirement", requirement.uid));
-          },
-        },
       ],
     },
   ];

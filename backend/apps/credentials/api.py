@@ -45,10 +45,10 @@ def _get_org_service() -> OrganizationService:
     return OrganizationService()
 
 
-def _visible_service_or_none(service_id: uuid.UUID, org_id: uuid.UUID):
-    """Return the credential service visible in the org, or None."""
+def _visible_service_or_none(service_id: uuid.UUID, org_id: uuid.UUID, user=None):
+    """Return the credential service visible in the org (and to *user*), or None."""
     try:
-        return CredentialServiceSvc().get_service(service_id, org_id=org_id)
+        return CredentialServiceSvc().get_service(service_id, org_id=org_id, user=user)
     except NotFoundError:
         return None
 
@@ -139,10 +139,12 @@ def list_credential_services(request: HttpRequest):
     svc = CredentialServiceSvc()
     from .services import OrgCredentialServiceActivationSvc
 
-    services = list(svc.list_services(org_id=org_id))
+    services = list(svc.list_services(org_id=org_id, user=request.user))
     active_ids = OrgCredentialServiceActivationSvc().activated_service_ids(org_id)
     return [
-        _credential_service_to_out(service, is_active=service.id in active_ids)
+        _credential_service_to_out(
+            service, is_active=service.id in active_ids or service.owner_id is not None
+        )
         for service in services
     ]
 
@@ -199,7 +201,7 @@ def create_credential(request: HttpRequest, payload: CredentialCreateIn):
 
     svc = CredentialSvc()
     try:
-        service = _visible_service_or_none(payload.service_id, org_id)
+        service = _visible_service_or_none(payload.service_id, org_id, request.user)
         if service is None or service.credential_type == "mcp_oauth":
             return 404, ErrorOut(
                 detail="Credential service not found", code="not_found"

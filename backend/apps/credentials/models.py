@@ -3,9 +3,10 @@ Database models for the credentials app.
 
 Provides two models:
 
-- ``CredentialService`` -- admin-managed catalog of external services
-  (e.g. GitHub, OpenAI, SSH Key). Each service has exactly one
-  credential type (``env``, ``file`` or ``ssh_key``).
+- ``CredentialService`` -- catalog of external services (e.g. GitHub,
+  OpenAI, SSH Key): global, organization-owned (admins) or personal (a
+  user's own, e.g. created with a personal plugin). Each service has
+  exactly one credential type (``env``, ``file`` or ``ssh_key``).
 - ``Credential`` -- user- or org-scoped credential instances, holding an
   encrypted value.  Ownership is mutually exclusive: either ``user`` or
   ``organization`` is set, but never both.  Personal credentials are
@@ -41,6 +42,15 @@ class CredentialService(models.Model):
         blank=True,
         related_name="credential_services",
         help_text=("Null for global services; set for organization-owned services."),
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="personal_credential_services",
+        help_text="Set for personal services, e.g. created for a personal plugin "
+        "(mutually exclusive with organization).",
     )
     name = models.CharField(
         max_length=255,
@@ -99,13 +109,22 @@ class CredentialService(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["slug"],
-                condition=models.Q(organization__isnull=True),
+                condition=models.Q(organization__isnull=True, owner__isnull=True),
                 name="unique_global_credential_service_slug",
             ),
             models.UniqueConstraint(
                 fields=["organization", "slug"],
                 condition=models.Q(organization__isnull=False),
                 name="unique_org_credential_service_slug",
+            ),
+            models.UniqueConstraint(
+                fields=["owner", "slug"],
+                condition=models.Q(owner__isnull=False),
+                name="unique_personal_credential_service_slug",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(organization__isnull=False, owner__isnull=False),
+                name="credential_service_scope_exclusive",
             ),
         ]
 

@@ -1,0 +1,22 @@
+<!doctype html><html><head><title>OpenCuria web form</title>
+<style>.modal{position:fixed;top:80px;left:200px;background:#fff;border:2px solid #333;padding:20px}</style></head><body>
+<h1>Dynamic</h1>
+<button onclick="load()">Load data</button>
+<p id="st"></p>
+<ul id="list"></ul>
+<label>Promo text <textarea id="promo" maxlength="170" oninput="document.getElementById('cnt').textContent=(170-this.value.length)+' remaining'"></textarea></label><span id="cnt">170 remaining</span>
+<label>Version <input id="ver" value="1.0"></label>
+<button onclick="openModal()">Open rights</button>
+<table border=1><thead><tr><th>Question</th><th>None</th><th>Frequent</th></tr></thead>
+<tbody><tr><td>Cartoon violence</td><td><input type=radio name=q1></td><td><input type=radio name=q1></td></tr>
+<tr><td>Horror themes</td><td><input type=radio name=q2></td><td><input type=radio name=q2></td></tr></tbody></table>
+<div><span>Content rights</span> <input type=checkbox id="cr"> </div>
+<button onclick="document.getElementById('saved').textContent='Saved '+document.getElementById('ver').value+' / '+document.getElementById('promo').value.length+' / '+[...document.querySelectorAll('input[type=radio]')].map(r=>r.checked?1:0).join('')">Save</button>
+<p id="saved"></p>
+<div id="filler"></div>
+<script>
+function load(){document.getElementById('st').textContent='Processing…';setTimeout(()=>{document.getElementById('st').textContent='';const l=document.getElementById('list');for(let i=0;i<5;i++){const li=document.createElement('li');li.textContent='Loaded item '+i;l.appendChild(li);}},1500)}
+function openModal(){const m=document.createElement('div');m.className='modal';m.setAttribute('role','dialog');m.setAttribute('aria-label','Content Rights');m.innerHTML='<p>Does your app use third-party content?</p><label><input type=radio name=tp value=no> No</label> <label><input type=radio name=tp value=yes> Yes</label> <button onclick="this.parentNode.remove();document.getElementById(\'saved\').textContent=\'rights done\'">Done</button>';document.body.appendChild(m);}
+const f=document.getElementById('filler');for(let i=0;i<1500;i++){const d=document.createElement('div');d.textContent='Filler '+i;f.appendChild(d);}
+</script>
+</body></html>
