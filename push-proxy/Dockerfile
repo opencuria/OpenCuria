@@ -9,7 +9,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY push_proxy ./push_proxy
-RUN useradd --system --uid 10001 --no-create-home push-proxy
+# Readable for the unprivileged user whatever the build host's umask.
+RUN chmod -R a+rX push_proxy && useradd --system --uid 10001 --no-create-home push-proxy
 USER push-proxy
 
 EXPOSE 8080
