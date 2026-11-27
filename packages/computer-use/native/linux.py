@@ -95,6 +95,11 @@ OPTION_ROLES = {
 }  # fmt: skip
 CELL_ROLES = {"table cell", "cell", "grid cell"}
 FOLDING_ROLES = {"menu", "combo box", "menu button"}
+REGION_ROLES = {
+    "table", "tree table", "tree", "list", "list box", "form", "dialog", "alert",
+    "menu", "menu bar", "tool bar", "page tab list", "grid", "landmark",
+    "document web", "document frame", "panel", "scroll pane",
+}  # fmt: skip
 TOGGLE_ROLES = {
     "check box",
     "radio button",
@@ -245,6 +250,7 @@ class AtspiBus:
         self.context = GLib.MainContext.default()
         self.activity: dict[str, float] = {}
         self.changes: dict[str, dict[str, Any]] = {}
+        self.focused: dict[str, str] = {}
         self.last_event = 0.0
         self.subscriptions: list[int] = []
         self.listening = False
@@ -257,32 +263,47 @@ class AtspiBus:
         path: str,
         _interface: str,
         member: str,
+        parameters: Any = None,
         *_: Any,
     ) -> None:
         now = time.monotonic()
         self.activity[sender] = now
         self.last_event = now
-        entry = self.changes.setdefault(
-            sender,
-            {"structure": set(), "props": set(), "documents": set(), "overflow": False},
-        )
+        entry = self.changes.setdefault(sender, self._empty())
         if entry["overflow"]:
             return
+        detail, value = "", 0
+        if member == "StateChanged" and parameters is not None:
+            with contextlib.suppress(Exception):
+                detail, value = parameters.unpack()[:2]
         if member in {"LoadComplete", "Reload"}:
             entry["documents"].add(path)
+        if detail == "focused" and value:
+            self.focused[sender] = path
+        if detail == "defunct" and value:
+            # Chromium replaces objects (navigation, re-render) without
+            # children-changed: re-read where the dead object used to be.
+            entry["defunct"].add(path)
+        elif detail == "busy" and not value:
+            entry["structure"].add(path)  # a document finished loading
         kind = "structure" if member in STRUCTURE_EVENTS else "props"
         entry[kind].add(path)
         if len(entry["structure"]) + len(entry["props"]) > 4000:
             entry["overflow"] = True
 
-    def take(self, bus: str) -> dict[str, Any]:
-        """Changed object paths of one application since the previous take."""
-        return self.changes.pop(bus, None) or {
+    @staticmethod
+    def _empty() -> dict[str, Any]:
+        return {
             "structure": set(),
             "props": set(),
             "documents": set(),
+            "defunct": set(),
             "overflow": False,
         }
+
+    def take(self, bus: str) -> dict[str, Any]:
+        """Changed object paths of one application since the previous take."""
+        return self.changes.pop(bus, None) or self._empty()
 
     def listen(self) -> None:
         """Ask applications for change events while an execution runs."""
@@ -457,6 +478,7 @@ class LinuxDriver:
         self.action_at = 0.0
         self.dirty = False
         self.touched: set[tuple[str, str]] = set()
+        self.touch_focus = False
         self.toolkits: dict[str, str] = {}
         self.next_element = 1
         self.generation = int(os.environ.get("OPENCURIA_CUA_GENERATION", "0"))
@@ -1112,6 +1134,26 @@ class LinuxDriver:
                 node["states"] = _states(states)
         self._details(bus_name, nodes)
 
+    @staticmethod
+    def _region(nodes: dict[str, dict[str, Any]], path: str, cap: int = 1500) -> str:
+        """The nearest enclosing region (table, list, form, dialog…) of a node."""
+
+        def size(start: str) -> int:
+            count, pending = 0, [start]
+            while pending and count <= cap:
+                count += 1
+                pending.extend(nodes[pending.pop()]["children"])
+            return count
+
+        best = path
+        while True:
+            parent = nodes[best]["parent"]
+            if parent not in nodes or size(parent) > cap:
+                return best
+            best = parent
+            if nodes[best]["role"] in REGION_ROLES:
+                return best
+
     def _update(
         self, mirror: dict[str, Any], changes: dict[str, Any], limit: int
     ) -> bool:
@@ -1123,6 +1165,10 @@ class LinuxDriver:
             # does this while enabling web accessibility): its place is unknown.
             return False
         structure = {path for path in changes["structure"] if path in nodes}
+        for path in changes.get("defunct", ()):
+            if path in nodes and nodes[path]["parent"] in nodes:
+                structure.add(nodes[path]["parent"])
+        structure |= set(changes.get("regions", ()))
         props = {path for path in changes["props"] if path in nodes} - structure
         if not structure and not props:
             return True
@@ -1766,8 +1812,21 @@ class LinuxDriver:
         changes = self.atspi.take(bus_name)
         # Elements this driver acted on are re-read even if the toolkit sent
         # no change event (Qt combo boxes, for example).
-        changes["structure"] |= {path for bus, path in self.touched if bus == bus_name}
+        touched = {path for bus, path in self.touched if bus == bus_name}
+        if self.touch_focus and self.atspi.focused.get(bus_name):
+            touched.add(self.atspi.focused[bus_name])
         self.touched = {item for item in self.touched if item[0] != bus_name}
+        self.touch_focus = False
+        if mirror is not None:
+            # Toolkits do not report every consequence of input (Chromium
+            # sends nothing when a table re-sorts its rows): re-read the
+            # region around what was acted on, not just the element.
+            changes["regions"] = {
+                self._region(mirror["nodes"], path)
+                for path in touched
+                if path in mirror["nodes"]
+            }
+        changes["structure"] |= touched
         reusable = (
             mirror is not None
             and mirror["root"] == root
@@ -1956,6 +2015,16 @@ class LinuxDriver:
         x, y, width, height = self._extents(ref)
         return x + width // 2, y + height // 2
 
+    async def _visible_point(self, bound: BoundWindow, ref: Ref) -> tuple[int, int]:
+        """The center of the part of an element that is inside the window."""
+        wx, wy, ww, wh = self._geometry(bound.window)
+        x, y, width, height = self._extents(ref)
+        left, top = max(x, wx), max(y, wy)
+        right, bottom = min(x + width, wx + ww), min(y + height, wy + wh)
+        if right - left >= 2 and bottom - top >= 2:
+            return (left + right) // 2, (top + bottom) // 2
+        return await self._visible_center(bound, ref)
+
     async def _visible_center(self, bound: BoundWindow, ref: Ref) -> tuple[int, int]:
         """Scroll an element into the window if needed and return its screen center."""
         wx, wy, ww, wh = self._geometry(bound.window)
@@ -2021,7 +2090,16 @@ class LinuxDriver:
         def norm(value: str) -> str:
             return value.replace("\r\n", "\n").replace(OBJECT, "").strip("\n")
 
-        return norm(actual) == norm(expected)
+        actual, expected = norm(actual), norm(expected)
+        if (
+            actual
+            and len(set(actual)) == 1
+            and actual[0] in "•●*·"
+            and actual != expected
+        ):
+            # Password fields report one mask character per character typed.
+            return len(actual) == len(expected)
+        return actual == expected
 
     async def _click_element(
         self, bound: BoundWindow, ref: Ref, args: dict[str, Any]
@@ -2225,7 +2303,9 @@ class LinuxDriver:
                 await self._paste_text(bound, text)
             actual = await self._wait_text(ref, text, 1.5)
             if self._same(actual, text):
-                return {"value": actual}
+                return {
+                    "value": "•" * len(text) if ref.role == "password text" else actual
+                }
         raise DriverError(
             "ACTION_FAILED",
             f"The field contains {_short(actual, 200)!r} instead of the requested value",
@@ -2462,9 +2542,10 @@ class LinuxDriver:
 
     # ------------------------------------------------------------ observation
 
-    def _mark(self) -> None:
+    def _mark(self, focus: bool = False) -> None:
         self.action_at = time.monotonic()
         self.dirty = True
+        self.touch_focus = self.touch_focus or focus
 
     async def _settle(self, bound: BoundWindow | None, max_wait: float = 1.5) -> None:
         """After input, wait until the application stops reporting changes."""
@@ -2472,6 +2553,13 @@ class LinuxDriver:
             return
         started = self.action_at
         bus_name = bound.root[0] if bound is not None and bound.root else None
+        # Chromium hands accessibility updates from the page to the browser in
+        # batches about 200 ms apart, often without any event (re-sorted rows).
+        minimum = 0.1
+        if bus_name and any(
+            name in self._toolkit(bus_name) for name in ("chrom", "electron")
+        ):
+            minimum = 0.35
         while True:
             now = time.monotonic()
             if self.atspi is None or not self.atspi.listening:
@@ -2484,7 +2572,7 @@ class LinuxDriver:
                     if bus_name
                     else self.atspi.last_event
                 )
-                if now - started >= 0.1 and now - max(last, started) >= 0.12:
+                if now - started >= minimum and now - max(last, started) >= 0.12:
                     break
             if now - started >= max_wait:
                 break
@@ -2833,6 +2921,11 @@ class LinuxDriver:
 
     async def _paste_text(self, bound: BoundWindow, text: str) -> None:
         """Paste Unicode text through the selected window's native input route."""
+        if self._focused_role(bound) == "terminal":
+            # Terminals paste with another shortcut and warn about multi-line
+            # pastes; typing is what a person does there ("\n" presses Return).
+            await self._type_characters(bound, text)
+            return
         selection = self.connection.intern_atom("CLIPBOARD")
         previous_owner = self.connection.get_selection_owner(selection)
         previous_id = getattr(previous_owner, "id", 0)
@@ -2871,6 +2964,26 @@ class LinuxDriver:
             except TimeoutError:
                 clipboard.kill()
                 await clipboard.wait()
+
+    def _focused_role(self, bound: BoundWindow) -> str:
+        """Role of the element with keyboard focus (from events, else the tree)."""
+        bus = getattr(self, "atspi", None)
+        if bus is None or bound.root is None:
+            return ""
+        focused = bus.focused.get(bound.root[0])
+        if focused:
+            with contextlib.suppress(Exception):
+                return str(
+                    bus.call(bound.root[0], focused, ACC, "GetRoleName", timeout=500)[0]
+                )
+        mirror = bound.mirror or {}
+        for node in (mirror.get("nodes") or {}).values():
+            if _has(node["states"], "focused") and node["role"] not in {
+                "frame",
+                "window",
+            }:
+                return node["role"]
+        return ""
 
     # ------------------------------------------------------------------ files
 
@@ -3436,6 +3549,15 @@ class LinuxDriver:
                     args.get("durationMs", 0),
                     args.get("key"),
                 )
+        elif op == "hover":
+            if args.get("elementId") is not None:
+                x, y = await self._visible_point(
+                    bound, self._ref(bound, args["elementId"])
+                )
+            else:
+                x, y = self._point(bound, args)
+            target = self._pointer_target(bound, x, y)
+            self._send_pointer(bound, x, y, "motion", target=target)
         elif op == "focus":
             await self._focus(bound, self._ref(bound, args.get("elementId")))
         elif op == "secondary":
@@ -3496,8 +3618,11 @@ class LinuxDriver:
             return {"charactersSent": sent}
         elif op == "scroll":
             if args.get("elementId") is not None:
-                ref = self._ref(bound, args["elementId"])
-                x, y = await self._visible_center(bound, ref)
+                # Scroll inside the visible part of the element: the center of
+                # a long document or list usually lies outside the window.
+                x, y = await self._visible_point(
+                    bound, self._ref(bound, args["elementId"])
+                )
             else:
                 x, y = self._point(bound, args)
             button = {
@@ -3577,7 +3702,8 @@ class LinuxDriver:
             raise DriverError(
                 "UNKNOWN_OPERATION", "Unsupported native desktop operation"
             )
-        self._mark()
+        # Input without an element (keys, coordinates) changes what has focus.
+        self._mark(focus=args.get("elementId") is None)
         return {}
 
     async def _launch(self, app: Any) -> None:

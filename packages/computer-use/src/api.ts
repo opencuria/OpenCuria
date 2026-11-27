@@ -268,9 +268,18 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
       }
       if (!launched && (typeof query === 'string' || (typeof query === 'object' && !(query instanceof RegExp) && typeof query.app === 'string'))) {
         const name = String(typeof query === 'string' ? query : (query as { app: string }).app).toLowerCase();
-        const apps = ((await native('apps')).items as Array<{ id: string; displayName: string }>);
+        const apps = ((await native('apps')).items as Array<{ id: string; displayName: string; windows?: WindowInfo[] }>);
         const candidates = apps.filter((app) => app.displayName.toLowerCase() === name || app.id.toLowerCase().replace(/\.desktop$/, '') === name);
         const loose = candidates.length ? candidates : apps.filter((app) => app.displayName.toLowerCase().includes(name));
+        // An installed app's own windows (their class can differ from its name).
+        const running = (loose.length === 1 ? loose[0].windows ?? [] : []).filter((window) => all.some((open) => open.id === window.id));
+        if (running.length === 1) return all.find((open) => open.id === running[0].id) as WindowInfo;
+        if (running.length > 1) {
+          throw new Error(`Several windows of ${loose[0].displayName} are open; pass { windowId } or a title:\n${running.slice(0, 12).map(windowLine).join('\n')}`);
+        }
+        if (loose.length > 1 && !all.some((window) => windowMatches(window, query))) {
+          throw new Error(`Several installed apps match ${describe(query)}; pass the exact name:\n${loose.slice(0, 10).map((app) => `${app.displayName} (${app.id})`).join('\n')}`);
+        }
         if (loose.length === 1) {
           await native('launch_app', { app: loose[0].id });
           launched = true;
@@ -455,6 +464,9 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
         const { timeoutMs, ...click } = options;
         if (click.durationMs !== undefined && (!Number.isSafeInteger(click.durationMs) || click.durationMs < 0)) throw new Error('durationMs must be a non-negative safe integer.');
         await act(target, timeoutMs, (located) => native('click', { ...base(), ...located, ...click }));
+      },
+      hover: async (target: Target, options: { timeoutMs?: number } = {}) => {
+        await act(target, options.timeoutMs, (located) => native('hover', { ...base(), ...located }));
       },
       focus: async (target: Target, options: { timeoutMs?: number } = {}) => {
         await act(target, options.timeoutMs, async (located) => {

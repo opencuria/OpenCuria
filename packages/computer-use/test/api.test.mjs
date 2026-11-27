@@ -65,6 +65,11 @@ test('getApp finds windows by name, explains ambiguity and launches installed ap
   assert.equal(editor.windowId, 9);
   assert.ok(launch.calls.some(([op, args]) => op === 'launch_app' && args.app === 'org.xfce.mousepad.desktop'));
   await assert.rejects(fake({ windows: [] }).cua.getApp('Nothing'), /No open window matches "Nothing"/);
+  const own = fake({ windows: [{ id: 7, app: 'Xfce4-terminal', title: 'Terminal - root' }], apps: [{ id: 'xfce4-terminal.desktop', displayName: 'Xfce Terminal', windows: [{ id: 7, app: 'xfce4-terminal.desktop', title: 'Terminal - root' }] }] });
+  assert.equal((await own.cua.getApp('Xfce Terminal', { emit: false })).windowId, 7);
+  assert.ok(!own.calls.some(([op]) => op === 'launch_app'));
+  const several = fake({ windows: [], apps: [{ id: 'a.desktop', displayName: 'Xfce Terminal' }, { id: 'b.desktop', displayName: 'Terminal Emulator' }] });
+  await assert.rejects(several.cua.getApp('Terminal'), /Several installed apps match "Terminal"[\s\S]*Xfce Terminal \(a\.desktop\)/);
 });
 
 test('queries resolve to operable controls, prefer exact names and report ambiguity', async () => {
