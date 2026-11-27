@@ -52,7 +52,8 @@ test('original ChatGPT contract: schemas, text channels, images, errors, lexical
     `await nodeRepl.emitImage({bytes:Buffer.from('${png}','base64'),mimeType:'image/png'});`,
     `await nodeRepl.emitImage('data:image/png;base64,${png}');`,
     `await nodeRepl.emitImage(${JSON.stringify(pathToFileURL(path).href)});`,
-    'throw new Error("example");', 'var =',
+    // Syntax errors intentionally add that nothing ran (not compared).
+    'throw new Error("example");',
     'nodeRepl.write(retained);',
   ];
   for (const code of inputs) {

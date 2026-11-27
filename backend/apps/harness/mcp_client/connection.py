@@ -503,6 +503,8 @@ def _embedded_resource_text(resource: Any) -> str:
 class McpServerConnection:
     """One live MCP server connection for one harness run.
 
+    A chat's Computer Use connection is kept across runs by
+    :mod:`apps.harness.computer_use.session_host`; :meth:`begin_run` rebinds it.
     ``env``/``headers`` hold *rendered* plaintext secrets for this run:
     they are ``repr=False`` so connection reprs in logs, tracebacks, or
     health payloads never carry credential material.
@@ -543,6 +545,9 @@ class McpServerConnection:
     _closed: bool = False
     _accessor: Any = field(default=None, repr=False)
     _turn_ended: bool = False
+    #: The run's terminal "Stop" was sent; it fences the turn even after an
+    #: earlier interrupt notification.
+    _turn_stopped: bool = False
     _recording_path: str = ""
     recording_path: str = ""
     _finished: bool = False
@@ -931,10 +936,43 @@ class McpServerConnection:
         }
         return {"opencuria/context": context}
 
+    def begin_run(self, run_context: dict[str, Any]) -> None:
+        """Bind a kept connection to the next run of its chat."""
+        self.run_context = dict(run_context)
+        self._turn_ended = False
+        self._turn_stopped = False
+        self._finished = False
+        self._recording_path = ""
+        self.recording_path = ""
+
+    async def check_alive(self, timeout: float = 5.0) -> bool:
+        """Confirm the server still answers an MCP ping, bypassing the call lock."""
+        session = self._session
+        if session is None or self._closed or not self.healthy:
+            return False
+        try:
+            await asyncio.wait_for(session.send_ping(), timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        return True
+
     async def notify_turn_ended(self, reason: str = "Stop") -> None:
-        """Send a bounded control request without waiting on the execution lock."""
+        """Send a bounded control request without waiting on the execution lock.
+
+        ``Stop`` ends the run's turn (fenced by the server, state kept) and is
+        sent once per run; ``Interrupt`` and ``DesktopStop`` only cancel the
+        active execution and are sent once per desktop operation.
+        """
         name = self.tool_policy.get("on_run_end")
-        if not name or self._turn_ended or self._session is None:
+        if not name or self._session is None or not self.healthy:
+            return
+        if reason == "Stop":
+            if self._turn_stopped:
+                return
+            self._turn_stopped = True
+        elif self._turn_ended:
             return
         self._turn_ended = True
         try:
@@ -992,7 +1030,7 @@ class McpServerConnection:
 
     async def stop_desktop_work(self) -> None:
         """Confirm the worker stopped before allowing activation to be released."""
-        await self.notify_turn_ended()
+        await self.notify_turn_ended("DesktopStop")
         if not self.healthy:
             if self.desktop_lease is not None:
                 await cleanup_rpc(self.desktop_lease.aclose())

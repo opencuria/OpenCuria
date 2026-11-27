@@ -1,7 +1,8 @@
 import inspector from 'node:inspector';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { format, inspect } from 'node:util';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import path from 'node:path';
 import { createCua } from './api.js';
 import { type NativeReply, type WorkerRequest } from './protocol.js';
 
@@ -65,10 +66,25 @@ const emitImage = async (value: unknown): Promise<void> => {
   if (!mimeType || !['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) throw new Error('Unsupported image format.');
   emit({ type: 'image', mimeType, data: data.toString('base64'), _meta: { 'codex/imageDetail': 'original' } });
 };
+const FILE_ROOTS = [...new Set(['/workspace', '/tmp', process.cwd()])];
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
+/** Read workspace files (texts, data for forms) without leaving the REPL. */
+async function readWorkspaceFile(file: unknown, options: { encoding?: BufferEncoding | null } = {}): Promise<string | Uint8Array> {
+  if (typeof file !== 'string' || !file) throw new Error('readFile expects a file path.');
+  const resolved = await realpath(path.resolve(process.cwd(), file));
+  if (!FILE_ROOTS.some((root) => resolved === root || resolved.startsWith(root.endsWith('/') ? root : `${root}/`))) {
+    throw new Error(`readFile is limited to ${FILE_ROOTS.join(', ')}.`);
+  }
+  const info = await stat(resolved);
+  if (!info.isFile()) throw new Error(`${file} is not a regular file.`);
+  if (info.size > MAX_FILE_BYTES) throw new Error(`${file} exceeds 32 MiB.`);
+  const data = await readFile(resolved);
+  return options.encoding === null ? new Uint8Array(data) : data.toString(options.encoding ?? 'utf8');
+}
 const cua = createCua(native, write, emitImage, () => current?.context.request_meta);
 Object.assign(globalThis, {
   cua,
-  nodeRepl: Object.freeze({ write, emitImage, get requestMeta() { return current?.context.request_meta; } }),
+  nodeRepl: Object.freeze({ write, emitImage, readFile: readWorkspaceFile, get requestMeta() { return current?.context.request_meta; } }),
   console: Object.freeze({ log: consoleLine, info: consoleLine, debug: consoleLine, error: consoleLine, warn: consoleLine, dir: (value: unknown) => consoleLine(inspect(value)) }),
 });
 
@@ -102,6 +118,9 @@ process.on('message', (message: any) => {
         const line = response.exceptionDetails.lineNumber + 1;
         const column = response.exceptionDetails.columnNumber;
         failure = `[${line}:${column}-${line}:${column + token[1].length}]: Unexpected token: '${token[1]}'`;
+      }
+      if (response.exceptionDetails.exception?.className === 'SyntaxError') {
+        failure += ' — nothing from this call ran, so none of its declarations exist. Fix the syntax and resend the whole call.';
       }
     }
     if (pending.size && !failure) failure = 'Await every CUA operation before js returns.';

@@ -28,6 +28,7 @@ from common import realtime
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
+from .computer_use.session_host import session_hosts
 from .conversation_events import ConversationEvents
 from .conversation_service import ConversationService
 from .interaction_service import InteractionService
@@ -578,9 +579,12 @@ class HarnessService:
             await self.abort_run(session.id)
         # A closing attempt with unconfirmed runner cleanup must survive deletion.
         await self._ensure_external_attempt_reconciled(session, force=True)
+        deleted_ids = await sync_to_async(self.sessions.list_descendant_ids)(session.id)
         await sync_to_async(self.sessions.delete)(session)
         self.run_registry.clear_abort(str(session.id))
         self._forget_run(str(session.id))
+        # Deleted chats (and cascaded subagents) keep no Computer Use REPL.
+        await session_hosts.close_sessions(deleted_ids, reason="chat_deleted")
         if session.parent_id is None:
             await self.conversation_events.emit(session.workspace_id)
 
@@ -1018,7 +1022,11 @@ class HarnessService:
         try:
             await self._run_cancellation().shutdown()
         finally:
-            await providers.shutdown(contexts)
+            try:
+                await providers.shutdown(contexts)
+            finally:
+                # Runs are settled: release the chats' kept Computer Use REPLs.
+                await session_hosts.close_all(reason="shutdown")
 
     async def request_stop(self, session_id: uuid.UUID) -> None:
         """Fence an older claimed admission before its worker waiter is cancelled.

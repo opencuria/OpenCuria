@@ -13,6 +13,7 @@ from typing import Any
 from apps.runners.exceptions import HarnessActionError
 
 from .access import runner_accessor
+from .computer_use.session_host import session_hosts
 from .harness_service import get_harness_service
 from .repositories import HarnessSessionRepository
 
@@ -47,8 +48,13 @@ class RunnerHarnessGateway:
     def fail_streams(
         self, matches_workspace: Callable[[str], bool], error: str
     ) -> None:
-        """Fail open byte streams whose workspace id matches the predicate."""
+        """Fail open byte streams whose workspace id matches the predicate.
+
+        Kept Computer Use hosts of those workspaces close too: their process
+        stream is gone (runner disconnect, workspace stop or removal).
+        """
         runner_accessor.fail_streams(matches_workspace, error)
+        session_hosts.close_workspaces(matches_workspace, reason="streams_failed")
 
     async def desktop_action(
         self, runner_service: Any, workspace_id: str, action: str, args: dict

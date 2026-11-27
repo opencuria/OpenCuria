@@ -191,12 +191,14 @@ async def test_cua_playwright_and_explicit_action_share_one_claim(desktop_worksp
     # Stopping does not close connections, and a later operational call reclaims.
     await desktop.action("stop")
     assert not cua._closed and not playwright._closed
+    # Desktop stop only cancels the worker's execution; the turn goes on.
     cua._session.call_tool.assert_any_await(
         "turn_ended",
-        {"session_id": "", "turn_id": "", "hook_event_name": "Stop"},
+        {"session_id": "", "turn_id": "", "hook_event_name": "DesktopStop"},
         meta=cua._request_meta(),
         read_timeout_seconds=timedelta(seconds=5),
     )
+    assert not cua._turn_stopped
     await playwright.call_tool("browser_navigate", {"url": "about:blank"})
     assert (await desktop.action("status"))["own_claim"]
     await cua.call_tool("js", {"code": "await cua.getState()"})

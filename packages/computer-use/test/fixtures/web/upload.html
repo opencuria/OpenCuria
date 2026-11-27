@@ -1,0 +1,10 @@
+<!doctype html><html><head><title>OpenCuria upload</title>
+<style>#drop{width:400px;height:150px;border:3px dashed #555;margin:10px}</style></head><body>
+<h1>Upload</h1>
+<label>Screenshots <input type=file id=multi multiple onchange="show('multi', this.files)"></label>
+<label>Single <input type=file id=single onchange="show('single', this.files)"></label>
+<div id="drop" role="region" aria-label="Drop zone" ondragover="event.preventDefault()" ondrop="event.preventDefault();show('drop', event.dataTransfer.files)">Drop files here</div>
+<p id="out">No files</p>
+<script>
+async function show(kind, files){ const parts=[]; for (const f of files) parts.push(f.name+':'+(await f.text()).length); document.getElementById('out').textContent = kind+' => '+parts.join(', '); }
+</script></body></html>

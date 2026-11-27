@@ -189,6 +189,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Socket.IO CORS — default allows all in dev, restricted in production.py
 SIO_CORS_ALLOWED_ORIGINS = "*"
 
+# A chat's Computer Use REPL and desktop reservation close after this idle time.
+COMPUTER_USE_SESSION_IDLE_SECONDS = float(
+    os.getenv("COMPUTER_USE_SESSION_IDLE_SECONDS", "900")
+)
+
 
 # --- Logging (structlog) ---
 

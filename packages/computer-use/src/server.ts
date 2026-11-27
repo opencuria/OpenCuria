@@ -22,8 +22,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       return { content: [{ type: 'text', text: 'js kernel reset' }], isError: false };
     }
     if (request.params.name === 'turn_ended') {
-      if (args.session_id !== context.session_id || args.turn_id !== context.turn_id) throw new CuaError('INVALID_CONTEXT', 'Lifecycle identity does not match its owning turn');
-      await supervisor.end();
+      if (args.session_id !== context.session_id || typeof args.turn_id !== 'string' || !args.turn_id) throw new CuaError('INVALID_CONTEXT', 'Lifecycle identity does not match its owning session');
+      await supervisor.endTurn(args.turn_id, typeof args.hook_event_name === 'string' ? args.hook_event_name : 'Stop');
       return { content: [{ type: 'text', text: '' }], isError: false };
     }
     throw new CuaError('UNKNOWN_TOOL', 'Unknown computer-use tool');

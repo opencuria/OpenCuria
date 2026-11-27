@@ -54,7 +54,18 @@ test('real GTK desktop: AX, Unicode typing, clipboard, screenshots, and stale bi
       const { accessibility_tree } = await import(`${moduleRoot}/accessibility_tree.js`);
       const { ElementIds } = await import(`${moduleRoot}/element_ids.js`);
       new ElementIds().assign(response.output.ax_tree, metadata, false);
-      assert.equal(state, `Accessibility source: ${response.output.ax_tree_source}\n${accessibility_tree(response.output.ax_tree).to_string()}`);
+      // OpenCuria's tree is intentionally more compact (unnamed wrappers and
+      // implied default actions are omitted), but it must show every element
+      // the reference names, with the same role, in no more lines.
+      const reference = `Accessibility source: ${response.output.ax_tree_source}\n${accessibility_tree(response.output.ax_tree).to_string()}`;
+      const describe = (line) => line.trim().replace(/^\d+ /, '').replace(/ \([^)]*\)/, '').replace(/, Secondary Actions: .*$/, '');
+      const ours = new Set(state.split('\n').slice(1).map(describe));
+      for (const line of reference.split('\n').slice(1).map(describe)) {
+        if (line === 'container' || line === '') continue;
+        assert.ok(ours.has(line), `missing reference element ${line} in:\n${state}`);
+      }
+      assert.equal(state.split('\n')[0], reference.split('\n')[0]);
+      assert.ok(state.split('\n').length <= reference.split('\n').length);
       helper.stdin.write(JSON.stringify({ id: 2, command: 'list_apps', input: {} }) + '\n');
       const apps = JSON.parse((await lines.next()).value).output.map(app => ({ id: app.id, displayName: app.name, isRunning: app.windows.length > 0, windows: app.windows }));
       assert.deepEqual(JSON.parse(output(await js('nodeRepl.write(JSON.stringify(await cua.listApps({emit:false})));'))), apps);

@@ -36,7 +36,11 @@ test('same native app inputs produce the reference observations, return values a
   const native = async (op, args = {}) => {
     if (op === 'windows') return { items: [window] };
     if (op === 'bind') return { identity: 'window' };
-    if (op === 'state') return { state: `Accessibility source: at_spi\n${text}`, snapshotId: 'snapshot', ...(args.image ? { image: Buffer.from(bytes).toString('base64') } : {}) };
+    if (op === 'state') return {
+      source: 'at_spi',
+      nodes: [{ id: 0, parent: null, depth: 0, role: 'frame', name: 'Example', value: '', description: '', context: '', states: [], actions: [], line: 'frame Example' }],
+      ...(args.image ? { image: Buffer.from(bytes).toString('base64'), width: 1, height: 1, scale: 1, region: null } : {}),
+    };
     if (op === 'type_characters') return { charactersSent: 2 };
     return {};
   };
@@ -45,15 +49,15 @@ test('same native app inputs produce the reference observations, return values a
     ['getAXState', []], ['getAXState', [{ emit: false }]],
     ['getScreenshot', []], ['getScreenshot', [{ emit: false }]],
     ['getAXStateAndScreenshot', []], ['getAXStateAndScreenshot', [{ emit: false }]],
+    // OpenCuria intentionally extends the reference: element targets accept
+    // durationMs/key, and Linux implements setValue/selectText (not compared).
     ['click', [[20, 30], { mouseButton: 'right', durationMs: 20, key: 'shift' }]],
-    ['click', [3, { durationMs: 10 }]], ['click', [[1, 2], { durationMs: -1 }]],
-    ['click', [3, { key: 'ctrl' }]],
+    ['click', [[1, 2], { durationMs: -1 }]],
     ['scroll', [[10, 20], 'down', { pixels: 120 }]], ['scroll', [3, 'down', 1]],
     ['scroll', [[10, 20], 'down', { pixels: 0 }]],
     ['pressKey', ['ctrl+a', { durationMs: 10 }]], ['pressKey', ['a', { durationMs: -1 }]],
     ['paste', ['hello']], ['paste', ['hello', { format: 'html' }]],
     ['typeText', ['hello', 2]], ['typeCharacters', ['20']],
-    ['setValue', [2, 'value']], ['selectText', [2, 'value']],
     ['performSecondaryAction', [2, 'activate']], ['drag', [[10, 20], [30, 40]]],
   ]) {
     async function observe(app) {

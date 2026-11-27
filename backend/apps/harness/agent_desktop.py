@@ -22,7 +22,8 @@ class DesktopBusyError(RuntimeError):
 class AgentDesktop:
     """Serialize activation, input and stop without owning the agent's processes.
 
-    One durable lease owns all desktop MCP streams throughout the run. Stop
+    One durable lease owns all desktop MCP streams throughout the run, or, for
+    a chat's kept Computer Use host, across its runs (see :meth:`detach`). Stop
     releases only activation, with monotonic revisions fencing delayed actions.
     Final release/expiry closes those streams before dropping protective ownership.
     """
@@ -45,6 +46,8 @@ class AgentDesktop:
         self._closed = False
         self.before_stop: list[Callable[[], Awaitable[None]]] = []
         self.recording_paths: list[str] = []
+        #: Directory name of recordings; the runner run id stays ``owner_id``.
+        self.recording_owner = owner_id
         self._recording_path = ""
         self._recording_confirmed = False
 
@@ -172,7 +175,7 @@ class AgentDesktop:
         assert self.lease is not None
         lease = self.lease
         self._recording_path = (
-            f"/workspace/.opencuria/computeruse/{self.owner_id}/{uuid4()}.mp4"
+            f"/workspace/.opencuria/computeruse/{self.recording_owner}/{uuid4()}.mp4"
         )
         result = await self.accessor.desktop_action(
             "record_start",
@@ -220,6 +223,24 @@ class AgentDesktop:
         async with self._lock:
             await self._finish_recording()
             return list(self.recording_paths)
+
+    def begin_run(self, recording_owner: str) -> None:
+        """Scope recordings of a kept desktop to the run that now uses it."""
+        self.recording_paths = []
+        self.recording_owner = recording_owner
+
+    async def detach(self) -> None:
+        """End a run's recording and display claim, keeping the lease reserved.
+
+        The runner may stop the display when no other holder remains, exactly
+        as a final release would; the reservation keeps the MCP streams alive.
+        """
+        with anyio.CancelScope(shield=True):
+            async with self._lock:
+                if self._closed or self.lease is None:
+                    return
+                await self._finish_recording()
+                await self.lease.unhold()
 
     async def aclose(self) -> None:
         """Fence queued calls, then release only this run's claim."""
