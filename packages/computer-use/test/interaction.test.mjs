@@ -31,12 +31,19 @@ async function environment() {
   return values;
 }
 
+// Deployed servers inherit the runner's session bus, not the desktop's; the
+// driver must find the desktop session and its accessibility bus itself.
+const serverBus = (values) => {
+  const runnerBus = `/run/user/${process.getuid()}/bus`;
+  return existsSync(runnerBus) ? `unix:path=${runnerBus}` : values.DBUS_SESSION_BUS_ADDRESS;
+};
+
 async function session(t, values) {
   const client = new Client({ name: 'cua-interaction', version: '1' });
   await client.connect(new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL('../dist/server.js', import.meta.url))],
-    env: { PATH: process.env.PATH, DISPLAY: values.DISPLAY, XAUTHORITY: values.XAUTHORITY ?? '/root/.Xauthority', DBUS_SESSION_BUS_ADDRESS: values.DBUS_SESSION_BUS_ADDRESS, OPENCURIA_CUA_SESSION_ID: 'interaction', OPENCURIA_CUA_TURN_ID: 'interaction' },
+    env: { PATH: process.env.PATH, DISPLAY: values.DISPLAY, XAUTHORITY: values.XAUTHORITY ?? '/root/.Xauthority', DBUS_SESSION_BUS_ADDRESS: serverBus(values), OPENCURIA_CUA_SESSION_ID: 'interaction', OPENCURIA_CUA_TURN_ID: 'interaction' },
     stderr: 'pipe',
   }));
   t.after(() => client.close());

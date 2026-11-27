@@ -429,6 +429,59 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("text (settable) App name, Value: 1.0", text)
 
 
+class DesktopIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gtk4_sensitive_controls_are_not_disabled(self):
+        objects = {
+            "/f": {"role": "frame", "name": "Calc", "children": ["/b"]},
+            "/b": {"role": "button", "name": "7", "actions": ["click"], "states": ["visible", "showing", "sensitive"]},
+        }
+        driver, bound = driver_for(objects)
+        node = next(n for n in (await driver._tree(bound, {}))["nodes"] if n["name"] == "7")
+        self.assertEqual(node["line"], "button 7")
+        self.assertNotIn("disabled", node["states"])
+
+    async def test_hidden_containers_keep_only_named_operable_controls(self):
+        objects = {
+            "/f": {"role": "frame", "name": "Dialog", "children": ["/popover"]},
+            "/popover": {"role": "panel", "states": ["enabled"], "children": ["/eject", "/field", "/view"]},
+            "/eject": {"role": "push button", "description": "Unmount", "states": ["enabled", "visible"]},
+            "/field": {"role": "text", "name": "Folder Name", "text": "", "states": ["enabled", "visible", "editable"]},
+            "/view": {"role": "push button", "name": "List View", "states": ["enabled", "visible"]},
+        }
+        driver, bound = driver_for(objects)
+        text = "\n".join(lines(await driver._tree(bound, {})))
+        self.assertIn("List View", text)
+        self.assertNotIn("Unmount", text)
+        self.assertNotIn("Folder Name", text)
+
+    def test_accessibility_bus_follows_the_display_like_libatspi(self):
+        driver, _ = driver_for({})
+        driver.root = object()
+        driver._property = lambda _window, name: b"unix:path=/run/user/0/at-spi/bus_1\0" if name == "AT_SPI_BUS" else None
+        with patch.dict(native.os.environ, {"AT_SPI_BUS_ADDRESS": "unix:path=/explicit"}):
+            self.assertEqual(driver._atspi_addresses(), ["unix:path=/explicit", "unix:path=/run/user/0/at-spi/bus_1"])
+        with patch.dict(native.os.environ, {}, clear=True):
+            self.assertEqual(driver._atspi_addresses(), ["unix:path=/run/user/0/at-spi/bus_1"])
+
+    def test_dormant_chromium_apps_are_activated_before_matching(self):
+        driver, _ = driver_for({"/f": {"role": "frame", "name": "Chrome", "extents": (0, 0, 800, 600)}}, frames=[])
+        bus = driver.atspi
+        original = bus.call
+
+        def call(bus_name, path, interface, method, args=None, signature=None, timeout=3000):
+            if path == ROOT and bus_name == BUS and method == "GetAttributes":
+                bus.frames = ["/f"]
+                return ({},)
+            if path == ROOT and bus_name == BUS and method == "GetChildren" and not bus.frames:
+                return ([(BUS, "/org/a11y/atspi/null")],)
+            return original(bus_name, path, interface, method, args, signature, timeout)
+
+        bus.call = call
+        metadata = {"id": 1, "pid": 42, "title": "Chrome", "x": 0, "y": 0, "width": 800, "height": 600}
+        with patch.object(native.time, "sleep"):
+            self.assertEqual(native.LinuxDriver._ax_root(driver, metadata), (BUS, "/f"))
+
+
 class WindowTests(unittest.TestCase):
     def setUp(self):
         self.driver, _ = driver_for({})
@@ -615,6 +668,13 @@ class ProtocolTests(unittest.TestCase):
             )
         )
         self.assertEqual(reply["code"], "STALE_ELEMENT")
+
+        class BadDrawable(Exception):
+            pass
+
+        self.assertEqual(
+            native.error_reply(BadDrawable("code = 9"))["code"], "WINDOW_CLOSED"
+        )
         reply = native.error_reply(native.DriverError("NOT_FOUND", "missing"))
         self.assertEqual((reply["code"], reply["error"]), ("NOT_FOUND", "missing"))
 

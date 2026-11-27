@@ -132,7 +132,7 @@ def _clean(value: Any, *, multiline: bool = False) -> str:
         return ""
     text = str(value).replace(OBJECT, " ")
     if multiline:
-        return text.strip(" \t\r\n")
+        return text.strip()  # all Unicode whitespace, e.g. no-break spaces
     return " ".join(text.split())
 
 
@@ -195,7 +195,7 @@ class AtspiBus:
         "window:destroy",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, addresses: list[str] | None = None) -> None:
         import gi
 
         gi.require_version("Gio", "2.0")
@@ -203,25 +203,38 @@ class AtspiBus:
 
         self.Gio = Gio
         self.GLib = GLib
-        session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        address = session.call_sync(
-            "org.a11y.Bus",
-            "/org/a11y/bus",
-            "org.a11y.Bus",
-            "GetAddress",
-            None,
-            GLib.VariantType("(s)"),
-            Gio.DBusCallFlags.NONE,
-            2000,
-            None,
-        ).unpack()[0]
-        self.connection = Gio.DBusConnection.new_for_address_sync(
-            address,
-            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
-            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
-            None,
-            None,
-        )
+        self.connection = None
+        candidates = list(addresses or [])
+        candidates.append("")  # last resort: the session bus launcher
+        failure: Exception | None = None
+        for address in candidates:
+            try:
+                if not address:
+                    session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+                    address = session.call_sync(
+                        "org.a11y.Bus",
+                        "/org/a11y/bus",
+                        "org.a11y.Bus",
+                        "GetAddress",
+                        None,
+                        GLib.VariantType("(s)"),
+                        Gio.DBusCallFlags.NONE,
+                        2000,
+                        None,
+                    ).unpack()[0]
+                self.connection = Gio.DBusConnection.new_for_address_sync(
+                    address,
+                    Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                    | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                    None,
+                    None,
+                )
+                self.address = address
+                break
+            except Exception as exc:  # noqa: BLE001 - a stale address: try the next
+                failure = exc
+        if self.connection is None:
+            raise failure or RuntimeError("No accessibility bus")
         self.context = GLib.MainContext.default()
         self.activity: dict[str, float] = {}
         self.changes: dict[str, dict[str, Any]] = {}
@@ -425,8 +438,10 @@ class LinuxDriver:
     """Execute desktop operations while retaining window and element identity."""
 
     def __init__(self) -> None:
-        if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
-            self._discover_session_bus()
+        # Desktop apps use the session bus of the display's desktop session,
+        # which can differ from the bus the runner started this process with.
+        # Join it so launched apps and the accessibility bridge match.
+        self._discover_session_bus()
         self.connection = display.Display()
         self.root = self.connection.screen().root
         self.windows: dict[int, BoundWindow] = {}
@@ -444,7 +459,7 @@ class LinuxDriver:
         self.atspi: AtspiBus | None = None
         try:
             self._enable_accessibility()
-            self.atspi = AtspiBus()
+            self.atspi = AtspiBus(self._atspi_addresses())
         except Exception as exc:  # noqa: BLE001 - X11 remains usable without AT-SPI
             log.warning(
                 "computer_use_accessibility_unavailable", error_type=type(exc).__name__
@@ -479,17 +494,36 @@ class LinuxDriver:
                 error_type=type(exc).__name__,
             )
 
+    def _atspi_addresses(self) -> list[str]:
+        """Where applications look for the accessibility bus, in libatspi order:
+        AT_SPI_BUS_ADDRESS, the display's AT_SPI_BUS root property, the session."""
+        addresses = []
+        if os.environ.get("AT_SPI_BUS_ADDRESS"):
+            addresses.append(os.environ["AT_SPI_BUS_ADDRESS"])
+        with contextlib.suppress(Exception):
+            value = self._property(self.root, "AT_SPI_BUS")
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            if isinstance(value, str) and value.strip("\0 "):
+                addresses.append(value.strip("\0 "))
+        return addresses
+
     @staticmethod
     def _discover_session_bus() -> None:
-        """Join this display's existing XFCE bus in older workspace images."""
+        """Join the session bus of this display's desktop session, if any."""
         from pathlib import Path
 
         current_display = os.environ.get("DISPLAY", "")
+        sessions = (
+            b"xfce4-session", b"gnome-session", b"startplasma", b"lxsession",
+            b"mate-session", b"cinnamon-session", b"lxqt-session",
+        )  # fmt: skip
         for process in Path("/proc").iterdir():
             if not process.name.isdigit():
                 continue
             try:
-                if b"xfce4-session" not in (process / "cmdline").read_bytes():
+                command = (process / "cmdline").read_bytes().split(b"\0")[0]
+                if not any(name in command for name in sessions):
                     continue
                 environment = dict(
                     item.split(b"=", 1)
@@ -701,6 +735,27 @@ class LinuxDriver:
                 for app_bus, path in candidates
             ]
         )
+        dormant = [
+            index
+            for index, result in enumerate(children)
+            if _ok(result)
+            and all(path.endswith("/null") for _, path in result[0])
+            and metadata.get("pid")
+        ]
+        if dormant:
+            # Chromium/Electron expose their windows only after an assistive
+            # client reads extended properties of the application, as Orca does.
+            bus.many(
+                [(*candidates[i], ACC, "GetAttributes", None, None) for i in dormant]
+            )
+            time.sleep(0.3)
+            for index, result in zip(
+                dormant,
+                bus.many(
+                    [(*candidates[i], ACC, "GetChildren", None, None) for i in dormant]
+                ),
+            ):
+                children[index] = result
         frames = [
             (app_bus, path)
             for (app_bus, _), result in zip(candidates, children)
@@ -1199,6 +1254,29 @@ class LinuxDriver:
             for index, result in zip(wanted, results):
                 if _ok(result) and result[0][2] > 0 and result[0][3] > 0:
                     extents[index] = tuple(result[0])
+        # Text inside another control's own container (a chosen value, a chip)
+        # labels that control, not its neighbors.
+        controls = [0] * len(nodes)
+        for position in range(len(nodes) - 1, -1, -1):
+            item = nodes[position]
+            own = int(item["role"] in CONTEXT_ROLES and self._interactive(item))
+            controls[position] = own + sum(controls[c] for c in item["children"])
+
+        def foreign(text: int, target: int) -> bool:
+            lineage = set()
+            current = target
+            while current >= 0:
+                lineage.add(current)
+                current = nodes[current]["parent"]
+            current = nodes[text]["parent"]
+            for _ in range(3):
+                if current < 0 or current in lineage:
+                    return False
+                if controls[current]:
+                    return True
+                current = nodes[current]["parent"]
+            return False
+
         for index in need:
             node = nodes[index]
             box = extents.get(index)
@@ -1210,7 +1288,7 @@ class LinuxDriver:
                 row_gap = column_gap = float("inf")
                 for text in texts:
                     other = extents.get(text)
-                    if other is None or text == index:
+                    if other is None or text == index or foreign(text, index):
                         continue
                     ox, oy, ow, oh = other
                     if (
@@ -1344,7 +1422,9 @@ class LinuxDriver:
         ):
             if _has(states, flag):
                 shown.append(label)
-        if not _has(states, "enabled") and role not in CONTAINERS | TEXT_ROLES | {
+        if not (
+            _has(states, "enabled") or _has(states, "sensitive")
+        ) and role not in CONTAINERS | TEXT_ROLES | {
             "paragraph",
             "heading",
         }:
@@ -1353,8 +1433,8 @@ class LinuxDriver:
         every.update(name for name, bit in STATE_NAMES if states >> bit & 1)
         if "settable" in every:
             every.add("editable")
-        if "enabled" not in every:
-            every.add("disabled")
+        if "enabled" not in every and "sensitive" not in every:
+            every.add("disabled")  # GTK 4 reports only "sensitive"
         return shown, sorted(every)
 
     def _present(
@@ -1384,9 +1464,14 @@ class LinuxDriver:
                 and not inside_choice
                 and not _has(node["states"], "visible")
             ):
-                # A hidden container can still hold controls that report
-                # themselves visible and accept actions (hidden toolbar items).
-                return kids
+                # A hidden container can still hold named controls that report
+                # themselves visible and accept actions (hidden toolbar items);
+                # unnamed buttons and fields of closed popovers are noise.
+                return [
+                    kid
+                    for kid in kids
+                    if nodes[kid]["name"] and not _has(nodes[kid]["states"], "editable")
+                ]
             if (
                 len(kids) == 1
                 and node["name"]
@@ -1415,13 +1500,23 @@ class LinuxDriver:
                 and not node["name"].isalnum()
             ):
                 return []  # list bullets and separators
-            if not active and not named and node["role"] in CONTAINERS | TEXT_ROLES:
+            if (
+                not active
+                and not named
+                and node["role"] in CONTAINERS | TEXT_ROLES | {"paragraph"}
+            ):
                 return kids
             if (
                 not named
                 and not kids
                 and not node["context"]
-                and (not _has(node["states"], "enabled") or node["role"] in CELL_ROLES)
+                and (
+                    not (
+                        _has(node["states"], "enabled")
+                        or _has(node["states"], "sensitive")
+                    )
+                    or node["role"] in CELL_ROLES
+                )
             ):
                 return []  # disabled placeholders and empty renderer cells
             if len(kids) > 1:
@@ -1479,7 +1574,7 @@ class LinuxDriver:
             )
             info: list[str] = []
             if node["name"]:
-                info.append(node["name"])
+                info.append(_short(node["name"]))  # full text stays in "name"
             if node["value"] and node["value"] != node["name"]:
                 info.append(f"Value: {_short(node['value'])}")
             if (
@@ -1995,12 +2090,25 @@ class LinuxDriver:
                 "UNSUPPORTED_ACTION", f"Element is a {ref.role}, not an editable field"
             )
         if "EditableText" in interfaces:
+            # Focus first, like typing would: a following pressKey("Return")
+            # must reach this field.
+            with contextlib.suppress(Exception):
+                await self._focus(bound, ref)
             with contextlib.suppress(Exception):
                 if bus.call(
                     ref.bus, ref.path, EDITABLE, "SetTextContents", (text,), "(s)"
                 )[0]:
                     actual = await self._wait_text(ref, text, 0.5)
                     if self._same(actual, text):
+                        with contextlib.suppress(Exception):
+                            bus.call(
+                                ref.bus,
+                                ref.path,
+                                TEXT,
+                                "SetCaretOffset",
+                                (len(actual),),
+                                "(i)",
+                            )
                         return {"value": actual}
         for attempt in range(2):
             await self._focus(bound, ref)
@@ -2935,7 +3043,8 @@ class LinuxDriver:
         buttons = [
             n
             for n in tree["nodes"]
-            if n["role"] in {"push button", "button"} and "enabled" in n["states"]
+            if n["role"] in {"push button", "button"}
+            and ("enabled" in n["states"] or "sensitive" in n["states"])
         ]
         choice = [n for n in buttons if "is-default" in n["states"]] or [
             n for n in buttons if ACCEPT_NAMES.match(n["name"].replace("_", ""))
@@ -3159,7 +3268,7 @@ class LinuxDriver:
                 raise DriverError(
                     "APP_UNAVAILABLE", f"Application {name} is unavailable"
                 )
-            app.launch([], None)
+            await self._launch(app)
             self._mark()
             return {}
         if op in {"windows", "apps", "inventory"}:
@@ -3399,6 +3508,52 @@ class LinuxDriver:
         self._mark()
         return {}
 
+    async def _launch(self, app: Any) -> None:
+        """Start a desktop entry and report an immediate failure with its reason."""
+        import shlex
+        import subprocess
+        import tempfile
+
+        command = re.sub(r"%[fFuUdDnNickvm]", "", app.get_commandline() or "").strip()
+        if not command or app.get_boolean("DBusActivatable"):
+            app.launch([], None)
+            return
+        arguments = shlex.split(command)
+        for attempt in range(2):
+            log_file = tempfile.TemporaryFile()
+            # A detached Popen: asyncio would kill the app when this driver exits.
+            process = subprocess.Popen(
+                arguments,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=log_file,
+                start_new_session=True,
+                close_fds=True,
+            )
+            deadline = time.monotonic() + 2.5
+            while process.poll() is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            code = process.poll()
+            if code is None:
+                return  # still running: the window will appear
+            log_file.seek(0)
+            errors = log_file.read()[-4000:].decode("utf-8", errors="replace")
+            if code == 0:
+                return  # handed over to an already running instance
+            if attempt == 0 and os.geteuid() == 0 and "--no-sandbox" in errors:
+                # Chromium-based apps refuse to run as root without this flag;
+                # the workspace VM is the isolation boundary.
+                arguments.append("--no-sandbox")
+                continue
+            reason = " ".join(
+                line.strip() for line in errors.splitlines()[-3:] if line.strip()
+            )
+            raise DriverError(
+                "APP_FAILED",
+                f"{app.get_name()} exited with code {code} right after starting"
+                + (f": {reason[:400]}" if reason else ""),
+            )
+
     async def pump_events(self) -> None:
         """Drain accessibility events between requests so caches stay accurate."""
         while True:
@@ -3487,7 +3642,18 @@ class LinuxDriver:
 def error_reply(exc: BaseException) -> dict[str, Any]:
     """An actionable protocol error; raw D-Bus failures are explained."""
     code, message = getattr(exc, "code", None), str(exc)
-    if not isinstance(exc, DriverError) and "UnknownObject" in message:
+    if not isinstance(exc, DriverError) and any(
+        name in f"{type(exc).__name__} {message}"
+        for name in ("BadDrawable", "BadWindow")
+    ):
+        code, message = (
+            "WINDOW_CLOSED",
+            (
+                "The window closed during the operation; find the window that replaced "
+                "it with cua.listWindows() and bind it with cua.getApp(...)"
+            ),
+        )
+    elif not isinstance(exc, DriverError) and "UnknownObject" in message:
         code, message = (
             "STALE_ELEMENT",
             (
