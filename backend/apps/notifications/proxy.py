@@ -12,7 +12,10 @@ import httpx
 from .configuration import PushSettings, get_push_settings
 
 _CODE = re.compile(r"[^a-z0-9_:]")
-_RETRYABLE = {429, 500, 503, 504}
+# 502 also comes from a reverse proxy while the push proxy restarts; only the
+# proxy's own provider_rejected answer is final.
+_RETRYABLE = {429, 500, 502, 503, 504}
+_MAX_RETRY_AFTER = 15 * 60
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,8 @@ class DeliveryResult:
 
     status: Literal["sent", "retry", "invalid", "failed"]
     code: str = ""
+    # Seconds the proxy asked to wait before the next attempt (Retry-After).
+    retry_after: int = 0
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,12 @@ def _code(prefix: str, body: dict) -> str:
     if provider:
         code += f":{provider}"
     return _CODE.sub("", code.lower())[:64]
+
+
+def _retry_after(response: httpx.Response) -> int:
+    """Delay-seconds only (the proxy never sends HTTP dates), bounded."""
+    value = response.headers.get("retry-after", "").strip()
+    return min(int(value), _MAX_RETRY_AFTER) if value.isdigit() else 0
 
 
 class PushProxyClient:
@@ -94,6 +105,7 @@ class PushProxyClient:
         code = _code(f"proxy_{response.status_code}", details)
         if response.status_code == 410:
             return DeliveryResult("invalid", code)
-        if response.status_code in _RETRYABLE:
-            return DeliveryResult("retry", code)
+        error = details.get("error") if isinstance(details, dict) else None
+        if response.status_code in _RETRYABLE and error != "provider_rejected":
+            return DeliveryResult("retry", code, _retry_after(response))
         return DeliveryResult("failed", code)

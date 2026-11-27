@@ -437,10 +437,12 @@ class NotificationService:
             log.error("mobile_push_delivery_failed", delivery_id=str(job.id))
             result = DeliveryResult("retry", "delivery_failed")
         retry = result.status == "retry" and job.attempts < 6
+        # Deliveries expire after 15 minutes, which also bounds Retry-After.
+        delay = max(min(120, 5 * 2 ** (job.attempts - 1)), result.retry_after)
         await sync_to_async(self.repo.settle)(
             job,
             "pending" if retry else "sent" if result.status == "sent" else "failed",
             result.code,
-            min(120, 5 * 2 ** (job.attempts - 1)) if retry else 0,
+            delay if retry else 0,
         )
         return True

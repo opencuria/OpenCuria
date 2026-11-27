@@ -83,11 +83,16 @@ def load_settings(env: Mapping[str, str]) -> Settings:
 def _public_url(value: str) -> str:
     value = value.strip().rstrip("/")
     parts = urlsplit(value)
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
     loopback = parts.hostname in {"localhost", "127.0.0.1", "::1"}
     if (
         parts.scheme not in {"https", "http"}
         or (parts.scheme == "http" and not loopback)
         or not parts.hostname
+        or port == -1
         or parts.path
         or parts.query
         or parts.fragment
@@ -97,8 +102,12 @@ def _public_url(value: str) -> str:
             "PUSH_PROXY_PUBLIC_URL must be the proxy's https:// origin, "
             "e.g. https://push.example.com"
         )
-    # Servers normalize the VAPID audience the same way.
-    return f"{parts.scheme}://{parts.netloc.lower()}"
+    # Servers normalize the VAPID audience the same way: lower case, without a
+    # default port.
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    if port is not None and port != {"https": 443, "http": 80}[parts.scheme]:
+        host += f":{port}"
+    return f"{parts.scheme}://{host}"
 
 
 def _handle_keys(value: str) -> tuple[bytes, ...]:

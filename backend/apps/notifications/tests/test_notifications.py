@@ -424,6 +424,18 @@ def test_transient_delivery_retries_then_acknowledges(setup, device):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_retry_waits_as_long_as_the_proxy_asks(setup, device):
+    finish(setup[4])
+    NotificationService().record_finished(setup[4].id)
+    transport = proxy(DeliveryResult("retry", "proxy_429_rate_limited", 300))
+    before = timezone.now()
+    assert asyncio.run(NotificationService(proxy=transport).process_one())
+    job = PushDelivery.objects.get(kind="alert")
+    assert job.status == "pending"
+    assert job.available_at >= before + timedelta(seconds=300)
+
+
+@pytest.mark.django_db(transaction=True)
 def test_activity_handle_registration_updates_and_ends_in_background(
     setup, device, device_keys
 ):

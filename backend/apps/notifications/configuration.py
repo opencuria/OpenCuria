@@ -92,11 +92,16 @@ def _proxy_url(value: str) -> str | None:
     if not value:
         return None
     parts = urlsplit(value)
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
     loopback = parts.hostname in {"localhost", "127.0.0.1", "::1"}
     if (
         parts.scheme not in {"https", "http"}
         or (parts.scheme == "http" and not loopback)
         or not parts.hostname
+        or port == -1
         or parts.path
         or parts.query
         or parts.fragment
@@ -106,8 +111,12 @@ def _proxy_url(value: str) -> str | None:
             "PUSH_PROXY_URL must be the push proxy's https:// origin, "
             "e.g. https://push.opencuria.dev, or empty to turn mobile push off"
         )
-    # The proxy compares the VAPID audience with its own lower-case origin.
-    return f"{parts.scheme}://{parts.netloc.lower()}"
+    # The proxy compares the VAPID audience with its own origin: lower case,
+    # without a default port (as the app and the proxy normalize it).
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    if port is not None and port != {"https": 443, "http": 80}[parts.scheme]:
+        host += f":{port}"
+    return f"{parts.scheme}://{host}"
 
 
 def _derive_identity(secret_key: str) -> ServerIdentity:

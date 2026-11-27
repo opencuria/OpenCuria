@@ -191,7 +191,9 @@ class FCMClient:
         if response.is_success:
             return ProviderResult("sent")
         if response.status_code == 401:
+            # An expired or revoked OAuth token: the next attempt fetches a new one.
             self._token = None
+            return ProviderResult("retry", "fcm_401")
         if response.status_code == 429 or response.status_code >= 500:
             return ProviderResult(
                 "retry", f"fcm_{response.status_code}", _retry_after(response)

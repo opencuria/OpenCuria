@@ -148,6 +148,8 @@ def test_client_signs_with_vapid_and_reuses_the_token():
             "proxy_503_provider_unavailable",
         ),
         (500, None, "retry", "proxy_500"),
+        # A reverse proxy in front of a restarting push proxy.
+        (502, None, "retry", "proxy_502"),
         (
             502,
             {"error": "provider_rejected", "provider_code": "apns_403"},
@@ -169,6 +171,21 @@ def test_proxy_responses_map_to_outbox_outcomes(status, body, expected, code):
         ),
     )
     assert (result.status, result.code) == (expected, code)
+
+
+@pytest.mark.parametrize(
+    "header,expected", [("90", 90), ("86400", 900), ("soon", 0), (None, 0)]
+)
+def test_retry_after_is_kept_and_bounded(header, expected):
+    message = ProxyMessage(handle="h", type="alert", payload="p")
+    headers = {"retry-after": header} if header else {}
+    result, _ = send(
+        message,
+        lambda request: httpx.Response(
+            429, json={"error": "rate_limited"}, headers=headers
+        ),
+    )
+    assert (result.status, result.retry_after) == ("retry", expected)
 
 
 def test_unreachable_or_disabled_proxy(settings):

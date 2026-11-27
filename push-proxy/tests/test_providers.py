@@ -148,6 +148,23 @@ def test_fcm_never_drops_devices_for_configuration_errors(
         assert result.retry_after == 7
 
 
+def test_fcm_renews_a_rejected_oauth_token_on_retry(settings):
+    tokens = []
+
+    def handle(request):
+        if request.url.host == "oauth2.googleapis.com":
+            tokens.append(f"oauth-{len(tokens)}")
+            return httpx.Response(200, json={"access_token": tokens[-1]})
+        if request.headers["authorization"] == "Bearer oauth-0":
+            return httpx.Response(401, json={"error": {"status": "UNAUTHENTICATED"}})
+        return httpx.Response(200, json={})
+
+    first, second = run(fcm_send(settings, handle))
+    assert (first.status, first.code) == ("retry", "fcm_401")
+    assert second.status == "sent"
+    assert tokens == ["oauth-0", "oauth-1"]
+
+
 def test_fcm_auth_failures_are_not_device_errors(settings):
     def handle(request):
         return httpx.Response(400, content=json.dumps({"error": "invalid_grant"}))

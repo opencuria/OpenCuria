@@ -61,6 +61,7 @@ def test_empty_proxy_url_turns_mobile_push_off(client, setup, headers, settings)
         "push.example.com",
         "https://push.example.com/v1",
         "https://user@push.example.com",
+        "https://push.example.com:99999",
         "ftp://push.example.com",
     ],
 )
@@ -76,6 +77,9 @@ def test_invalid_proxy_urls_fail_startup(settings, value):
         ("https://push.opencuria.dev/", "https://push.opencuria.dev"),
         ("HTTPS://Push.OpenCuria.dev", "https://push.opencuria.dev"),
         ("http://127.0.0.1:8090", "http://127.0.0.1:8090"),
+        ("https://push.example.com:443", "https://push.example.com"),
+        ("https://push.example.com:8443/", "https://push.example.com:8443"),
+        ("http://[::1]:80", "http://[::1]"),
         ("  ", None),
     ],
 )

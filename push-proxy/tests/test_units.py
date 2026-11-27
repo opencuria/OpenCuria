@@ -51,6 +51,10 @@ def test_settings_load_both_providers(settings):
             {"PUSH_PROXY_PUBLIC_URL": "https://push.example.com/v1"},
             "PUSH_PROXY_PUBLIC_URL",
         ),
+        (
+            {"PUSH_PROXY_PUBLIC_URL": "https://push.example.com:99999"},
+            "PUSH_PROXY_PUBLIC_URL",
+        ),
         ({"PUSH_PROXY_HANDLE_KEYS": ""}, "PUSH_PROXY_HANDLE_KEYS"),
         ({"PUSH_PROXY_HANDLE_KEYS": "c2hvcnQ="}, "PUSH_PROXY_HANDLE_KEYS"),
         ({"APNS_KEY_ID": ""}, "must be set together"),
@@ -67,11 +71,18 @@ def test_invalid_settings_fail_startup(env, change, message):
     assert "private-sentinel" not in str(error.value)
 
 
-def test_public_url_is_normalized_like_the_servers_audience(env):
-    settings = load_settings(
-        {**env, "PUSH_PROXY_PUBLIC_URL": "HTTPS://Push.Example.test/"}
-    )
-    assert settings.public_url == PUBLIC_URL
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("HTTPS://Push.Example.test/", PUBLIC_URL),
+        ("https://push.example.test:443", PUBLIC_URL),
+        ("https://push.example.test:8443", f"{PUBLIC_URL}:8443"),
+        ("http://[::1]:80", "http://[::1]"),
+    ],
+)
+def test_public_url_is_normalized_like_the_servers_audience(env, value, expected):
+    settings = load_settings({**env, "PUSH_PROXY_PUBLIC_URL": value})
+    assert settings.public_url == expected
 
 
 def test_providers_are_optional_but_not_both(env):
