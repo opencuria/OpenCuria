@@ -14,7 +14,8 @@ MIGRATIONS = {
     "0018_computer_use_session_runtime": ("0.2.1", "0.3.0"),
     "0019_computer_use_desktop_bus": ("0.3.0", "0.3.1"),
     "0020_computer_use_error_output": ("0.3.1", "0.3.2"),
-    "0021_computer_use_toggle_labels": ("0.3.2", VERSION),
+    "0021_computer_use_toggle_labels": ("0.3.2", "0.3.3"),
+    "0022_computer_use_regions_terminal": ("0.3.3", VERSION),
 }
 
 

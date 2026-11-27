@@ -46,6 +46,7 @@ class FakeBus:
         self.listening = True
         self.activity: dict[str, float] = {}
         self.changes: dict[str, dict] = {}
+        self.focused: dict[str, str] = {}
         self.actions: list[tuple[str, int]] = []
         self.calls = 0
 
@@ -164,6 +165,7 @@ def driver_for(objects: dict[str, dict], frames: list[str] | None = None) -> tup
     driver.windows = {}
     driver.next_element = 1
     driver.touched = set()
+    driver.touch_focus = False
     driver.toolkits = {}
     driver.dirty = False
     driver.action_at = 0.0
@@ -330,6 +332,59 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(
             incremental, driver.atspi.calls / 2
         )  # not a full walk of the window
+
+    async def test_acting_rereads_the_enclosing_region_without_events(self):
+        objects = {
+            "/f": {"role": "frame", "name": "Page", "children": ["/doc"]},
+            "/doc": {
+                "role": "document web",
+                "name": "Page",
+                "children": ["/table", "/other"],
+            },
+            "/table": {"role": "table", "children": ["/head", "/r1", "/r2"]},
+            "/head": {
+                "role": "column header",
+                "name": "Last Name",
+                "actions": ["click"],
+            },
+            "/r1": {"role": "table row", "children": ["/c1"]},
+            "/c1": {"role": "table cell", "name": "Smith"},
+            "/r2": {"role": "table row", "children": ["/c2"]},
+            "/c2": {"role": "table cell", "name": "Bach"},
+            "/other": {"role": "heading", "name": "Elsewhere"},
+        }
+        driver, bound = driver_for(objects)
+        await driver._tree(bound, {})
+        header = next(
+            n
+            for n in (await driver._tree(bound, {}))["nodes"]
+            if n["name"] == "Last Name"
+        )
+        driver._ref(bound, header["id"])  # acted on
+        objects["/table"]["children"] = ["/head", "/r2", "/r1"]  # re-sorted silently
+        names = [
+            n["name"]
+            for n in (await driver._tree(bound, {}))["nodes"]
+            if n["role"] == "table cell"
+        ]
+        self.assertEqual(names, ["Bach", "Smith"])
+
+    async def test_defunct_objects_reread_their_parent(self):
+        objects = form()
+        driver, bound = driver_for(objects)
+        await driver._tree(bound, {})
+        objects["/doc"]["children"] = ["/fresh"]
+        objects["/fresh"] = {"role": "heading", "name": "Next page"}
+        driver.atspi.changes[BUS] = {
+            "structure": set(),
+            "props": set(),
+            "documents": set(),
+            "defunct": {"/wrap"},
+            "overflow": False,
+        }
+        self.assertIn(
+            "heading Next page", "\n".join(lines(await driver._tree(bound, {})))
+        )
 
     async def test_unknown_document_load_forces_a_full_read(self):
         objects = form()
@@ -581,6 +636,12 @@ class DesktopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(lines(await driver._tree(bound, {})))
         self.assertIn("check box (unchecked) Context: checkbox 1", text)
         self.assertIn("check box (checked) Context: checkbox 2", text)
+
+    def test_password_masks_confirm_the_typed_length(self):
+        same = native.LinuxDriver._same
+        self.assertTrue(same("••••••", "secret"))
+        self.assertFalse(same("•••••", "secret"))
+        self.assertTrue(same("abc", "abc"))
 
     def test_rich_text_roots_read_their_paragraphs(self):
         objects = {
@@ -893,6 +954,17 @@ class ClipboardReadinessTests(unittest.IsolatedAsyncioTestCase):
             await self.driver._paste_text(self.bound, "Unicode ä😀")
         self.driver._press.assert_awaited_once_with(self.bound, "Control_L+v")
         self.clipboard.stdin.write.assert_called_once_with("Unicode ä😀".encode())
+
+    async def test_terminals_receive_typed_keys_instead_of_a_paste(self):
+        self.bound.root = (BUS, "/f")
+        self.bound.mirror = {
+            "nodes": {"/t": {"role": "terminal", "states": bits("focused")[0]}}
+        }
+        self.driver.atspi = SimpleNamespace(focused={})
+        self.driver._type_characters = AsyncMock(return_value=4)
+        await self.driver._paste_text(self.bound, "ls\n")
+        self.driver._type_characters.assert_awaited_once_with(self.bound, "ls\n")
+        self.driver._press.assert_not_awaited()
 
     async def test_unacquired_clipboard_does_not_send_a_paste_shortcut(self):
         self.driver.connection.get_selection_owner.return_value = SimpleNamespace(id=1)
