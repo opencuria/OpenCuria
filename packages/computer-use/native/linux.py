@@ -95,6 +95,13 @@ OPTION_ROLES = {
 }  # fmt: skip
 CELL_ROLES = {"table cell", "cell", "grid cell"}
 FOLDING_ROLES = {"menu", "combo box", "menu button"}
+TOGGLE_ROLES = {
+    "check box",
+    "radio button",
+    "switch",
+    "toggle button",
+    "check menu item",
+}
 ROW_ROLES = {"table row", "row"}
 TABLE_ROLES = {"table", "tree table", "grid"}
 HEADER_ROLES = {"column header", "table column header"}
@@ -1318,11 +1325,22 @@ class LinuxDriver:
 
                 rows: dict[bool, tuple[float, int]] = {}
                 column, column_gap = None, max(3 * height, 60)
+                # Check boxes and radio buttons are labeled by the text right
+                # next to them ("[x] Bacon"); it wins over row and column text.
+                follows = node["role"] in TOGGLE_ROLES
+                right, right_gap = None, max(40, 2 * height)
                 for text in texts:
                     other = extents.get(text)
                     if other is None or text == index or foreign(text, index):
                         continue
                     ox, oy, ow, oh = other
+                    if (
+                        follows
+                        and abs((oy + oh / 2) - cy) <= max(height, oh) / 2
+                        and ox >= x + width - 2
+                        and ox - (x + width) < right_gap
+                    ):
+                        right, right_gap = text, ox - (x + width)
                     if abs((oy + oh / 2) - cy) <= max(height, oh) / 2 and ox + ow <= cx:
                         gap, inner = cx - (ox + ow), within(text)
                         if gap < rows.get(inner, (float("inf"), -1))[0]:
@@ -1334,6 +1352,8 @@ class LinuxDriver:
                     ):
                         column, column_gap = text, cy - (oy + oh)
                 row = (rows.get(False) or rows.get(True) or (0, None))[1]
+                if right is not None:
+                    row, column = right, None
                 parts = []
                 for choice in (row, column):
                     if choice is not None:
@@ -1897,7 +1917,7 @@ class LinuxDriver:
         count = int(bus.get(ref.bus, ref.path, TEXT, "CharacterCount"))
         if count <= 0:
             return ""
-        return str(
+        raw = str(
             bus.call(
                 ref.bus,
                 ref.path,
@@ -1906,7 +1926,18 @@ class LinuxDriver:
                 (0, min(count, MAX_VALUE * 4)),
                 "(ii)",
             )[0]
-        ).replace(OBJECT, "")
+        )
+        if OBJECT in raw and not raw.replace(OBJECT, "").strip():
+            # Rich text editors (contenteditable) keep their text in child
+            # paragraphs; the root only holds embedded-object placeholders.
+            parts = []
+            for child_bus, child_path in bus.call(
+                ref.bus, ref.path, ACC, "GetChildren"
+            )[0][:500]:
+                with contextlib.suppress(Exception):
+                    parts.append(self._text(Ref(child_bus, child_path, "", "")))
+            return "\n".join(parts)
+        return raw.replace(OBJECT, "")
 
     def _extents(self, ref: Ref) -> tuple[int, int, int, int]:
         assert self.atspi is not None

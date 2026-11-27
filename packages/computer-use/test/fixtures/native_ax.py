@@ -536,6 +536,68 @@ class DesktopIntegrationTests(unittest.IsolatedAsyncioTestCase):
             text + "\n",
         )
 
+    async def test_text_right_of_a_checkbox_labels_it(self):
+        objects = {
+            "/f": {
+                "role": "frame",
+                "name": "Form",
+                "children": ["/heading", "/form"],
+                "extents": (0, 0, 800, 600),
+            },
+            "/heading": {
+                "role": "heading",
+                "name": "Checkboxes",
+                "extents": (10, 10, 200, 30),
+            },
+            "/form": {
+                "role": "form",
+                "children": ["/one", "/one-text", "/two", "/two-text"],
+                "extents": (10, 50, 300, 50),
+            },
+            "/one": {
+                "role": "check box",
+                "actions": ["check"],
+                "extents": (10, 50, 13, 13),
+                "states": ["enabled", "visible", "showing", "focusable"],
+            },
+            "/one-text": {
+                "role": "static",
+                "name": "checkbox 1",
+                "extents": (27, 50, 70, 15),
+            },
+            "/two": {
+                "role": "check box",
+                "actions": ["check"],
+                "extents": (10, 72, 13, 13),
+                "states": ["enabled", "visible", "showing", "focusable", "checked"],
+            },
+            "/two-text": {
+                "role": "static",
+                "name": "checkbox 2",
+                "extents": (27, 72, 70, 15),
+            },
+        }
+        driver, bound = driver_for(objects)
+        text = "\n".join(lines(await driver._tree(bound, {})))
+        self.assertIn("check box (unchecked) Context: checkbox 1", text)
+        self.assertIn("check box (checked) Context: checkbox 2", text)
+
+    def test_rich_text_roots_read_their_paragraphs(self):
+        objects = {
+            "/editor": {
+                "role": "section",
+                "text": "\ufffc\ufffc",
+                "children": ["/p1", "/p2"],
+            },
+            "/p1": {"role": "paragraph", "text": "Zeile 1"},
+            "/p2": {"role": "paragraph", "text": "Zeile 2 🚀"},
+        }
+        driver, _ = driver_for(objects)
+        self.assertEqual(
+            driver._text(native.Ref(BUS, "/editor", "section", "")),
+            "Zeile 1\nZeile 2 🚀",
+        )
+
     def test_accessibility_bus_follows_the_display_like_libatspi(self):
         driver, _ = driver_for({})
         driver.root = object()

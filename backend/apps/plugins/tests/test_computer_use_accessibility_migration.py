@@ -13,7 +13,8 @@ MIGRATIONS = {
     "0015_computer_use_accessibility": ("0.2.0", "0.2.1"),
     "0018_computer_use_session_runtime": ("0.2.1", "0.3.0"),
     "0019_computer_use_desktop_bus": ("0.3.0", "0.3.1"),
-    "0020_computer_use_error_output": ("0.3.1", VERSION),
+    "0020_computer_use_error_output": ("0.3.1", "0.3.2"),
+    "0021_computer_use_toggle_labels": ("0.3.2", VERSION),
 }
 
 
