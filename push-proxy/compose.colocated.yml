@@ -1,0 +1,14 @@
+# Push proxy next to a control plane on the same host: the control plane's
+# Caddy owns ports 80/443, serves PUSH_PROXY_DOMAIN too and reaches the proxy
+# over the control plane's edge network. Use it with
+# COMPOSE_FILE=compose.yml:compose.colocated.yml and without the tls profile
+# (install.sh does both).
+services:
+  push-proxy:
+    networks:
+    - push-net
+    - control-plane
+networks:
+  control-plane:
+    name: ${CONTROL_PLANE_NETWORK:-opencuria_edge}
+    external: true

@@ -1,7 +1,9 @@
-# OpenCuria push proxy, deployed apart from the control plane: one proxy serves
-# every OpenCuria server whose users run the app it holds credentials for.
-# Copy .env.example to .env, put the provider keys into ./secrets/ (mounted at
-# /run/secrets) and run `docker compose up -d`.
+# OpenCuria push proxy, its own Compose project: one proxy serves every
+# OpenCuria server whose users run the app it holds credentials for.
+# `install.sh --proxy` sets it up in /opt/opencuria/push-proxy. By hand: copy
+# .env.example to .env, put the provider keys into ./secrets/ (mounted at
+# /run/secrets) and run `docker compose up -d`. Next to a control plane on the
+# same host, see compose.colocated.yml.
 name: opencuria-push
 services:
   push-proxy:
@@ -25,7 +27,8 @@ services:
     volumes:
     - ./secrets:/run/secrets:ro
     ports:
-    - ${PUSH_PROXY_PORT:-127.0.0.1:8080}:8080
+    # 8090: a control plane on the same host publishes its web app on 8080.
+    - ${PUSH_PROXY_PORT:-127.0.0.1:8090}:8080
     read_only: true
     cap_drop:
     - ALL

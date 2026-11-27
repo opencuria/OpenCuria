@@ -141,6 +141,7 @@ services:
     - caddy-config:/config
     networks:
     - opencuria-net
+    - edge
 volumes:
   backend-runtime: null
   pgdata: null
@@ -149,4 +150,8 @@ volumes:
   caddy-config: null
 networks:
   opencuria-net:
+    driver: bridge
+  # Only the proxy and services it fronts on this host, such as a push proxy
+  # (push-proxy/compose.colocated.yml); they never reach the database.
+  edge:
     driver: bridge

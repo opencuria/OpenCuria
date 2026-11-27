@@ -42,8 +42,21 @@ ciphertext.
 
 ## Run it
 
-The proxy needs a domain with ports 80 and 443 open (Caddy obtains the
-certificate) and the credentials of the app it serves:
+The proxy needs its own domain with ports 80 and 443 open (Caddy obtains the
+certificate) and the credentials of the app it serves. The installer sets it up
+in `/opt/opencuria/push-proxy`, next to a control plane or on its own, and
+updates it with the rest of the installation:
+
+```sh
+curl -fsSL https://opencuria.dev/install.sh | sudo bash -s -- --proxy
+```
+
+It asks for the domain, the APNs key and/or the Firebase service account
+(`--help` lists the flags for unattended runs). Next to a control plane, that
+one's Caddy also serves the proxy's domain (`compose.colocated.yml`) and the
+server sends through it; on its own, the proxy runs its own Caddy.
+
+By hand:
 
 ```sh
 cd push-proxy
@@ -58,9 +71,9 @@ curl https://push.example.com/healthz
   app's bundle IDs in `APNS_APP_IDS`; Live Activities use the same key.
 - **Android:** a service account JSON of the app's Firebase project, with the
   package names in `FCM_APP_IDS`.
-- **Your own reverse proxy:** remove `COMPOSE_PROFILES=tls`. Set
-  `PUSH_PROXY_PORT` to publish the proxy and forward HTTPS to it. Keep
-  `X-Forwarded-For`, which the per-client registration limit uses.
+- **Your own reverse proxy:** remove `COMPOSE_PROFILES=tls` and forward HTTPS
+  to `127.0.0.1:8090` (`PUSH_PROXY_PORT`). Keep `X-Forwarded-For`, which the
+  per-client registration limit uses.
 
 ## Your own app and proxy
 

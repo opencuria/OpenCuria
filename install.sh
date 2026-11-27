@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# OpenCuria installer: control plane (Docker Compose), QEMU runner (systemd) or both.
+# OpenCuria installer: control plane (Docker Compose), QEMU runner (systemd) or both;
+# with --proxy also the push proxy for the mobile app (Docker Compose).
 #
 #   curl -fsSL https://opencuria.dev/install.sh | sudo bash
 #
@@ -17,7 +18,15 @@ LOCAL_BACKEND_URL="http://127.0.0.1:8000"
 COMPOSE_PROJECT="opencuria"
 COMPOSE_LABEL="label=com.docker.compose.project=${COMPOSE_PROJECT}"
 DB_VOLUME="${COMPOSE_PROJECT}_pgdata"
-OPENCURIA_IMAGES=(ghcr.io/opencuria/backend ghcr.io/opencuria/webapp)
+OPENCURIA_IMAGES=(ghcr.io/opencuria/backend ghcr.io/opencuria/webapp
+  ghcr.io/opencuria/push-proxy)
+
+# The push proxy (push-proxy/compose.yml) is its own Compose project.
+PUSH_PROJECT="opencuria-push"
+PUSH_LABEL="label=com.docker.compose.project=${PUSH_PROJECT}"
+PUSH_UID=10001 # the proxy container's user, reads the provider keys
+# Apps of the published OpenCuria app; a proxy only reaches apps whose keys it holds.
+PUSH_APP_IDS_DEFAULT="com.opencuria.mobile,com.opencuria.mobile.dev"
 
 RUNNER_SERVICE="opencuria-runner"
 RUNNER_UNIT="/etc/systemd/system/${RUNNER_SERVICE}.service"
@@ -32,7 +41,8 @@ LIBVIRT_NETWORK_CONF="/etc/libvirt/network.conf"
 LIBVIRT_PIN_COMMENT="# Set by the OpenCuria installer: works next to Docker."
 
 # What the installer creates inside the installation directory.
-INSTALL_ENTRIES=(.env .bootstrapped compose.yml Caddyfile secrets runner runner.new runner.old)
+INSTALL_ENTRIES=(.env .bootstrapped compose.yml Caddyfile secrets runner runner.new runner.old
+  push-proxy)
 # Runner settings that may move storage out of the default directories.
 RUNNER_PATH_KEYS=(RUNNER_QEMU_IMAGE_CACHE_DIR RUNNER_QEMU_DISK_DIR
   RUNNER_QEMU_SNAPSHOT_DIR RUNNER_STATE_DIR RUNNER_QEMU_SSH_KEY_PATH)
@@ -51,9 +61,18 @@ DIR_SET=0
 VERSION="latest"
 VERSION_SET=0
 ASSUME_YES=0
+PROXY=0 # --proxy: also the push proxy (full, server) or only it (proxy)
+PROXY_DOMAIN=""
+APNS_KEY_FILE=""
+APNS_KEY_ID=""
+APNS_TEAM_ID=""
+FCM_KEY_FILE=""
+PUSH_APP_IDS=""
 
 # Run state
-MODE="" # components to install or update: full, server or runner
+MODE="" # components to install or update: full, server, runner or proxy
+WITH_PROXY=0 # the push proxy is installed or updated in this run
+PROXY_NEW=0  # ... and set up for the first time
 TTY=0
 SRC_DIR=""
 WORK_DIR=""
@@ -69,6 +88,8 @@ SERVER_READY=0
 SERVER_FILES=0
 RUNNER_ENV=0
 RUNNER_FILES=0
+PROXY_ENV=0
+PROXY_FILES=0
 DOCKER_STATE="missing" # missing, down or up
 CP_CONTAINERS=()
 CP_RUNNING=0
@@ -76,6 +97,10 @@ CP_VOLUMES=()
 CP_NETWORKS=()
 CP_IMAGES=()
 CP_DATA=0
+PUSH_CONTAINERS=()
+PUSH_RUNNING=0
+PUSH_VOLUMES=()
+PUSH_NETWORKS=()
 LIBVIRT_STATE="missing" # missing, down or up
 VM_DOMAINS=()
 VM_RUNNING=0
@@ -95,12 +120,14 @@ Actions (asked interactively when omitted):
   server     Install the control plane only: backend, web app, PostgreSQL, Redis,
              HTTPS proxy
   runner     Install a runner only, connected to an existing control plane
+  proxy      Install the push proxy only (implies --proxy)
   update     Update what is installed; configuration and data are kept
   uninstall  Remove OpenCuria completely: workspaces, images, database, files
 
 On a host that already runs OpenCuria the installer offers update and uninstall;
 without a terminal it updates. Updates stay on the installed version (latest, dev
-or a commit) unless --version or --dev selects another.
+or a commit) unless --version or --dev selects another, and include the push proxy
+when it is installed.
 
 Options:
   --domain NAME          Public domain; HTTPS via Let's Encrypt (DNS must point
@@ -117,6 +144,17 @@ Options:
   -y, --yes              Never prompt; fail when a required value is missing.
                          Required to uninstall without a terminal.
   -h, --help             Show this help
+
+Push proxy (relays end-to-end encrypted mobile push; needs the app's APNs/FCM keys):
+  --proxy                Also install the push proxy with full or server, or add it
+                         to an installed control plane with update
+  --proxy-domain NAME    Its own domain; HTTPS via Let's Encrypt (DNS must point here)
+  --apns-key FILE        iOS: APNs auth key (.p8) of the team that signs the app
+  --apns-key-id ID       Its key ID (default: from the name AuthKey_<ID>.p8)
+  --apns-team-id ID      The Apple team ID
+  --fcm-key FILE         Android: service account JSON of the app's Firebase project
+  --push-app-ids LIST    Bundle IDs / package names it serves, comma-separated
+                         (default: ${PUSH_APP_IDS_DEFAULT})
 EOF
 }
 
@@ -247,6 +285,10 @@ plural() { # plural COUNT WORD -> "1 VM", "2 VMs"
 
 compose() { (cd "${INSTALL_DIR}" && docker compose "$@"); }
 
+push_dir() { printf '%s/push-proxy' "${INSTALL_DIR}"; }
+
+push_compose() { (cd "$(push_dir)" && docker compose "$@"); }
+
 cleanup() { [[ -z "${WORK_DIR}" ]] || rm -rf "${WORK_DIR}"; }
 
 has_systemd() { command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]; }
@@ -331,7 +373,7 @@ recover_runner_swap() {
 
 detect_files() {
   SERVER_ENV=0 SERVER_READY=0 SERVER_FILES=0 RUNNER_ENV=0 RUNNER_FILES=0
-  LEFTOVER_PATHS=()
+  PROXY_ENV=0 PROXY_FILES=0 LEFTOVER_PATHS=()
   if [[ -f "${INSTALL_DIR}/.env" ]]; then SERVER_ENV=1; fi
   if [[ -f "${INSTALL_DIR}/.bootstrapped" ]]; then SERVER_READY=1; fi
   if [[ -e "${INSTALL_DIR}/compose.yml" || -e "${INSTALL_DIR}/Caddyfile" ||
@@ -343,6 +385,8 @@ detect_files() {
     -d "${INSTALL_DIR}/runner.old" || -e "${RUNNER_UNIT}" || -L "${RUNNER_UNIT}" ]]; then
     RUNNER_FILES=1
   fi
+  if [[ -f "$(push_dir)/.env" ]]; then PROXY_ENV=1; fi
+  if [[ -d "$(push_dir)" ]]; then PROXY_FILES=1; fi
   local path
   for path in "${DATA_DIR}" "${STATE_DIR}" "${ROOT_SHARE_DIR}"; do
     if [[ -e "${path}" ]]; then LEFTOVER_PATHS+=("${path}"); fi
@@ -351,7 +395,7 @@ detect_files() {
 
 detect_docker() {
   DOCKER_STATE=missing CP_CONTAINERS=() CP_RUNNING=0 CP_VOLUMES=() CP_NETWORKS=() CP_IMAGES=()
-  CP_DATA=0
+  CP_DATA=0 PUSH_CONTAINERS=() PUSH_RUNNING=0 PUSH_VOLUMES=() PUSH_NETWORKS=()
   command -v docker >/dev/null || return 0
   DOCKER_STATE=down
   docker_ready || return 0
@@ -375,9 +419,26 @@ detect_docker() {
   if [[ " ${CP_VOLUMES[*]-} " == *" ${DB_VOLUME} "* ]]; then CP_DATA=1; fi
   out="$(docker network ls -q --filter "${COMPOSE_LABEL}")" || die "Could not list Docker networks."
   lines_to CP_NETWORKS "${out}"
-  out="$(docker image ls -q --filter "reference=${OPENCURIA_IMAGES[0]}" \
-    --filter "reference=${OPENCURIA_IMAGES[1]}")" || die "Could not list Docker images."
+  local filters=() image
+  for image in "${OPENCURIA_IMAGES[@]}"; do filters+=(--filter "reference=${image}"); done
+  out="$(docker image ls -q "${filters[@]}")" || die "Could not list Docker images."
   lines_to CP_IMAGES "${out}"
+
+  out="$(docker container ls -aq --filter "${PUSH_LABEL}")" || die "Could not list Docker containers."
+  lines_to PUSH_CONTAINERS "${out}"
+  out="$(docker container ls -q --filter "${PUSH_LABEL}" --filter status=running)" ||
+    die "Could not list Docker containers."
+  lines_to running "${out}"
+  PUSH_RUNNING="${#running[@]}"
+  out="$(docker volume ls -q --filter "${PUSH_LABEL}")" || die "Could not list Docker volumes."
+  for volume in caddy-data caddy-config; do
+    if docker volume inspect "${PUSH_PROJECT}_${volume}" >/dev/null 2>&1; then
+      out+=$'\n'"${PUSH_PROJECT}_${volume}"
+    fi
+  done
+  lines_to PUSH_VOLUMES "${out}"
+  out="$(docker network ls -q --filter "${PUSH_LABEL}")" || die "Could not list Docker networks."
+  lines_to PUSH_NETWORKS "${out}"
 }
 
 detect_libvirt() {
@@ -403,20 +464,32 @@ server_installed() {
 
 runner_installed() { [[ "${RUNNER_ENV}" -eq 1 || "${RUNNER_FILES}" -eq 1 ]]; }
 
+proxy_installed() {
+  [[ "${PROXY_ENV}" -eq 1 || "${PROXY_FILES}" -eq 1 || "${#PUSH_CONTAINERS[@]}" -gt 0 ||
+    "${#PUSH_VOLUMES[@]}" -gt 0 ]]
+}
+
+with_server() { [[ "${MODE}" == full || "${MODE}" == server ]]; }
+with_runner() { [[ "${MODE}" == full || "${MODE}" == runner ]]; }
+
+# The control plane's Caddy serves a push proxy on the same host (ports 80/443);
+# only a host without a control plane runs the push proxy's own Caddy.
+proxy_colocated() { with_server || server_installed; }
+
 # Workspace VMs, networks or storage without an installed runner.
 has_leftovers() {
   [[ "${#VM_DOMAINS[@]}" -gt 0 || "${#VM_NETWORKS[@]}" -gt 0 || "${#LEFTOVER_PATHS[@]}" -gt 0 ]]
 }
 
-server_status() {
+containers_status() { # containers_status RUNNING TOTAL
   case "${DOCKER_STATE}" in
     missing) printf 'Docker is not installed' ;;
     down) printf 'Docker is not running' ;;
     up)
-      if [[ "${#CP_CONTAINERS[@]}" -eq 0 ]]; then
+      if [[ "$2" -eq 0 ]]; then
         printf 'no containers'
       else
-        printf '%s of %s running' "${CP_RUNNING}" "$(plural "${#CP_CONTAINERS[@]}" container)"
+        printf '%s of %s running' "$1" "$(plural "$2" container)"
       fi
       ;;
   esac
@@ -438,7 +511,12 @@ show_installation() {
   printf '\nOpenCuria is installed on this host:\n' >&2
   if server_installed; then
     url="$(env_value "${INSTALL_DIR}/.env" PUBLIC_URL)"
-    info "Control plane  ${url:-${INSTALL_DIR}} ($(server_status))"
+    info "Control plane  ${url:-${INSTALL_DIR}} ($(containers_status "${CP_RUNNING}" "${#CP_CONTAINERS[@]}"))"
+  fi
+  if proxy_installed; then
+    url="$(env_value "$(push_dir)/.env" PUSH_PROXY_DOMAIN)"
+    url="${url:+https://${url}}"
+    info "Push proxy     ${url:-$(push_dir)} ($(containers_status "${PUSH_RUNNING}" "${#PUSH_CONTAINERS[@]}"))"
   fi
   if runner_installed; then
     url="$(env_value "${INSTALL_DIR}/runner/.env" RUNNER_BACKEND_URL)"
@@ -460,7 +538,7 @@ show_installation() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      full | server | runner | update | uninstall)
+      full | server | runner | proxy | update | uninstall)
         [[ -z "${ACTION}" ]] || die "Pass only one action, not both ${ACTION} and $1."
         ACTION="$1"
         ;;
@@ -472,12 +550,24 @@ parse_args() {
       --dir) INSTALL_DIR="${2?--dir needs a value}" DIR_SET=1; shift ;;
       --version) VERSION="${2?--version needs a value}" VERSION_SET=1; shift ;;
       --dev) VERSION=dev VERSION_SET=1 ;;
+      --proxy) PROXY=1 ;;
+      # The push proxy's settings imply --proxy.
+      --proxy-domain) PROXY_DOMAIN="${2?--proxy-domain needs a value}" PROXY=1; shift ;;
+      --apns-key) APNS_KEY_FILE="${2?--apns-key needs a value}" PROXY=1; shift ;;
+      --apns-key-id) APNS_KEY_ID="${2?--apns-key-id needs a value}" PROXY=1; shift ;;
+      --apns-team-id) APNS_TEAM_ID="${2?--apns-team-id needs a value}" PROXY=1; shift ;;
+      --fcm-key) FCM_KEY_FILE="${2?--fcm-key needs a value}" PROXY=1; shift ;;
+      --push-app-ids) PUSH_APP_IDS="${2?--push-app-ids needs a value}" PROXY=1; shift ;;
       -y | --yes) ASSUME_YES=1 ;;
       -h | --help) usage; exit 0 ;;
       *) die "Unknown argument: $1 (see --help)" ;;
     esac
     shift
   done
+  if [[ "${ACTION}" == proxy ]]; then PROXY=1; fi
+  if [[ "${PROXY}" -eq 1 && ( "${ACTION}" == runner || "${ACTION}" == uninstall ) ]]; then
+    die "--proxy adds the push proxy to full, server or update; the proxy action installs it on its own."
+  fi
   [[ "${VERSION}" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid --version: ${VERSION}"
   while [[ "${INSTALL_DIR}" == */ ]]; do INSTALL_DIR="${INSTALL_DIR%/}"; done
   # At least two path components: uninstall deletes the installer's files there.
@@ -492,6 +582,8 @@ resolve_version() {
   INSTALLED_VERSION="$(env_value "${INSTALL_DIR}/.env" OPENCURIA_TAG)"
   [[ -n "${INSTALLED_VERSION}" ]] ||
     INSTALLED_VERSION="$(env_value "${INSTALL_DIR}/runner/.env" OPENCURIA_TAG)"
+  [[ -n "${INSTALLED_VERSION}" ]] ||
+    INSTALLED_VERSION="$(env_value "$(push_dir)/.env" PUSH_PROXY_TAG)"
   [[ "${INSTALLED_VERSION}" =~ ^[A-Za-z0-9._-]+$ ]] || INSTALLED_VERSION=""
   if [[ "${VERSION_SET}" -eq 0 && -n "${INSTALLED_VERSION}" ]]; then
     VERSION="${INSTALLED_VERSION}"
@@ -503,7 +595,7 @@ choose_action() {
   if [[ -n "${ACTION}" ]]; then
     return 0
   fi
-  if server_installed || runner_installed; then
+  if server_installed || runner_installed || proxy_installed; then
     if [[ "${TTY}" -eq 0 ]]; then
       ACTION=update
       info "OpenCuria is installed; updating it (pass uninstall to remove it)."
@@ -515,6 +607,9 @@ choose_action() {
       latest) target="the latest version" ;;
       dev) target="the latest dev build" ;;
     esac
+    if [[ "${PROXY}" -eq 1 ]] && server_installed && ! proxy_installed; then
+      target+=" and add the push proxy"
+    fi
     cat >/dev/tty <<EOF
 
 What do you want to do?
@@ -535,7 +630,18 @@ EOF
   if has_leftovers; then
     warn "Found remains of an earlier installation (workspace VMs or runner data). To remove them first: curl -fsSL ${INSTALL_URL} | sudo bash -s -- uninstall"
   fi
-  cat >/dev/tty <<'EOF'
+  if [[ "${PROXY}" -eq 1 ]]; then
+    cat >/dev/tty <<'EOF'
+
+What should this host run?
+  1) Everything: control plane, push proxy and a runner, wired together
+  2) Control plane and push proxy: backend, web app, database, HTTPS proxy, push proxy
+  3) Runner only: connect this host to an existing control plane
+  4) Push proxy only: relay mobile push for OpenCuria servers
+
+EOF
+  else
+    cat >/dev/tty <<'EOF'
 
 What should this host run?
   1) Everything: control plane and a runner, wired together
@@ -543,11 +649,13 @@ What should this host run?
   3) Runner only: connect this host to an existing control plane
 
 EOF
+  fi
   ask choice "Choice" 1
   case "${choice}" in
     1) ACTION=full ;;
     2) ACTION=server ;;
-    3) ACTION=runner ;;
+    3) ACTION=runner PROXY=0 ;;
+    4) [[ "${PROXY}" -eq 1 ]] || die "Invalid choice: ${choice}"; ACTION=proxy ;;
     *) die "Invalid choice: ${choice}" ;;
   esac
 }
@@ -648,6 +756,99 @@ collect_runner_settings() {
   [[ "${RUNNER_TOKEN}" =~ ^[A-Za-z0-9_-]{16,}$ ]] || die "This does not look like a runner token."
 }
 
+# Apps reach the push proxy over HTTPS only: a domain name, never an IP address.
+valid_proxy_domain() {
+  [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ &&
+    ! "$1" =~ ^[0-9.]+$ ]]
+}
+
+push_platforms() { # "iOS", "Android" or "iOS and Android"
+  local platforms=()
+  if [[ -n "${APNS_KEY_FILE}" ]]; then platforms+=(iOS); fi
+  if [[ -n "${FCM_KEY_FILE}" ]]; then platforms+=(Android); fi
+  printf '%s' "${platforms[0]}${platforms[1]:+ and ${platforms[1]}}"
+}
+
+validate_proxy_env() {
+  local env_file key
+  env_file="$(push_dir)/.env"
+  for key in PUSH_PROXY_DOMAIN PUSH_PROXY_HANDLE_KEYS; do
+    [[ -n "$(env_value "${env_file}" "${key}")" ]] ||
+      die "${env_file} has no ${key}. Restore the file from your backup, or uninstall OpenCuria to start over."
+  done
+}
+
+collect_proxy_settings() {
+  if [[ "${PROXY_ENV}" -eq 1 ]]; then
+    validate_proxy_env
+    if [[ -n "${PROXY_DOMAIN}${APNS_KEY_FILE}${APNS_KEY_ID}${APNS_TEAM_ID}${FCM_KEY_FILE}${PUSH_APP_IDS}" ]]; then
+      warn "Push proxy options are ignored for an existing push proxy; its settings in $(push_dir)/.env stay."
+    fi
+    PROXY_DOMAIN="$(env_value "$(push_dir)/.env" PUSH_PROXY_DOMAIN)"
+    return 0
+  fi
+  PROXY_NEW=1
+
+  if [[ -z "${PROXY_DOMAIN}" ]]; then
+    ask PROXY_DOMAIN "Push proxy domain pointing to this host (e.g. push.example.com)"
+  fi
+  PROXY_DOMAIN="${PROXY_DOMAIN#http://}"
+  PROXY_DOMAIN="${PROXY_DOMAIN#https://}"
+  PROXY_DOMAIN="${PROXY_DOMAIN%/}"
+  PROXY_DOMAIN="${PROXY_DOMAIN,,}"
+  valid_proxy_domain "${PROXY_DOMAIN}" ||
+    die "The push proxy needs its own domain name (--proxy-domain); apps reach it over HTTPS only."
+  local server_host="${DOMAIN}"
+  if [[ "${SERVER_ENV}" -eq 1 ]]; then
+    server_host="$(env_value "${INSTALL_DIR}/.env" PUBLIC_URL)"
+    server_host="${server_host#*://}"
+    server_host="${server_host%%[:/]*}"
+  fi
+  if proxy_colocated && [[ "${PROXY_DOMAIN}" == "${server_host,,}" ]]; then
+    die "The push proxy needs its own domain, not the control plane's (${server_host})."
+  fi
+
+  # Interactively, ask for both platforms unless a key was passed on the command line.
+  local ask_keys=0 key_id=""
+  if [[ -z "${APNS_KEY_FILE}${FCM_KEY_FILE}" ]]; then ask_keys=1; fi
+  if [[ "${ask_keys}" -eq 1 ]]; then
+    info "The push proxy holds the push keys of the app it serves (iOS, Android or both)."
+    ask APNS_KEY_FILE "APNs auth key file, AuthKey_<ID>.p8 (empty: no iOS)"
+  fi
+  if [[ -n "${APNS_KEY_FILE}" ]]; then
+    [[ -f "${APNS_KEY_FILE}" && -r "${APNS_KEY_FILE}" ]] || die "APNs key not found: ${APNS_KEY_FILE}"
+    grep -q -- '-----BEGIN PRIVATE KEY-----' "${APNS_KEY_FILE}" ||
+      die "${APNS_KEY_FILE} is not an APNs auth key (.p8)."
+    if [[ "${APNS_KEY_FILE##*/}" =~ ^AuthKey_([A-Z0-9]{10})\.p8$ ]]; then
+      key_id="${BASH_REMATCH[1]}"
+    fi
+    [[ -n "${APNS_KEY_ID}" ]] || ask APNS_KEY_ID "APNs key ID" "${key_id}"
+    [[ -n "${APNS_TEAM_ID}" ]] || ask APNS_TEAM_ID "Apple team ID"
+    [[ "${APNS_KEY_ID}" =~ ^[A-Z0-9]{10}$ ]] ||
+      die "A valid APNs key ID (10 characters) is required (--apns-key-id)."
+    [[ "${APNS_TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]] ||
+      die "A valid Apple team ID (10 characters) is required (--apns-team-id)."
+  fi
+  if [[ "${ask_keys}" -eq 1 ]]; then
+    ask FCM_KEY_FILE "Firebase service account file, .json (empty: no Android)"
+  fi
+  if [[ -n "${FCM_KEY_FILE}" ]]; then
+    [[ -f "${FCM_KEY_FILE}" && -r "${FCM_KEY_FILE}" ]] ||
+      die "Firebase service account not found: ${FCM_KEY_FILE}"
+    { grep -q '"private_key"' "${FCM_KEY_FILE}" && grep -q '"client_email"' "${FCM_KEY_FILE}"; } ||
+      die "${FCM_KEY_FILE} is not a Firebase service account (JSON with client_email and private_key)."
+  fi
+  [[ -n "${APNS_KEY_FILE}${FCM_KEY_FILE}" ]] ||
+    die "The push proxy needs an APNs key (--apns-key) and/or a Firebase service account (--fcm-key)."
+
+  if [[ -z "${PUSH_APP_IDS}" ]]; then
+    ask PUSH_APP_IDS "App IDs it serves (bundle IDs / package names)" "${PUSH_APP_IDS_DEFAULT}"
+  fi
+  PUSH_APP_IDS="${PUSH_APP_IDS// /}"
+  [[ "${PUSH_APP_IDS}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*$ ]] ||
+    die "Invalid app IDs: ${PUSH_APP_IDS} (comma-separated bundle IDs / package names, --push-app-ids)."
+}
+
 check_runner_host() {
   [[ "$(uname -m)" == "x86_64" ]] || die "The runner needs an x86_64 host."
   [[ -e /dev/kvm ]] ||
@@ -657,13 +858,15 @@ check_runner_host() {
 }
 
 check_ports_free() {
-  # Our own proxy may hold the ports of an earlier, unfinished installation.
-  [[ "${SERVER_ENV}" -eq 0 && "${#CP_CONTAINERS[@]}" -eq 0 ]] || return 0
+  # Our own proxies may hold the ports of an earlier, unfinished installation.
+  [[ "${SERVER_ENV}" -eq 0 && "${#CP_CONTAINERS[@]}" -eq 0 && "${PROXY_ENV}" -eq 0 &&
+    "${#PUSH_CONTAINERS[@]}" -eq 0 ]] || return 0
   command -v ss >/dev/null || return 0
-  local port
+  local port hint="run the control plane behind your own reverse proxy (README)"
+  with_server || hint="run the push proxy behind your own reverse proxy (push-proxy/README.md)"
   for port in 80 443; do
     if ss -Hltn "( sport = :${port} )" | grep -q .; then
-      die "Port ${port} is already in use. Free it, or run the control plane behind your own reverse proxy (README)."
+      die "Port ${port} is already in use. Free it, or ${hint}."
     fi
   done
 }
@@ -687,7 +890,7 @@ summarize_plan() {
   if [[ "${ACTION}" == update ]]; then
     info "Update to ${VERSION}; configuration and data are kept"
   fi
-  if [[ "${MODE}" != runner ]]; then
+  if with_server; then
     if [[ "${SERVER_ENV}" -eq 1 ]]; then
       info "Control plane in ${INSTALL_DIR}: images ${VERSION}, $(env_value "${INSTALL_DIR}/.env" PUBLIC_URL)"
     else
@@ -695,7 +898,17 @@ summarize_plan() {
     fi
     [[ "${SERVER_READY}" -eq 1 ]] || info "Admin: ${ADMIN_EMAIL}"
   fi
-  if [[ "${MODE}" != server ]]; then
+  if [[ "${WITH_PROXY}" -eq 1 ]]; then
+    if [[ "${PROXY_NEW}" -eq 1 ]]; then
+      info "Push proxy in $(push_dir): https://${PROXY_DOMAIN}, for $(push_platforms) apps ${PUSH_APP_IDS}"
+      if proxy_colocated; then
+        info "The control plane serves the push proxy's domain and sends mobile push through it"
+      fi
+    else
+      info "Push proxy in $(push_dir): image ${VERSION}, https://${PROXY_DOMAIN}"
+    fi
+  fi
+  if with_runner; then
     info "Runner in ${INSTALL_DIR}/runner: connects to ${BACKEND_URL}"
   fi
   if [[ "${DATABASE_RESET}" -eq 1 ]]; then
@@ -704,7 +917,7 @@ summarize_plan() {
   if [[ "${INSTALLED_VERSION}" == dev && "${VERSION}" != dev ]]; then
     warn "Leaving dev for ${VERSION}: the database keeps the migrations dev applied. Downgrades are not supported; if ${VERSION} lacks them, the control plane may not start."
   fi
-  if [[ "${MODE}" != server && "${RUNNER_FILES}" -eq 1 ]]; then
+  if with_runner && [[ "${RUNNER_FILES}" -eq 1 ]]; then
     warn "Updating restarts the runner; running agent commands are interrupted."
   fi
   confirm "Continue?" || die "Aborted; nothing was changed."
@@ -740,6 +953,17 @@ run_versioned_installer() {
   if [[ -n "${ADMIN_PASSWORD}" ]]; then args+=(--admin-password "${ADMIN_PASSWORD}"); fi
   if [[ -n "${BACKEND_URL}" ]]; then args+=(--url "${BACKEND_URL}"); fi
   if [[ -n "${RUNNER_TOKEN}" ]]; then args+=(--token "${RUNNER_TOKEN}"); fi
+  if [[ "${PROXY}" -eq 1 ]]; then
+    [[ -f "${SRC_DIR}/push-proxy/compose.colocated.yml" ]] ||
+      die "OpenCuria ${VERSION} cannot install the push proxy; choose a newer version."
+    args+=(--proxy)
+    if [[ -n "${PROXY_DOMAIN}" ]]; then args+=(--proxy-domain "${PROXY_DOMAIN}"); fi
+    if [[ -n "${APNS_KEY_FILE}" ]]; then args+=(--apns-key "${APNS_KEY_FILE}"); fi
+    if [[ -n "${APNS_KEY_ID}" ]]; then args+=(--apns-key-id "${APNS_KEY_ID}"); fi
+    if [[ -n "${APNS_TEAM_ID}" ]]; then args+=(--apns-team-id "${APNS_TEAM_ID}"); fi
+    if [[ -n "${FCM_KEY_FILE}" ]]; then args+=(--fcm-key "${FCM_KEY_FILE}"); fi
+    if [[ -n "${PUSH_APP_IDS}" ]]; then args+=(--push-app-ids "${PUSH_APP_IDS}"); fi
+  fi
   if [[ "${ASSUME_YES}" -eq 1 ]]; then args+=(--yes); fi
   # Ctrl-C reaches both shells; the versioned installer reports it.
   trap : INT TERM
@@ -771,8 +995,15 @@ ensure_docker() {
   start_docker 1
 }
 
-# The mobile app's end-to-end encrypted push proxy; empty turns push off.
-PUSH_PROXY_ENV="PUSH_PROXY_URL=https://push.opencuria.dev"
+# The end-to-end encrypted push proxy the control plane sends mobile push through:
+# the one on this host, else the proxy of the published app. Empty turns push off.
+push_proxy_url() {
+  if [[ "${WITH_PROXY}" -eq 1 ]]; then
+    printf 'https://%s' "${PROXY_DOMAIN}"
+  else
+    printf 'https://push.opencuria.dev'
+  fi
+}
 
 write_server_env() {
   local env_file="${INSTALL_DIR}/.env"
@@ -787,22 +1018,62 @@ DJANGO_ALLOWED_HOSTS=${DOMAIN},127.0.0.1
 DJANGO_SECRET_KEY=$(random_string 64)
 DB_PASSWORD=$(random_string 32)
 CREDENTIAL_ENCRYPTION_KEY=$(fernet_key)
-${PUSH_PROXY_ENV}
+PUSH_PROXY_URL=$(push_proxy_url)
 EOF
+}
+
+# The bundled Caddy's configuration. With a push proxy on this host it also serves
+# the proxy's domain (site from push-proxy/Caddyfile). The file is rewritten in
+# place: the running container bind-mounts this inode and reloads its content.
+write_caddyfile() {
+  local caddyfile="${INSTALL_DIR}/Caddyfile" tmp
+  tmp="$(mktemp)"
+  cat "${SRC_DIR}/Caddyfile" >"${tmp}"
+  if [[ "${WITH_PROXY}" -eq 1 ]]; then
+    {
+      printf '\n# Push proxy on this host (%s), added by install.sh.\n' "$(push_dir)"
+      sed -e '/^#/d' -e "s/{\\\$PUSH_PROXY_DOMAIN}/${PROXY_DOMAIN}/" "${SRC_DIR}/push-proxy/Caddyfile"
+    } >>"${tmp}"
+    grep -qxF "${PROXY_DOMAIN} {" "${tmp}" ||
+      die "Could not add the push proxy's site to ${caddyfile}."
+  fi
+  if [[ -f "${caddyfile}" && ! -L "${caddyfile}" ]]; then
+    cat "${tmp}" >"${caddyfile}"
+    chmod 644 "${caddyfile}"
+  else
+    rm -rf "${caddyfile}"
+    install -m 644 "${tmp}" "${caddyfile}"
+  fi
+  rm -f "${tmp}"
+}
+
+# Caddy reads its configuration at start; apply a changed Caddyfile without a restart.
+reload_caddy() {
+  [[ ",$(env_value "${INSTALL_DIR}/.env" COMPOSE_PROFILES)," == *,proxy,* ]] || return 0
+  local out
+  if ! out="$(compose exec -T proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1)"; then
+    printf '%s\n' "${out}" | tail -n 5 >&2
+    die "The HTTPS proxy rejected ${INSTALL_DIR}/Caddyfile (see above). Inspect: cd ${INSTALL_DIR} && docker compose logs proxy"
+  fi
 }
 
 install_control_plane() {
   step "Setting up the control plane in ${INSTALL_DIR}"
   install -d -m 755 "${INSTALL_DIR}"
   install -m 644 "${SRC_DIR}/compose.yml" "${INSTALL_DIR}/compose.yml"
-  install -m 644 "${SRC_DIR}/Caddyfile" "${INSTALL_DIR}/Caddyfile"
+  local caddyfile_before=""
+  caddyfile_before="$(cat "${INSTALL_DIR}/Caddyfile" 2>/dev/null)" || true
+  write_caddyfile
   if [[ "${SERVER_ENV}" -eq 0 ]]; then
     write_server_env
   else
     set_env_value "${INSTALL_DIR}/.env" OPENCURIA_TAG "${VERSION}"
+    if [[ "${PROXY_NEW}" -eq 1 ]]; then
+      set_env_value "${INSTALL_DIR}/.env" PUSH_PROXY_URL "$(push_proxy_url)"
+    fi
     # Older installs predate the push proxy; keep an explicit (even empty) value.
     grep -q '^PUSH_PROXY_URL=' "${INSTALL_DIR}/.env" ||
-      printf '%s\n' "${PUSH_PROXY_ENV}" >>"${INSTALL_DIR}/.env"
+      printf 'PUSH_PROXY_URL=%s\n' "$(push_proxy_url)" >>"${INSTALL_DIR}/.env"
   fi
   # Only a finished bootstrap marks the control plane as ready.
   [[ "${SERVER_READY}" -eq 1 ]] || rm -f "${INSTALL_DIR}/.bootstrapped"
@@ -813,6 +1084,9 @@ install_control_plane() {
   step "Starting services"
   compose up -d --remove-orphans --wait --wait-timeout 600 ||
     die "Services did not become healthy. Inspect: cd ${INSTALL_DIR} && docker compose ps && docker compose logs"
+  if [[ -n "${caddyfile_before}" && "${caddyfile_before}" != "$(cat "${INSTALL_DIR}/Caddyfile")" ]]; then
+    reload_caddy
+  fi
 
   if [[ "${SERVER_READY}" -eq 0 ]]; then
     bootstrap_control_plane
@@ -823,7 +1097,7 @@ install_control_plane() {
 bootstrap_control_plane() {
   step "Creating the admin account"
   local args=(--admin-email "${ADMIN_EMAIL}")
-  if [[ "${MODE}" != server && "${BACKEND_URL}" == "${LOCAL_BACKEND_URL}" ]]; then
+  if with_runner && [[ "${BACKEND_URL}" == "${LOCAL_BACKEND_URL}" ]]; then
     args+=(--runner-name "$(hostname -s)")
   else
     args+=(--no-runner)
@@ -840,6 +1114,81 @@ bootstrap_control_plane() {
       "${LOCAL_BACKEND_URL}/api/v1/auth/login/" ||
     die "The admin account was created but logging in with it failed."
   printf '%s\n' "${ADMIN_EMAIL}" >"${INSTALL_DIR}/.bootstrapped"
+}
+
+# -- push proxy ------------------------------------------------------------------
+
+handle_key() { head -c 64 /dev/urandom | base64 | tr -d '\n'; } # AES-256-SIV
+
+write_proxy_env() {
+  local dir env_file
+  dir="$(push_dir)"
+  env_file="${dir}/.env"
+  if [[ -n "${APNS_KEY_FILE}" ]]; then
+    install -m 600 -o "${PUSH_UID}" -g "${PUSH_UID}" "${APNS_KEY_FILE}" "${dir}/secrets/apns.p8"
+  fi
+  if [[ -n "${FCM_KEY_FILE}" ]]; then
+    install -m 600 -o "${PUSH_UID}" -g "${PUSH_UID}" "${FCM_KEY_FILE}" "${dir}/secrets/firebase.json"
+  fi
+  install -m 600 /dev/null "${env_file}"
+  {
+    cat <<EOF
+# Written by install.sh; compose.yml shows how each value is used. Keep this file
+# and secrets/ private and backed up: without the handle key every device has to
+# register again.
+PUSH_PROXY_TAG=${VERSION}
+PUSH_PROXY_DOMAIN=${PROXY_DOMAIN}
+PUSH_PROXY_HANDLE_KEYS=$(handle_key)
+EOF
+    if [[ -n "${APNS_KEY_FILE}" ]]; then
+      printf 'APNS_TEAM_ID=%s\nAPNS_KEY_ID=%s\nAPNS_PRIVATE_KEY_FILE=/run/secrets/apns.p8\nAPNS_APP_IDS=%s\n' \
+        "${APNS_TEAM_ID}" "${APNS_KEY_ID}" "${PUSH_APP_IDS}"
+    fi
+    if [[ -n "${FCM_KEY_FILE}" ]]; then
+      printf 'FCM_SERVICE_ACCOUNT_FILE=/run/secrets/firebase.json\nFCM_APP_IDS=%s\n' "${PUSH_APP_IDS}"
+    fi
+  } >"${env_file}"
+}
+
+# A push proxy installed on its own serves HTTPS itself. Next to a control plane,
+# that one's Caddy takes over ports 80/443 and the proxy's domain.
+release_proxy_ports() {
+  [[ "${WITH_PROXY}" -eq 1 && "${PROXY_ENV}" -eq 1 ]] || return 0
+  [[ ",$(env_value "$(push_dir)/.env" COMPOSE_PROFILES)," == *,tls,* ]] || return 0
+  step "Handing ports 80/443 of the push proxy to the control plane"
+  push_compose --profile tls rm -fs caddy ||
+    die "Could not stop the push proxy's HTTPS proxy. Inspect: cd $(push_dir) && docker compose ps"
+}
+
+install_push_proxy() {
+  local dir env_file
+  dir="$(push_dir)"
+  env_file="${dir}/.env"
+  step "Setting up the push proxy in ${dir}"
+  install -d -m 755 "${dir}"
+  install -m 644 "${SRC_DIR}/push-proxy/compose.yml" "${SRC_DIR}/push-proxy/compose.colocated.yml" \
+    "${SRC_DIR}/push-proxy/Caddyfile" "${dir}/"
+  # Only the container's user reads the provider keys.
+  install -d -m 700 -o "${PUSH_UID}" -g "${PUSH_UID}" "${dir}/secrets"
+  if [[ "${PROXY_NEW}" -eq 1 ]]; then write_proxy_env; fi
+  set_env_value "${env_file}" PUSH_PROXY_TAG "${VERSION}"
+  if proxy_colocated; then
+    set_env_value "${env_file}" COMPOSE_FILE compose.yml:compose.colocated.yml
+    set_env_value "${env_file}" COMPOSE_PROFILES ""
+    set_env_value "${env_file}" CONTROL_PLANE_NETWORK "${COMPOSE_PROJECT}_edge"
+  else
+    set_env_value "${env_file}" COMPOSE_FILE compose.yml
+    set_env_value "${env_file}" COMPOSE_PROFILES tls
+  fi
+
+  step "Pulling the push proxy image"
+  push_compose pull ||
+    die "Could not pull the push proxy image (${VERSION}). Check access to ghcr.io and the version."
+  step "Starting the push proxy"
+  if ! push_compose up -d --remove-orphans --wait --wait-timeout 300; then
+    push_compose logs --no-color --tail 20 push-proxy >&2 || true
+    die "The push proxy did not become healthy (log above). Check ${env_file} and the keys in ${dir}/secrets, then run the installer again."
+  fi
 }
 
 # -- runner ----------------------------------------------------------------------
@@ -992,6 +1341,9 @@ uninstall_plan() {
   if [[ "${#CP_CONTAINERS[@]}" -gt 0 || "${#CP_VOLUMES[@]}" -gt 0 ]]; then
     info "Control plane: $(plural "${#CP_CONTAINERS[@]}" container), $(plural "${#CP_VOLUMES[@]}" volume) (database, files, certificates)"
   fi
+  if [[ "${#PUSH_CONTAINERS[@]}" -gt 0 || "${#PUSH_VOLUMES[@]}" -gt 0 ]]; then
+    info "Push proxy: $(plural "${#PUSH_CONTAINERS[@]}" container), $(plural "${#PUSH_VOLUMES[@]}" volume)"
+  fi
   if [[ "${#CP_IMAGES[@]}" -gt 0 ]]; then
     info "Docker images: $(plural "${#CP_IMAGES[@]}" image) of ghcr.io/opencuria"
   fi
@@ -1053,26 +1405,36 @@ stop_runner() {
   done
 }
 
+# The control plane and the push proxy: containers first, they use the networks.
 remove_control_plane() {
   [[ "${DOCKER_STATE}" == up ]] || return 0
-  [[ "${#CP_CONTAINERS[@]}" -gt 0 || "${#CP_VOLUMES[@]}" -gt 0 ||
-    "${#CP_NETWORKS[@]}" -gt 0 || "${#CP_IMAGES[@]}" -gt 0 ]] || return 0
-  step "Removing the control plane"
+  local containers=("${CP_CONTAINERS[@]}" "${PUSH_CONTAINERS[@]}")
+  local volumes=("${CP_VOLUMES[@]}" "${PUSH_VOLUMES[@]}")
+  local networks=("${PUSH_NETWORKS[@]}" "${CP_NETWORKS[@]}")
+  [[ "${#containers[@]}" -gt 0 || "${#volumes[@]}" -gt 0 ||
+    "${#networks[@]}" -gt 0 || "${#CP_IMAGES[@]}" -gt 0 ]] || return 0
+  if [[ "${#PUSH_CONTAINERS[@]}" -eq 0 && "${#PUSH_VOLUMES[@]}" -eq 0 ]]; then
+    step "Removing the control plane"
+  elif [[ "${#CP_CONTAINERS[@]}" -eq 0 && "${#CP_VOLUMES[@]}" -eq 0 ]]; then
+    step "Removing the push proxy"
+  else
+    step "Removing the control plane and the push proxy"
+  fi
   local out images=() image
-  if [[ "${#CP_CONTAINERS[@]}" -gt 0 ]]; then
-    out="$(docker container inspect --format '{{.Config.Image}}' "${CP_CONTAINERS[@]}" 2>/dev/null)" ||
+  if [[ "${#containers[@]}" -gt 0 ]]; then
+    out="$(docker container inspect --format '{{.Config.Image}}' "${containers[@]}" 2>/dev/null)" ||
       out=""
     lines_to images "${out}"
-    out="$(docker container rm -f "${CP_CONTAINERS[@]}" 2>&1)" ||
-      die "Could not remove the control plane containers: ${out}"
+    out="$(docker container rm -f "${containers[@]}" 2>&1)" ||
+      die "Could not remove the containers: ${out}"
   fi
-  if [[ "${#CP_VOLUMES[@]}" -gt 0 ]]; then
-    out="$(docker volume rm -f "${CP_VOLUMES[@]}" 2>&1)" ||
-      die "Could not remove the control plane volumes: ${out}"
+  if [[ "${#volumes[@]}" -gt 0 ]]; then
+    out="$(docker volume rm -f "${volumes[@]}" 2>&1)" ||
+      die "Could not remove the volumes: ${out}"
   fi
-  if [[ "${#CP_NETWORKS[@]}" -gt 0 ]]; then
-    out="$(docker network rm "${CP_NETWORKS[@]}" 2>&1)" ||
-      die "Could not remove the control plane network: ${out}"
+  if [[ "${#networks[@]}" -gt 0 ]]; then
+    out="$(docker network rm "${networks[@]}" 2>&1)" ||
+      die "Could not remove the networks: ${out}"
   fi
   # OpenCuria images in every tag; third-party images unless something else uses them.
   if [[ "${#CP_IMAGES[@]}" -gt 0 ]]; then
@@ -1086,8 +1448,9 @@ remove_control_plane() {
 
   detect_docker
   [[ "${DOCKER_STATE}" == up ]] || die "Docker stopped responding while removing the control plane."
-  [[ "${#CP_CONTAINERS[@]}" -eq 0 && "${#CP_VOLUMES[@]}" -eq 0 ]] ||
-    die "Still present after removal: ${CP_CONTAINERS[*]-} ${CP_VOLUMES[*]-}"
+  [[ "${#CP_CONTAINERS[@]}" -eq 0 && "${#CP_VOLUMES[@]}" -eq 0 &&
+    "${#PUSH_CONTAINERS[@]}" -eq 0 && "${#PUSH_VOLUMES[@]}" -eq 0 ]] ||
+    die "Still present after removal: ${CP_CONTAINERS[*]-} ${CP_VOLUMES[*]-} ${PUSH_CONTAINERS[*]-} ${PUSH_VOLUMES[*]-}"
   info "Removed"
 }
 
@@ -1174,6 +1537,7 @@ verify_uninstalled() {
   [[ "${DOCKER_STATE}" != up ]] || detect_docker
   [[ "${LIBVIRT_STATE}" != up ]] || detect_libvirt
   if server_installed; then left+=("control plane"); fi
+  if proxy_installed; then left+=("push proxy"); fi
   if runner_installed; then left+=("runner"); fi
   if has_leftovers; then left+=("workspace VMs or runner data"); fi
   [[ "${#left[@]}" -eq 0 ]] ||
@@ -1183,7 +1547,7 @@ verify_uninstalled() {
 uninstall() {
   # Docker and libvirt must run to see and remove containers and VMs. Start
   # them only where traces of OpenCuria point to something to remove.
-  if [[ "${DOCKER_STATE}" == down ]] && server_installed; then
+  if [[ "${DOCKER_STATE}" == down ]] && { server_installed || proxy_installed; }; then
     start_docker 0
     detect_docker
   fi
@@ -1191,7 +1555,7 @@ uninstall() {
     start_libvirt
     detect_libvirt
   fi
-  if ! server_installed && ! runner_installed && ! has_leftovers &&
+  if ! server_installed && ! runner_installed && ! proxy_installed && ! has_leftovers &&
     [[ "${#CP_IMAGES[@]}" -eq 0 ]]; then
     info "OpenCuria is not installed on this host (${INSTALL_DIR}); nothing to remove."
     return 0
@@ -1199,8 +1563,8 @@ uninstall() {
 
   uninstall_plan
   confirm_uninstall
-  local had_server=0
-  if server_installed; then had_server=1; fi
+  local runner_only=0
+  if runner_installed && ! server_installed; then runner_only=1; fi
   stop_runner
   remove_control_plane
   remove_workspaces
@@ -1208,7 +1572,7 @@ uninstall() {
   verify_uninstalled
 
   printf '\n%sOpenCuria has been removed from this host.%s\n' "${C_GREEN}${C_BOLD}" "${C_RESET}"
-  if [[ "${had_server}" -eq 0 ]]; then
+  if [[ "${runner_only}" -eq 1 ]]; then
     printf '  - The control plane still lists this runner: delete it under Settings > Runners.\n'
   fi
   printf '  - Docker, QEMU and libvirt stay installed; remove them with apt if unused.\n'
@@ -1218,7 +1582,7 @@ uninstall() {
 
 install_or_update() {
   case "${ACTION}" in
-    full | server | runner) MODE="${ACTION}" ;;
+    full | server | runner | proxy) MODE="${ACTION}" ;;
     update)
       if server_installed && runner_installed; then
         MODE=full
@@ -1226,23 +1590,36 @@ install_or_update() {
         MODE=server
       elif runner_installed; then
         MODE=runner
+      elif proxy_installed; then
+        MODE=proxy
       else
         die "OpenCuria is not installed on this host (${INSTALL_DIR}); nothing to update. Install it with: curl -fsSL ${INSTALL_URL} | sudo bash"
       fi
       ;;
   esac
+  # The control plane's Caddy serves a push proxy next to it: both change together.
+  if [[ "${MODE}" == proxy ]] && server_installed; then
+    if runner_installed; then MODE=full; else MODE=server; fi
+    info "The control plane on this host serves the push proxy; updating it as well."
+  fi
+  # An installed push proxy is always updated along.
+  if [[ "${PROXY}" -eq 1 || "${MODE}" == proxy ]] || proxy_installed; then WITH_PROXY=1; fi
+  if [[ "${WITH_PROXY}" -eq 1 && "${MODE}" == runner ]] && ! proxy_installed; then
+    die "This host runs a runner only; --proxy adds the push proxy to a control plane. Install it on its own with the proxy action."
+  fi
 
-  if [[ "${MODE}" != server ]]; then check_runner_host; fi
-  if [[ "${MODE}" != runner ]]; then
-    # The database volume is only visible while Docker runs.
-    if [[ "${DOCKER_STATE}" == down ]]; then
-      start_docker 1
-      detect_docker
-    fi
-    collect_server_settings
+  if with_runner; then check_runner_host; fi
+  # Volumes and containers are only visible while Docker runs.
+  if [[ "${DOCKER_STATE}" == down ]] && { with_server || [[ "${WITH_PROXY}" -eq 1 ]]; }; then
+    start_docker 1
+    detect_docker
+  fi
+  if with_server; then collect_server_settings; fi
+  if [[ "${WITH_PROXY}" -eq 1 ]]; then collect_proxy_settings; fi
+  if with_server || { [[ "${WITH_PROXY}" -eq 1 ]] && ! proxy_colocated; }; then
     check_ports_free
   fi
-  if [[ "${MODE}" != server ]]; then collect_runner_settings; fi
+  if with_runner; then collect_runner_settings; fi
   if [[ "${MODE}" == runner ]]; then check_backend_reachable; fi
   summarize_plan
 
@@ -1250,12 +1627,20 @@ install_or_update() {
     step "Fetching OpenCuria ${VERSION}"
     fetch_source
   fi
+  if [[ "${WITH_PROXY}" -eq 1 && ! -f "${SRC_DIR}/push-proxy/compose.colocated.yml" ]]; then
+    die "OpenCuria ${VERSION} cannot install the push proxy; choose a newer version."
+  fi
 
-  if [[ "${MODE}" != runner ]]; then
+  if with_server; then
     ensure_docker
+    release_proxy_ports
     install_control_plane
   fi
-  if [[ "${MODE}" != server ]]; then install_runner; fi
+  if [[ "${WITH_PROXY}" -eq 1 ]]; then
+    ensure_docker
+    install_push_proxy
+  fi
+  if with_runner; then install_runner; fi
   print_summary
 }
 
@@ -1265,7 +1650,7 @@ print_summary() {
   else
     printf '\n%sOpenCuria is ready.%s\n\n' "${C_GREEN}${C_BOLD}" "${C_RESET}"
   fi
-  if [[ "${MODE}" != "runner" ]]; then
+  if with_server; then
     printf '  Web app:   %s\n' "${PUBLIC_URL}"
     if [[ -n "${ADMIN_EMAIL}" ]]; then
       printf '  Admin:     %s\n' "${ADMIN_EMAIL}"
@@ -1275,20 +1660,33 @@ print_summary() {
     fi
     printf '  Files:     %s (docker compose ps|logs there)\n' "${INSTALL_DIR}"
   fi
-  if [[ "${MODE}" != "server" ]]; then
+  if [[ "${WITH_PROXY}" -eq 1 ]]; then
+    printf '  Push proxy: https://%s (docker compose ps|logs in %s)\n' "${PROXY_DOMAIN}" "$(push_dir)"
+  fi
+  if with_runner; then
     printf '  Runner:    systemctl status %s; journalctl -u %s -f\n' \
       "${RUNNER_SERVICE}" "${RUNNER_SERVICE}"
   fi
   printf '\nNext steps:\n'
-  if [[ "${MODE}" == "server" && "${ACTION}" != update ]]; then
+  if [[ "${MODE}" == server && "${ACTION}" != update ]]; then
     printf '  - Add a runner: Settings > Runners > Register Runner shows the command\n'
     printf '    to run on a Linux host with KVM.\n'
   fi
-  if [[ "${MODE}" != "runner" && "${PUBLIC_URL}" == https://* ]]; then
+  if with_server && [[ "${PUBLIC_URL}" == https://* ]]; then
     printf '  - HTTPS needs DNS for %s pointing here and ports 80/443 reachable.\n' \
       "${PUBLIC_URL#https://}"
   fi
-  if [[ "${ACTION}" != update ]]; then
+  if [[ "${PROXY_NEW}" -eq 1 ]]; then
+    printf '  - The push proxy needs DNS for %s pointing here and ports 80/443 reachable.\n' \
+      "${PROXY_DOMAIN}"
+    printf '  - Apps use it when built with PUSH_PROXY_URL=https://%s (push-proxy/README.md);\n' \
+      "${PROXY_DOMAIN}"
+    printf '    other servers send through it with that value in their .env.\n'
+    if proxy_colocated && [[ ",$(env_value "${INSTALL_DIR}/.env" COMPOSE_PROFILES)," != *,proxy,* ]]; then
+      printf '  - Your reverse proxy must forward https://%s to 127.0.0.1:8090.\n' "${PROXY_DOMAIN}"
+    fi
+  fi
+  if [[ "${ACTION}" != update && "${MODE}" != proxy ]]; then
     printf '  - Build an image under Settings > Image Definitions and connect a model\n'
     printf '    provider under Settings > Provider & Models; the home screen guides you.\n'
   fi
