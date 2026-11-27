@@ -766,7 +766,14 @@ async def _open_desktop_scope(
     turn_id: str,
     runtime_options: dict[str, Any] | None,
 ) -> AsyncIterator[DesktopScopeResources]:
-    """Compose one child runtime, including same-task, shielded MCP teardown."""
+    """Compose one child runtime and tear it down in the task that opened it.
+
+    ``setup`` leaves the SDK sessions' cancel scopes entered in this task, and
+    anyio exits scopes strictly in reverse order. Only finalization, which
+    exits no scope, is shielded so that a cancelled actor still confirms its
+    recordings. ``aclose`` then unwinds the SDK scopes with no scope stacked
+    on top of them; the release RPCs it runs shield themselves.
+    """
     runtime = McpRuntime(scope_enabled=False, session_host=False)
     resources = DesktopScopeResources(ToolRegistry())
     try:
@@ -782,8 +789,8 @@ async def _open_desktop_scope(
         runtime.register_tools(resources.tools)
         yield resources
     finally:
-        with anyio.CancelScope(shield=True):
-            try:
+        try:
+            with anyio.CancelScope(shield=True):
                 resources.recordings.extend(await runtime.finish())
-            finally:
-                await runtime.aclose()
+        finally:
+            await runtime.aclose()
