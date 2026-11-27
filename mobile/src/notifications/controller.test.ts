@@ -251,6 +251,29 @@ describe("native notification lifecycle", () => {
     ).toBe(true);
   });
 
+  it("registers the Live Activity token again when the server key changes", async () => {
+    const test = setup({
+      deviceId,
+      notifications: false,
+      liveActivities: true,
+    });
+    await test.controller.start();
+    await test.controller.refresh();
+    expect(test.api.registerActivity).toHaveBeenCalledTimes(1);
+    test.api.capabilities.mockResolvedValue({
+      proxy_url: PROXY_URL,
+      server_key: "rotated-key",
+    });
+    await test.controller.refresh();
+    expect(test.api.registerActivity).toHaveBeenCalledTimes(2);
+    expect(test.api.registerActivity).toHaveBeenLastCalledWith(
+      deviceId,
+      "activity-one",
+      "handle-activity-activity-token-a-rotated-key",
+    );
+    test.controller.dispose();
+  });
+
   it("reconciles permission revocation and native device-token changes on foreground", async () => {
     const test = setup({
       deviceId,

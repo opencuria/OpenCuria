@@ -58,7 +58,9 @@ export class NotificationController {
   private cleanup: Array<() => void> = [];
   private activity: LiveActivityHandle | null = null;
   private stopToken: (() => void) | null = null;
-  private activityToken = "";
+  // The handle last registered for the current activity; it is bound to the
+  // server key, so a new server key registers the same token again.
+  private activityHandle = "";
   private deviceToken: string | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private disposed = false;
@@ -361,7 +363,7 @@ export class NotificationController {
     if (this.activity?.id !== activity.id) {
       this.stopToken?.();
       this.activity = activity;
-      this.activityToken = "";
+      this.activityHandle = "";
       this.stopToken = activity.onToken((token) => {
         void this.enqueue(async () =>
           this.registerActivityToken(activity.id, token),
@@ -381,25 +383,30 @@ export class NotificationController {
       this.disposed ||
       this.revoking ||
       !this.preferences?.liveActivities ||
-      this.activity?.id !== id ||
-      token === this.activityToken
+      this.activity?.id !== id
     )
       return;
     const handle = await this.handle("activity", token);
-    if (this.disposed || this.revoking || this.activity?.id !== id) return;
+    if (
+      this.disposed ||
+      this.revoking ||
+      this.activity?.id !== id ||
+      handle === this.activityHandle
+    )
+      return;
     await this.client.notifications.registerActivity(
       this.preferences.deviceId,
       id,
       handle,
     );
-    if (!this.disposed && this.activity?.id === id) this.activityToken = token;
+    if (!this.disposed && this.activity?.id === id) this.activityHandle = handle;
   }
 
   private async endActivities(): Promise<void> {
     this.stopToken?.();
     this.stopToken = null;
     this.activity = null;
-    this.activityToken = "";
+    this.activityHandle = "";
     if (!this.live.available) return;
     for (const instance of await this.live.instances()) await instance.end();
   }
