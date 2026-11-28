@@ -117,7 +117,16 @@ class FakeBus:
                 ],
             )
         if method == "GetExtents":
+            if args[0] == native.WINDOW and "window_extents" in node:
+                return (node["window_extents"],)
             return (node.get("extents", (0, 0, 0, 0)),)
+        if method == "GetAccessibleAtPoint":
+            px, py = args[0], args[1]
+            for child in node.get("children", []):
+                cx, cy, cw, ch = self.objects[child].get("extents", (0, 0, 0, 0))
+                if cx <= px < cx + cw and cy <= py < cy + ch:
+                    return ((BUS, child),)
+            return ((BUS, "/org/a11y/atspi/null"),)
         if method == "GetName":
             actions = node.get("actions", [])
             if args[0] >= len(actions):
@@ -135,6 +144,8 @@ class FakeBus:
             name = args[1]
             if name == "Name":
                 return (node.get("name", ""),)
+            if name == "ChildCount":
+                return (node.get("count", len(node.get("children", []))),)
             if name == "Description":
                 return (node.get("description", ""),)
             if name == "NActions":
@@ -167,6 +178,9 @@ def driver_for(objects: dict[str, dict], frames: list[str] | None = None) -> tup
     driver.touched = set()
     driver.touch_focus = False
     driver.toolkits = {}
+    driver.coord_types = {}
+    driver.extent_bound = None
+    driver.viewport = None
     driver.dirty = False
     driver.action_at = 0.0
     driver.execution_id = "test"
@@ -485,6 +499,200 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DesktopIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_gtk_screen_positions_off_by_the_window_frame_are_corrected(self):
+        objects = {
+            "/f": {"role": "frame", "name": "Doc"},
+            # LibreOffice: screen position from the frame's outer corner (y 28)
+            # instead of its content (y 56); the window-relative one is right.
+            "/b": {
+                "role": "toggle button",
+                "extents": (645, 97, 33, 35),
+                "window_extents": (645, 69, 33, 35),
+            },
+        }
+        driver, bound = driver_for(objects)
+        driver.toolkits[BUS] = "gtk"
+        driver._geometry = lambda _window: (0, 56, 1920, 1024)
+        driver._in_popup = lambda _bound, _x, _y: False
+        ref = native.Ref(BUS, "/b", "toggle button", "")
+        self.assertEqual(driver._extents(ref, bound), (645, 125, 33, 35))
+        # Elements of popup windows keep their screen position.
+        driver._in_popup = lambda _bound, _x, _y: True
+        self.assertEqual(driver._extents(ref, bound), (645, 97, 33, 35))
+        # Other toolkits are trusted.
+        driver.toolkits[BUS] = "qt"
+        driver._in_popup = lambda _bound, _x, _y: False
+        self.assertEqual(driver._extents(ref, bound), (645, 97, 33, 35))
+
+    async def test_open_context_menus_of_the_app_join_the_window_tree(self):
+        objects = {
+            "/f": {"role": "frame", "name": "Files", "children": ["/cell"]},
+            "/cell": {"role": "table cell", "name": "hallo.txt"},
+            "/popup": {
+                "role": "window",
+                "extents": (500, 100, 200, 120),
+                "children": ["/menu"],
+            },
+            "/menu": {"role": "menu", "children": ["/rename"]},
+            "/rename": {
+                "role": "menu item",
+                "name": "Rename...",
+                "actions": ["click"],
+            },
+            "/closed": {
+                "role": "window",
+                "extents": (500, 100, 200, 120),
+                "states": ["enabled", "visible"],
+                "children": [],
+            },
+        }
+        driver, bound = driver_for(objects, frames=["/f", "/popup", "/closed"])
+        popup = SimpleNamespace(
+            id=99, get_attributes=lambda: SimpleNamespace(override_redirect=True)
+        )
+        driver.root = SimpleNamespace(
+            translate_coords=lambda *_args: SimpleNamespace(child=popup)
+        )
+        tree = await driver._tree(bound, {})
+        text = "\n".join(lines(tree))
+        self.assertIn("menu item Rename...", text)
+        self.assertLess(text.index("hallo.txt"), text.index("Rename..."))
+        rename = next(n for n in tree["nodes"] if n["name"] == "Rename...")
+        self.assertTrue(rename.get("popup"))
+        # Without the popup only the window remains.
+        driver.atspi.frames = ["/f", "/closed"]
+        text = "\n".join(lines(await driver._tree(bound, {})))
+        self.assertNotIn("Rename", text)
+
+    async def test_pages_of_unselected_tabs_are_folded_but_queryable(self):
+        shown = ["enabled", "visible", "showing"]
+        objects = {
+            "/f": {"role": "dialog", "name": "Preferences", "children": ["/tabs"]},
+            "/tabs": {"role": "page tab list", "children": ["/view", "/editor"]},
+            "/view": {
+                "role": "page tab",
+                "name": "View",
+                "states": [*shown, "selected"],
+                "children": ["/numbers"],
+            },
+            "/numbers": {
+                "role": "check box",
+                "name": "Show line numbers",
+                "actions": ["click"],
+            },
+            "/editor": {
+                "role": "page tab",
+                "name": "Editor",
+                "states": shown,
+                "children": ["/indent"],
+            },
+            "/indent": {
+                "role": "panel",
+                "states": ["enabled", "visible"],
+                "children": ["/auto", "/width"],
+            },
+            "/auto": {
+                "role": "check box",
+                "name": "Enable automatic indentation",
+                "states": ["enabled", "visible"],
+                "actions": ["click"],
+            },
+            "/width": {
+                "role": "spin button",
+                "name": "Tab width",
+                "states": ["enabled", "visible", "editable"],
+            },
+        }
+        driver, bound = driver_for(objects)
+        tree = await driver._tree(bound, {})
+        text = "\n".join(n["line"] for n in tree["nodes"] if not n.get("folded"))
+        self.assertIn("check box (unchecked) Show line numbers", text)
+        self.assertIn("page tab Editor [2 controls]", text)
+        self.assertNotIn("automatic indentation", text)
+        folded = [n["name"] for n in tree["nodes"] if n.get("folded")]
+        self.assertIn("Enable automatic indentation", folded)
+
+    async def test_a_field_replaced_on_focus_is_followed_to_its_successor(self):
+        editable = ["enabled", "visible", "focusable", "editable"]
+        objects = {
+            "/f": {"role": "frame", "name": "Wiki", "children": ["/search"]},
+            "/search": {"role": "entry", "name": "Search", "states": editable},
+            "/combo": {
+                "role": "combo box",
+                "name": "Search",
+                "states": [*editable, "showing", "focused"],
+            },
+        }
+        driver, bound = driver_for(objects)
+        bus = driver.atspi
+        original = bus.call
+
+        def call(bus_name, path, interface, method, *rest, **options):
+            if method == "GrabFocus":
+                # Chromium: the search box becomes a combo box object.
+                bus.focused[BUS] = "/combo"
+                return (True,)
+            return original(bus_name, path, interface, method, *rest, **options)
+
+        bus.call = call
+        ref = await driver._focus(bound, native.Ref(BUS, "/search", "entry", "Search"))
+        self.assertEqual((ref.path, ref.role), ("/combo", "combo box"))
+
+    async def test_rows_without_scroll_to_are_wheeled_into_view(self):
+        objects = {
+            "/f": {"role": "frame", "name": "Files", "children": ["/cell"]},
+            # GTK tree views report rows below the view but cannot ScrollTo.
+            "/cell": {
+                "role": "table cell",
+                "name": "hallo.txt",
+                "extents": (10, 900, 100, 20),
+            },
+        }
+        driver, bound = driver_for(objects)
+        wheel = []
+
+        async def click(_bound, x, y, button):
+            wheel.append(button)
+            cell = objects["/cell"]["extents"]
+            objects["/cell"]["extents"] = (cell[0], cell[1] - 60, *cell[2:])
+
+        driver._click = click
+        center = await driver._bring_into_view(
+            bound, native.Ref(BUS, "/cell", "table cell", "")
+        )
+        self.assertIsNotNone(center)
+        self.assertLess(center[1], 600)
+        self.assertEqual(set(wheel), {5})
+
+    async def test_footnotes_and_image_links_take_one_line(self):
+        objects = {
+            "/f": {"role": "document web", "name": "Article", "children": ["/p"]},
+            "/p": {"role": "paragraph", "children": ["/t", "/sup", "/photo"]},
+            "/t": {"role": "static", "name": "Born in London"},
+            "/sup": {"role": "superscript", "children": ["/ref"]},
+            "/ref": {
+                "role": "link",
+                "name": "[8]",
+                "actions": ["jump"],
+                "children": ["/eight"],
+            },
+            "/eight": {"role": "static", "name": "8"},
+            "/photo": {
+                "role": "link",
+                "name": "Portrait",
+                "actions": ["jump"],
+                "children": ["/img"],
+            },
+            "/img": {"role": "image", "name": "Portrait"},
+        }
+        driver, bound = driver_for(objects)
+        text = "\n".join(lines(await driver._tree(bound, {})))
+        self.assertIn("link [8]", text)
+        self.assertNotIn("superscript", text)
+        self.assertNotIn("text 8", text)
+        self.assertNotIn("image Portrait", text)
+        self.assertIn("link Portrait", text)
+
     async def test_gtk4_sensitive_controls_are_not_disabled(self):
         objects = {
             "/f": {"role": "frame", "name": "Calc", "children": ["/b"]},
@@ -637,6 +845,49 @@ class DesktopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("check box (unchecked) Context: checkbox 1", text)
         self.assertIn("check box (checked) Context: checkbox 2", text)
 
+    async def test_virtual_containers_are_probed_not_enumerated(self):
+        cells = {
+            f"/c{r}{c}": {
+                "role": "table cell",
+                "name": f"{'AB'[c]}{r + 1}",
+                "text": "7" if (r, c) == (0, 0) else "",
+                "extents": (c * 80, 100 + r * 20, 80, 20),
+            }
+            for r in range(3)
+            for c in range(2)
+        }
+        objects = {
+            "/f": {
+                "role": "frame",
+                "name": "Sheet",
+                "children": ["/sheet"],
+                "extents": (0, 0, 800, 600),
+            },
+            "/sheet": {
+                "role": "table",
+                "children": list(cells),
+                "count": 1073741824,
+                "extents": (0, 100, 160, 60),
+                "states": ["enabled", "visible", "showing", "manages_descendants"],
+            },
+            **cells,
+        }
+        driver, bound = driver_for(objects)
+        original = driver.atspi.call
+
+        def call(
+            bus_name, path, interface, method, args=None, signature=None, timeout=3000
+        ):
+            if path == "/sheet" and method == "GetChildren":
+                raise AssertionError("a huge virtual container must not be enumerated")
+            return original(bus_name, path, interface, method, args, signature, timeout)
+
+        driver.atspi.call = call
+        text = "\n".join(lines(await driver._tree(bound, {})))
+        self.assertIn("table [visible part: 1 of 1073741824 children]", text)
+        self.assertIn("table cell A1, Value: 7", text)
+        self.assertNotIn("B2", text)
+
     def test_password_masks_confirm_the_typed_length(self):
         same = native.LinuxDriver._same
         self.assertTrue(same("••••••", "secret"))
@@ -766,7 +1017,24 @@ class WindowTests(unittest.TestCase):
             "/x": {"role": "dialog", "name": "Dialog", "extents": (10, 20, 400, 300)},
             "/y": {"role": "dialog", "name": "Dialog", "extents": (10, 20, 400, 300)},
         })  # fmt: skip
+        self.driver._list_windows = lambda: [{**self.metadata}]
         self.assertIsNone(LinuxDriverRoot(self.driver, self.metadata))
+
+    def test_identical_windows_match_frames_by_focus_or_creation_order(self):
+        shown = ["enabled", "visible", "showing"]
+        self.frames(**{
+            "/x": {"role": "frame", "name": "Dialog", "states": list(shown)},
+            "/y": {"role": "frame", "name": "Dialog", "states": list(shown)},
+        })  # fmt: skip
+        first = {**self.metadata, "focused": False}
+        second = {**first, "id": first["id"] + 5}
+        self.driver._list_windows = lambda: [second, first]
+        self.assertEqual(LinuxDriverRoot(self.driver, first), (BUS, "/x"))
+        self.assertEqual(LinuxDriverRoot(self.driver, second), (BUS, "/y"))
+        # The focused one owns the active frame.
+        self.driver.atspi.objects["/y"]["states"].append("active")
+        focused = {**first, "focused": True}
+        self.assertEqual(LinuxDriverRoot(self.driver, focused), (BUS, "/y"))
 
 
 def LinuxDriverRoot(driver, metadata):  # noqa: N802 - reads like the method under test
@@ -814,7 +1082,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         entry = next(n for n in self.nodes.values() if n["role"] == "entry")
         ref = self.driver._ref(self.bound, entry["id"])
         self.objects["/entry"]["interfaces"] = ["Accessible", "Text"]
-        self.driver._focus = AsyncMock()
+        self.driver._focus = AsyncMock(side_effect=lambda _bound, ref: ref)
         self.driver._press = AsyncMock()
 
         async def paste(_bound, text):
@@ -829,7 +1097,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         entry = next(n for n in self.nodes.values() if n["role"] == "entry")
         ref = self.driver._ref(self.bound, entry["id"])
         self.objects["/entry"]["interfaces"] = ["Accessible", "Text"]
-        self.driver._focus = AsyncMock()
+        self.driver._focus = AsyncMock(side_effect=lambda _bound, ref: ref)
         self.driver._press = AsyncMock()
         self.driver._paste_text = AsyncMock()
         self.driver._wait_text = AsyncMock(return_value="trunc")
@@ -879,8 +1147,8 @@ class KeyboardTests(unittest.IsolatedAsyncioTestCase):
         connection.get_keyboard_mapping.return_value = [(1,), (1,), (0, 0), (1,), (0,)]
         driver.connection = connection
         sent = []
-        driver._send_key = lambda _bound, code, pressed, state: sent.append(
-            (code, pressed, state)
+        driver._send_key = lambda _bound, code, pressed, state, shift=False: (
+            sent.append((code, pressed, state))
         )
         with patch.object(native.asyncio, "sleep", new_callable=AsyncMock):
             count = await driver._type_characters(bound, "aA€")

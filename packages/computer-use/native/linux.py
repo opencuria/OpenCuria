@@ -32,10 +32,12 @@ from Xlib import XK, X, Xatom, display, error, protocol
 
 MAX_LINE = 1024 * 1024
 MAX_INPUT_TEXT = 64 * 1024
-DEFAULT_MAX_NODES = 6000
+# Queries must see far-down elements of long pages; printing is capped apart.
+DEFAULT_MAX_NODES = 20000
 HARD_MAX_NODES = 20000
 MAX_DEPTH = 64
 MAX_VALUE = 16000
+MAX_CHILDREN = 3000
 MIRROR_MAX_AGE = 90.0
 BATCH = 1500
 ACC = "org.a11y.atspi.Accessible"
@@ -49,6 +51,7 @@ PROPERTIES = "org.freedesktop.DBus.Properties"
 REGISTRY = "org.a11y.atspi.Registry"
 ROOT = "/org/a11y/atspi/accessible/root"
 SCREEN = 0
+WINDOW = 1
 SCROLL_ANYWHERE = 6
 LABELLED_BY = 2
 OBJECT = "\ufffc"
@@ -58,8 +61,8 @@ STATES = {
     "expanded": 10, "focusable": 11, "focused": 12, "modal": 16,
     "multi_line": 17, "multiselectable": 18, "pressed": 20, "selectable": 22,
     "selected": 23, "sensitive": 24, "showing": 25, "visible": 30,
-    "indeterminate": 32, "required": 33, "invalid": 36, "is_default": 39,
-    "checkable": 41, "has_popup": 42, "read_only": 43,
+    "manages_descendants": 31, "indeterminate": 32, "required": 33, "invalid": 36,
+    "is_default": 39, "checkable": 41, "has_popup": 42, "read_only": 43,
 }  # fmt: skip
 STATE_NAMES = tuple((name.replace("_", "-"), bit) for name, bit in STATES.items())
 STRUCTURE_EVENTS = {
@@ -67,6 +70,15 @@ STRUCTURE_EVENTS = {
     "RowReordered", "ModelChanged", "VisibleDataChanged",
 }  # fmt: skip
 CONTAINERS = {"panel", "filler", "section", "generic", "group", "unknown", "invalid"}
+# GTK 4 names roles after ARIA; the rest of the desktop uses ATK's names.
+GTK4_ROLES = {
+    "checkbox": "check box", "radio": "radio button", "img": "image",
+    "menu item checkbox": "check menu item", "menu item radio": "radio menu item",
+    "text box": "text", "scrollbar": "scroll bar", "tab": "page tab",
+    "tab list": "page tab list", "toolbar": "tool bar", "tooltip": "tool tip",
+    "grid cell": "table cell", "tree grid": "tree table", "status": "status bar",
+    "application": "frame",
+}  # fmt: skip
 TEXT_ROLES = {"text", "static", "label", "caption"}
 STATIC_ROLES = TEXT_ROLES | {"paragraph", "heading", "separator", "notification"}
 FIELD_ROLES = {
@@ -94,6 +106,15 @@ OPTION_ROLES = {
     "tree item", "table cell", "page tab",
 }  # fmt: skip
 CELL_ROLES = {"table cell", "cell", "grid cell"}
+# Inline formatting of web text: shown through their content only.
+INLINE_ROLES = {
+    "superscript", "subscript", "emphasis", "strong", "mark", "content deletion",
+    "content insertion", "code", "time", "abbreviation", "description value",
+}  # fmt: skip
+SCROLLING_ROLES = {
+    "scroll pane", "table", "tree table", "tree", "list", "list box", "viewport",
+    "document web", "document frame", "layered pane", "grid",
+}  # fmt: skip
 FOLDING_ROLES = {"menu", "combo box", "menu button"}
 REGION_ROLES = {
     "table", "tree table", "tree", "list", "list box", "form", "dialog", "alert",
@@ -185,6 +206,7 @@ class BoundWindow:
     transform: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
     mirror: dict[str, Any] | None = None
     cache: dict[str, Any] | None = None
+    real_input: bool | None = None
 
 
 class AtspiBus:
@@ -458,6 +480,12 @@ def _has(states: int, name: str) -> bool:
     return bool(states & (1 << STATES[name]))
 
 
+def _role(name: Any) -> str:
+    """One name per role across toolkits."""
+    text = str(name or "") or "unknown"
+    return GTK4_ROLES.get(text, text)
+
+
 def _ok(value: Any) -> bool:
     return value is not None and not isinstance(value, Exception)
 
@@ -469,7 +497,7 @@ class LinuxDriver:
         # Desktop apps use the session bus of the display's desktop session,
         # which can differ from the bus the runner started this process with.
         # Join it so launched apps and the accessibility bridge match.
-        self._discover_session_bus()
+        self.session_environment = self._discover_session_bus()
         self.connection = display.Display()
         self.root = self.connection.screen().root
         self.windows: dict[int, BoundWindow] = {}
@@ -480,6 +508,9 @@ class LinuxDriver:
         self.touched: set[tuple[str, str]] = set()
         self.touch_focus = False
         self.toolkits: dict[str, str] = {}
+        self.viewport: tuple[int, int, int, int] | None = None
+        self.coord_types: dict[str, int] = {}
+        self.extent_bound: BoundWindow | None = None
         self.next_element = 1
         self.generation = int(os.environ.get("OPENCURIA_CUA_GENERATION", "0"))
         self.max_dimension = min(
@@ -538,8 +569,9 @@ class LinuxDriver:
         return addresses
 
     @staticmethod
-    def _discover_session_bus() -> None:
-        """Join the session bus of this display's desktop session, if any."""
+    def _discover_session_bus() -> dict[str, str]:
+        """Join the session bus of this display's desktop session, if any, and
+        return that session's environment for launching apps."""
         from pathlib import Path
 
         current_display = os.environ.get("DISPLAY", "")
@@ -564,9 +596,26 @@ class LinuxDriver:
                 address = environment.get(b"DBUS_SESSION_BUS_ADDRESS", b"").decode()
                 if address:
                     os.environ["DBUS_SESSION_BUS_ADDRESS"] = address
-                    return
+                    return {
+                        key.decode(errors="replace"): value.decode(errors="replace")
+                        for key, value in environment.items()
+                    }
             except (OSError, ValueError, UnicodeDecodeError):
                 continue
+        return {}
+
+    def _launch_environment(self) -> dict[str, str] | None:
+        """Apps start like ones the user opens from the desktop: with the
+        session's environment (home, language, XDG settings), on this display."""
+        session = getattr(self, "session_environment", None)
+        if not session:
+            return None
+        environment = dict(session)
+        for key in ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS"):
+            if os.environ.get(key):
+                environment[key] = os.environ[key]
+        environment.pop("NO_AT_BRIDGE", None)
+        return environment
 
     # ---------------------------------------------------------------- windows
 
@@ -818,6 +867,7 @@ class LinuxDriver:
         best = None
         best_score = 0
         ambiguous = False
+        scored: list[tuple[tuple[str, str], int, bool]] = []
         for index, frame in enumerate(frames):
             name, extents, state = details[index * 3 : index * 3 + 3]
             if _ok(state) and _has(_states(state), "defunct"):
@@ -835,6 +885,7 @@ class LinuxDriver:
                     and abs(height - metadata["height"]) < 48
                 ):
                     score += 3
+            scored.append((frame, score, _ok(state) and _has(_states(state), "active")))
             if score > best_score:
                 best, best_score, ambiguous = frame, score, False
             elif score and score == best_score:
@@ -848,7 +899,42 @@ class LinuxDriver:
                     best = frame if self._newer(frame[1], best[1]) else best
                 else:
                     ambiguous = True
+        if ambiguous and best_score >= 3:
+            return self._twin(
+                metadata, [entry for entry in scored if entry[1] == best_score]
+            )
         return None if ambiguous or best_score < 3 else best
+
+    def _twin(
+        self,
+        metadata: dict[str, Any],
+        tied: list[tuple[tuple[str, str], int, bool]],
+    ) -> tuple[str, str] | None:
+        """One of several identical windows of an app (two "New Document"
+        editors without screen positions): the focused one has the active
+        frame; otherwise frames and X window ids both follow creation order."""
+        if len({frame[0] for frame, _, _ in tied}) != 1:
+            return None
+        matching = [
+            frame
+            for frame, _, active in tied
+            if active == bool(metadata.get("focused"))
+        ]
+        if len(matching) == 1:
+            return matching[0]
+        try:
+            listed = self._list_windows()
+        except Exception:  # noqa: BLE001 - no inventory, no guess
+            return None
+        twins = sorted(
+            window["id"]
+            for window in listed
+            if window.get("pid") == metadata.get("pid")
+            and window["title"] == metadata["title"]
+        )
+        if len(twins) == len(tied) and metadata["id"] in twins:
+            return tied[twins.index(metadata["id"])][0]
+        return None
 
     @staticmethod
     def _newer(path: str, other: str) -> bool | None:
@@ -884,15 +970,15 @@ class LinuxDriver:
             requests = []
             for path, _, _, _ in level:
                 requests += [
-                    (bus_name, path, ACC, "GetChildren", None, None),
+                    (bus_name, path, PROPERTIES, "Get", (ACC, "ChildCount"), "(ss)"),
                     (bus_name, path, PROPERTIES, "Get", (ACC, "Name"), "(ss)"),
                     (bus_name, path, ACC, "GetRoleName", None, None),
                     (bus_name, path, ACC, "GetState", None, None),
                 ]
             results = bus.many(requests)
-            following: list[tuple[str, str | None, int, bool]] = []
+            parents: list[dict[str, Any]] = []
             for index, (path, parent, depth, attach) in enumerate(level):
-                children, name, role, states = results[index * 4 : index * 4 + 4]
+                count, name, role, states = results[index * 4 : index * 4 + 4]
                 if not _ok(role) or not _ok(states):
                     continue
                 state = _states(states)
@@ -900,9 +986,10 @@ class LinuxDriver:
                     continue
                 node = {
                     "path": path, "parent": parent, "depth": depth,
-                    "role": role[0] or "unknown",
+                    "role": _role(role[0]),
                     "name": _clean(name[0]) if _ok(name) else "",
-                    "states": state, "children": [], "child_count": 0,
+                    "states": state, "children": [],
+                    "child_count": int(count[0]) if _ok(count) else 0,
                     "value": "", "description": "", "actions": [], "labels": [],
                     "context": "",
                 }  # fmt: skip
@@ -910,19 +997,98 @@ class LinuxDriver:
                 fresh.append(node)
                 if attach and parent in nodes:
                     nodes[parent]["children"].append(path)
-                if not _ok(children) or depth >= MAX_DEPTH:
-                    continue
-                node["child_count"] = len(children[0])
-                for child_bus, child_path in children[0]:
-                    if child_bus != bus_name or child_path in nodes:
+                if depth < MAX_DEPTH and (node["child_count"] or not _ok(count)):
+                    parents.append(node)
+            # Never enumerate huge virtual containers (a spreadsheet reports
+            # 2^31 cells): applications build every child on request and hang
+            # for minutes. Their visible children are found by position.
+            listed = [n for n in parents if n["child_count"] <= MAX_CHILDREN]
+            replies = bus.many(
+                [(bus_name, n["path"], ACC, "GetChildren", None, None) for n in listed]
+            )
+            children_of = {
+                n["path"]: [p for b, p in reply[0] if b == bus_name]
+                for n, reply in zip(listed, replies)
+                if _ok(reply)
+            }
+            for n in parents:
+                if n["path"] not in children_of and n not in listed:
+                    n["managed"] = n["child_count"]
+                    children_of[n["path"]] = self._visible_children(bus_name, n)
+            following: list[tuple[str, str | None, int, bool]] = []
+            for n in parents:
+                for child_path in children_of.get(n["path"], []):
+                    if child_path in nodes:
                         continue
                     if len(nodes) + len(following) >= limit:
                         truncated = True
                         break
-                    following.append((child_path, path, depth + 1, True))
+                    following.append((child_path, n["path"], n["depth"] + 1, True))
             level = following
         self._details(bus_name, fresh)
         return truncated
+
+    def _visible_children(self, bus_name: str, node: dict[str, Any]) -> list[str]:
+        """Children of a virtual container found by probing its visible area."""
+        bus = self.atspi
+        assert bus is not None
+        kind = self._coords(bus_name)
+        try:
+            x, y, width, height = bus.call(
+                bus_name, node["path"], COMPONENT, "GetExtents", (kind,), "(u)"
+            )[0]
+        except Exception:  # noqa: BLE001 - nothing visible to probe
+            return []
+        if self.viewport is not None:
+            vx, vy, vw, vh = self.viewport
+            if kind == WINDOW:
+                vx, vy = 0, 0
+            elif self.extent_bound is not None:
+                # Probe where the toolkit believes the window is.
+                dx, dy = self._screen_error(
+                    Ref(bus_name, node["path"], "", ""),
+                    self.extent_bound,
+                    (x, y, width, height),
+                )
+                vx, vy = vx + dx, vy + dy
+            left, top = max(x, vx), max(y, vy)
+            right, bottom = min(x + width, vx + vw), min(y + height, vy + vh)
+            x, y, width, height = left, top, right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return []
+        step_x, step_y = 40, 14
+        while (width // step_x + 1) * (height // step_y + 1) > 1200:
+            step_x, step_y = step_x + 10, step_y + 4
+        points = [
+            (px, py)
+            for py in range(y + step_y // 2, y + height, step_y)
+            for px in range(x + step_x // 2, x + width, step_x)
+        ]
+        found: list[str] = []
+        seen: set[str] = {node["path"]}
+        for reply in bus.many(
+            [
+                (
+                    bus_name,
+                    node["path"],
+                    COMPONENT,
+                    "GetAccessibleAtPoint",
+                    (px, py, kind),
+                    "(iiu)",
+                )
+                for px, py in points
+            ]
+        ):
+            if _ok(reply):
+                child_bus, child_path = reply[0]
+                if (
+                    child_bus == bus_name
+                    and child_path not in seen
+                    and not child_path.endswith("/null")
+                ):
+                    seen.add(child_path)
+                    found.append(child_path)
+        return found[:MAX_CHILDREN]
 
     def _walk(
         self, bus_name: str, root_path: str, limit: int
@@ -997,6 +1163,7 @@ class LinuxDriver:
                 targets.append((index, "nactions"))
             if role != "password text" and (
                 _has(states, "editable")
+                or role in CELL_ROLES
                 or role in {"terminal", "document text"}
                 or (
                     not node["name"]
@@ -1129,7 +1296,7 @@ class LinuxDriver:
             if _ok(name):
                 node["name"] = _clean(name[0])
             if _ok(role):
-                node["role"] = role[0] or "unknown"
+                node["role"] = _role(role[0])
             if _ok(states):
                 node["states"] = _states(states)
         self._details(bus_name, nodes)
@@ -1310,7 +1477,7 @@ class LinuxDriver:
                         nodes[i]["path"],
                         COMPONENT,
                         "GetExtents",
-                        (SCREEN,),
+                        (self._coords(bus_name),),
                         "(u)",
                     )
                     for i in wanted
@@ -1506,15 +1673,19 @@ class LinuxDriver:
         ]
         if _has(states, "expandable") and not _has(states, "expanded"):
             shown.append("collapsed")
-        if _has(states, "checked"):
+        # Toggle buttons are on when "pressed" (Chromium) or "checked" (ATK):
+        # one vocabulary for queries and output.
+        toggle = role in {"toggle button", "switch"}
+        if _has(states, "checked") or (toggle and _has(states, "pressed")):
             shown.append("checked")
         elif (
             _has(states, "checkable")
+            or toggle
             or role
             in {"check box", "radio button", "check menu item", "radio menu item"}
         ) and not _has(states, "indeterminate"):
             shown.append("unchecked")
-        if _has(states, "pressed"):
+        if _has(states, "pressed") and not toggle:
             shown.append("pressed")
         if _has(states, "editable"):
             shown.append("settable")
@@ -1561,6 +1732,15 @@ class LinuxDriver:
 
         def compact(index: int, top: bool, inside_choice: bool = False) -> list[int]:
             node = nodes[index]
+            parent = node["parent"]
+            if (
+                parent >= 0
+                and nodes[parent].get("managed")
+                and node["role"] in CELL_ROLES
+                and not node["value"]
+                and not any(_has(node["states"], s) for s in ("focused", "selected"))
+            ):
+                return []  # empty cells of a spreadsheet's visible area
             choice = inside_choice or node["role"] in {"combo box", "list box"}
             kids: list[int] = []
             for child in node["children"]:
@@ -1579,17 +1759,24 @@ class LinuxDriver:
                     for kid in kids
                     if nodes[kid]["name"] and not _has(nodes[kid]["states"], "editable")
                 ]
-            if (
-                len(kids) == 1
-                and node["name"]
-                and nodes[kids[0]]["role"] in TEXT_ROLES
-                and not nodes[kids[0]]["out"]
-                and nodes[kids[0]]["name"] == node["name"]
-            ):
-                kids = []
+            if len(kids) == 1 and node["name"]:
+                # A link's own text or same-named image adds nothing: "[8]" › "8".
+                only = nodes[kids[0]]
+                if (
+                    not only["out"]
+                    and not self._interactive(only)
+                    and only["name"]
+                    and (
+                        only["name"] == node["name"]
+                        if only["role"] in {"image", "icon"}
+                        else only["role"] in TEXT_ROLES and only["name"] in node["name"]
+                    )
+                ):
+                    kids = []
             node["out"] = kids
             named = bool(
-                node["name"]
+                node.get("managed")
+                or node["name"]
                 or node["value"]
                 or node["description"]
                 or node["role"] in {"image", "icon"}
@@ -1610,7 +1797,8 @@ class LinuxDriver:
             if (
                 not active
                 and not named
-                and node["role"] in CONTAINERS | TEXT_ROLES | {"paragraph"}
+                and node["role"]
+                in CONTAINERS | TEXT_ROLES | INLINE_ROLES | {"paragraph"}
             ):
                 return kids
             if (
@@ -1639,6 +1827,18 @@ class LinuxDriver:
                 node["out"] = kids = unique
             if node["role"] in CELL_ROLES and not named and len(kids) == 1:
                 return kids
+            if not node["name"] and len(kids) == 1:
+                # "list item" + "text Alpha" reads (and is queried) as
+                # "list item Alpha", like buttons whose name is their text.
+                child = nodes[kids[0]]
+                if (
+                    child["role"] in TEXT_ROLES
+                    and not child["out"]
+                    and child["name"]
+                    and not self._interactive(child)
+                ):
+                    node["name"] = child["name"]
+                    node["out"] = kids = []
             return [index]
 
         for node in nodes:
@@ -1693,7 +1893,10 @@ class LinuxDriver:
             if node["context"]:
                 info.append(f"Context: {node['context']}")
             if secondary:
-                info.append(f"Secondary Actions: {', '.join(secondary)}")
+                # GTK 4 lists every action of a widget's groups: show a few.
+                more = f", +{len(secondary) - 4} more" if len(secondary) > 5 else ""
+                listed = secondary[:4] if more else secondary
+                info.append(f"Secondary Actions: {', '.join(listed)}{more}")
             line = " ".join(
                 part
                 for part in (
@@ -1705,7 +1908,9 @@ class LinuxDriver:
             )
             # Closed menus and drop-down lists fold their items: queries still
             # find them, but the printed tree shows only how many there are.
-            folding = role in FOLDING_ROLES
+            # So do the pages of tabs that are not selected (GTK notebooks).
+            page = role == "page tab" and not _has(node["states"], "selected")
+            folding = role in FOLDING_ROLES or page
             closed = {
                 child for child in node["out"]
                 if folding and not _has(nodes[child]["states"], "showing")
@@ -1713,13 +1918,23 @@ class LinuxDriver:
             hidden, pending = 0, list(closed)
             while pending:
                 current = pending.pop()
-                hidden += nodes[current]["role"] in OPTION_ROLES
+                hidden += (
+                    self._interactive(nodes[current])
+                    if page
+                    else nodes[current]["role"] in OPTION_ROLES
+                )
                 pending.extend(nodes[current]["out"])
             if hidden:
-                line += f" [{hidden} items]"
+                line += f" [{hidden} controls]" if page else f" [{hidden} items]"
+            if node.get("managed", 0) > len(node["out"]):
+                line += (
+                    f" [visible part: {len(node['out'])} of {node['managed']} children]"
+                )
             line = line.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+            entry = {"popup": True} if node.get("overlay") else {}
             ordered.append(
                 {
+                    **entry,
                     "folded": folded,
                     "id": identifier,
                     "parent": parent_id,
@@ -1806,6 +2021,8 @@ class LinuxDriver:
         if root is None:
             return self._fallback(bound, metadata)
         bus_name, root_path = root
+        self.viewport = self._geometry(bound.window)
+        self.extent_bound = bound
         self.atspi.pump()
         started = time.monotonic()
         mirror = bound.mirror
@@ -1873,13 +2090,26 @@ class LinuxDriver:
                         "STALE_ELEMENT", f"Element {root_id} no longer exists"
                     )
                 return self._result(bound, ref.bus, flat, truncated, started)
+        # Context menus, tooltips and bubbles are separate accessibles of the
+        # app; show the open ones over this window with it.
+        overlays = self._overlays(bound, bus_name) if start == root_path else []
         key = (start, mirror["version"])
-        if bound.cache and bound.cache["key"] == key:
+        if not overlays and bound.cache and bound.cache["key"] == key:
             return bound.cache["result"]
         flat = self._flatten(mirror["nodes"], start)
+        for path in overlays:
+            extra, _ = self._walk(bus_name, path, 600)
+            offset = len(flat)
+            for node in extra:
+                node["parent"] = 0 if node["parent"] < 0 else node["parent"] + offset
+                node["children"] = [child + offset for child in node["children"]]
+                node["overlay"] = True
+            flat[0]["children"] = [*flat[0]["children"], offset]
+            flat.extend(extra)
         result = self._result(bound, bus_name, flat, mirror["truncated"], started)
         result["scanned"] = len(mirror["nodes"])
-        bound.cache = {"key": key, "result": result}
+        # Popups are read fresh each time; their trees are not mirrored.
+        bound.cache = None if overlays else {"key": key, "result": result}
         return result
 
     def _result(
@@ -1938,7 +2168,7 @@ class LinuxDriver:
                 "STALE_ELEMENT",
                 f"Element {identifier} ({ref.role} {ref.name!r}) no longer exists; find it again",
             )
-        if role[0] != ref.role:
+        if _role(role[0]) != ref.role:
             raise DriverError(
                 "STALE_ELEMENT", f"Element {identifier} was replaced; find it again"
             )
@@ -1998,27 +2228,106 @@ class LinuxDriver:
             return "\n".join(parts)
         return raw.replace(OBJECT, "")
 
-    def _extents(self, ref: Ref) -> tuple[int, int, int, int]:
+    def _coords(self, bus_name: str) -> int:
+        """GTK 4 reports (0, 0) as every screen position on X11; its positions
+        relative to the window are right. Use those there (AT-SPI WINDOW)."""
+        if bus_name not in self.coord_types:
+            gtk4 = False
+            if self.atspi is not None and "gtk" in self._toolkit(bus_name):
+                with contextlib.suppress(Exception):
+                    version = str(
+                        self.atspi.get(
+                            bus_name, ROOT, "org.a11y.atspi.Application", "Version"
+                        )
+                    )
+                    gtk4 = int(version.split(".")[0]) >= 4
+            self.coord_types[bus_name] = WINDOW if gtk4 else SCREEN
+        return self.coord_types[bus_name]
+
+    def _extents(
+        self, ref: Ref, bound: BoundWindow | None = None
+    ) -> tuple[int, int, int, int]:
+        """Screen rectangle of an element (window-relative toolkits translated)."""
         assert self.atspi is not None
+        kind = self._coords(ref.bus)
         try:
-            return tuple(
-                self.atspi.call(
-                    ref.bus, ref.path, COMPONENT, "GetExtents", (SCREEN,), "(u)"
-                )[0]
-            )
+            x, y, width, height = self.atspi.call(
+                ref.bus, ref.path, COMPONENT, "GetExtents", (kind,), "(u)"
+            )[0]
         except Exception as exc:  # noqa: BLE001 - reported as an action failure
             raise DriverError(
                 "UNSUPPORTED_ACTION", "The element has no on-screen position"
             ) from exc
+        target = bound or self.extent_bound
+        if target is not None and kind == WINDOW:
+            ox, oy = self._content_origin(target.window)
+            dx, dy = self._popup_offset(ref, target)
+            x, y = x + ox + dx, y + oy + dy
+        elif target is not None:
+            dx, dy = self._screen_error(ref, target, (x, y, width, height))
+            x, y = x - dx, y - dy
+        return x, y, width, height
 
-    def _center(self, ref: Ref) -> tuple[int, int]:
-        x, y, width, height = self._extents(ref)
+    def _content_origin(self, window: Any) -> tuple[int, int]:
+        """Screen position of a window's content: GTK 4 positions start inside
+        the client-side shadow (_GTK_FRAME_EXTENTS: left, right, top, bottom)."""
+        x, y, _, _ = self._geometry(window)
+        with contextlib.suppress(Exception):
+            extents = self._property(window, "_GTK_FRAME_EXTENTS")
+            if extents is not None and len(extents) == 4:
+                x, y = x + int(extents[0]), y + int(extents[2])
+        return x, y
+
+    def _screen_error(
+        self, ref: Ref, bound: BoundWindow, box: tuple[int, int, int, int]
+    ) -> tuple[int, int]:
+        """How far a GTK-based toolkit's screen position is off.
+
+        LibreOffice adds the window frame's position instead of its content's
+        (off by the title bar). Positions relative to the window are right
+        there; they only do not apply to elements of popup windows."""
+        if "gtk" not in self._toolkit(ref.bus):
+            return 0, 0
+        x, y, width, height = box
+        with contextlib.suppress(Exception):
+            wx, wy = self.atspi.call(
+                ref.bus, ref.path, COMPONENT, "GetExtents", (WINDOW,), "(u)"
+            )[0][:2]
+            ox, oy, _, _ = self._geometry(bound.window)
+            dx, dy = x - (wx + ox), y - (wy + oy)
+            if (abs(dx) > 2 or abs(dy) > 2) and not self._in_popup(
+                bound, x + width // 2, y + height // 2
+            ):
+                return dx, dy
+        return 0, 0
+
+    def _in_popup(self, bound: BoundWindow, x: int, y: int) -> bool:
+        return self._pointer_target(bound, x, y) is not bound.window
+
+    def _on_screen_center(self, bound: BoundWindow, ref: Ref) -> tuple[int, int] | None:
+        """The element's center if it is shown inside its window (or a popup)."""
+        with contextlib.suppress(Exception):
+            if not _has(
+                _states(self.atspi.call(ref.bus, ref.path, ACC, "GetState")), "showing"
+            ):
+                return None
+            x, y, width, height = self._extents(ref, bound)
+            if width <= 0 or height <= 0:
+                return None
+            cx, cy = x + width // 2, y + height // 2
+            screen = self.root.get_geometry()
+            if 0 <= cx < screen.width and 0 <= cy < screen.height:
+                return cx, cy
+        return None
+
+    def _center(self, ref: Ref, bound: BoundWindow | None = None) -> tuple[int, int]:
+        x, y, width, height = self._extents(ref, bound)
         return x + width // 2, y + height // 2
 
     async def _visible_point(self, bound: BoundWindow, ref: Ref) -> tuple[int, int]:
         """The center of the part of an element that is inside the window."""
         wx, wy, ww, wh = self._geometry(bound.window)
-        x, y, width, height = self._extents(ref)
+        x, y, width, height = self._extents(ref, bound)
         left, top = max(x, wx), max(y, wy)
         right, bottom = min(x + width, wx + ww), min(y + height, wy + wh)
         if right - left >= 2 and bottom - top >= 2:
@@ -2027,31 +2336,128 @@ class LinuxDriver:
 
     async def _visible_center(self, bound: BoundWindow, ref: Ref) -> tuple[int, int]:
         """Scroll an element into the window if needed and return its screen center."""
-        wx, wy, ww, wh = self._geometry(bound.window)
-        for attempt in range(2):
-            x, y, width, height = self._extents(ref)
-            cx, cy = x + width // 2, y + height // 2
-            if width > 0 and height > 0 and wx <= cx < wx + ww and wy <= cy < wy + wh:
-                return cx, cy
-            if attempt == 0:
-                with contextlib.suppress(Exception):
-                    self.atspi.call(
-                        ref.bus,
-                        ref.path,
-                        COMPONENT,
-                        "ScrollTo",
-                        (SCROLL_ANYWHERE,),
-                        "(u)",
-                    )
-                await asyncio.sleep(0.25)
+        visible = await self._bring_into_view(bound, ref)
+        if visible is not None:
+            return visible
+        x, y, width, height = self._extents(ref, bound)
+        detached = (width, height) == (0, 0)
+        with contextlib.suppress(Exception):
+            state = _states(self.atspi.call(ref.bus, ref.path, ACC, "GetState"))
+            detached = detached and not _has(state, "showing")
+        if detached:
+            # The page or view that held it was replaced.
+            raise DriverError(
+                "STALE_ELEMENT",
+                f"{ref.role} {ref.name!r} no longer exists on screen; find it again",
+            )
         raise DriverError(
             "ACTION_FAILED",
             "The element is not visible inside the window; scroll it into view first",
         )
 
-    async def _focus(self, bound: BoundWindow, ref: Ref) -> None:
+    def _view_of(self, bound: BoundWindow, ref: Ref) -> tuple[int, int, int, int]:
+        """The visible area of the list, table or pane that scrolls an element
+        (its nearest scrolling ancestor, cut to the window)."""
+        wx, wy, ww, wh = self._geometry(bound.window)
+        path = ref.path
+        for _ in range(12):
+            try:
+                parent = self.atspi.get(ref.bus, path, ACC, "Parent")
+            except Exception:  # noqa: BLE001 - top reached
+                break
+            if not parent or parent[1] in {ROOT, "/org/a11y/atspi/null"}:
+                break
+            path = parent[1]
+            with contextlib.suppress(Exception):
+                role = _role(self.atspi.call(ref.bus, path, ACC, "GetRoleName")[0])
+                if role in SCROLLING_ROLES:
+                    x, y, width, height = self._extents(
+                        Ref(ref.bus, path, role, ""), bound
+                    )
+                    left, top = max(x, wx), max(y, wy)
+                    right = min(x + width, wx + ww)
+                    bottom = min(y + height, wy + wh)
+                    if right - left > 8 and bottom - top > 8:
+                        return left, top, right - left, bottom - top
+        return wx, wy, ww, wh
+
+    async def _bring_into_view(
+        self, bound: BoundWindow, ref: Ref
+    ) -> tuple[int, int] | None:
+        """Make an element visible and return its center: the toolkit's
+        ScrollTo, else the mouse wheel over its scrolled view (GTK tree views
+        implement no ScrollTo), else focusing it (lists scroll to their cursor)."""
         bus = self.atspi
         assert bus is not None
+        view = None
+
+        def shown() -> tuple[tuple[int, int] | None, tuple[int, int, int, int]]:
+            x, y, width, height = self._extents(ref, bound)
+            vx, vy, vw, vh = view or self._geometry(bound.window)
+            cx, cy = x + width // 2, y + height // 2
+            inside = (
+                width > 0 and height > 0 and vx <= cx < vx + vw and vy <= cy < vy + vh
+            )
+            return ((cx, cy) if inside else None), (x, y, width, height)
+
+        center, box = shown()
+        if center is not None:
+            return center
+        with contextlib.suppress(Exception):
+            bus.call(
+                ref.bus, ref.path, COMPONENT, "ScrollTo", (SCROLL_ANYWHERE,), "(u)"
+            )
+            await asyncio.sleep(0.25)
+            center, box = shown()
+            if center is not None:
+                return center
+        if box[2] <= 0 or box[3] <= 0:
+            return None  # no position at all: nothing to scroll towards
+        view = self._view_of(bound, ref)
+        vx, vy, vw, vh = view
+        for _ in range(12):
+            center, box = shown()
+            if center is not None:
+                return center
+            cx, cy = box[0] + box[2] // 2, box[1] + box[3] // 2
+            if cy >= vy + vh or cy < vy:
+                button, distance = (5 if cy >= vy + vh else 4), abs(cy - (vy + vh // 2))
+            elif cx >= vx + vw or cx < vx:
+                button, distance = (7 if cx >= vx + vw else 6), abs(cx - (vx + vw // 2))
+            else:
+                break
+            for _ in range(max(1, min(10, distance // 60))):
+                await self._click(bound, vx + vw // 2, vy + vh // 2, button)
+            await asyncio.sleep(0.15)
+            previous = box
+            center, box = shown()
+            if center is None and box == previous:
+                break  # the view does not move: wheel scrolling has no effect
+        center, box = shown()
+        if center is not None:
+            return center
+        with contextlib.suppress(Exception):
+            if _has(_states(bus.call(ref.bus, ref.path, ACC, "GetState")), "focusable"):
+                bus.call(ref.bus, ref.path, COMPONENT, "GrabFocus")
+                await asyncio.sleep(0.25)
+        center, box = shown()
+        return center
+
+    async def _focus(self, bound: BoundWindow, ref: Ref) -> Ref:
+        """Focus an element; returns it, or the element that replaced it on
+        focus (Chromium swaps a search field for a combo box)."""
+        bus = self.atspi
+        assert bus is not None
+        with contextlib.suppress(Exception):
+            bus.pump()
+        before = bus.focused.get(ref.bus)
+        if not _has(_states(bus.call(ref.bus, ref.path, ACC, "GetState")), "focusable"):
+            # A composite (date editor, toolbar, card): focus its first
+            # focusable part, as clicking it would.
+            nodes, _ = self._walk(ref.bus, ref.path, 300)
+            part = next((n for n in nodes[1:] if _has(n["states"], "focusable")), None)
+            if part is not None:
+                ref = Ref(ref.bus, part["path"], part["role"], part["name"])
         with contextlib.suppress(Exception):
             bus.call(ref.bus, ref.path, COMPONENT, "GrabFocus")
         for attempt in range(2):
@@ -2065,7 +2471,10 @@ class LinuxDriver:
                         f"{ref.role} {ref.name!r} disappeared while focusing it",
                     ) from exc
                 if _has(state, "focused"):
-                    return
+                    return ref
+                successor = self._successor(ref, state, before)
+                if successor is not None:
+                    return successor
                 await asyncio.sleep(0.025)
             if attempt == 0:
                 x, y = await self._visible_center(bound, ref)
@@ -2074,6 +2483,36 @@ class LinuxDriver:
             "ACTION_FAILED",
             "The element did not receive focus; check for a blocking dialog",
         )
+
+    def _successor(self, ref: Ref, state: int, before: str | None) -> Ref | None:
+        """The newly focused field that took the place of a vanished one."""
+        bus = self.atspi
+        assert bus is not None
+        with contextlib.suppress(Exception):
+            bus.pump()
+        focused = bus.focused.get(ref.bus)
+        if not focused or focused in {ref.path, before}:
+            return None
+        with contextlib.suppress(Exception):
+            role, states, name = bus.many(
+                [
+                    (ref.bus, focused, ACC, "GetRoleName", None, None),
+                    (ref.bus, focused, ACC, "GetState", None, None),
+                    (ref.bus, focused, PROPERTIES, "Get", (ACC, "Name"), "(ss)"),
+                ]
+            )
+            gone = not _has(state, "showing") or _has(state, "defunct")
+            same = _ok(name) and bool(ref.name) and _clean(name[0]) == ref.name
+            if (
+                (gone or same)
+                and _ok(states)
+                and _has(_states(states), "editable") == _has(state, "editable")
+            ):
+                self.touched.add((ref.bus, focused))
+                return Ref(
+                    ref.bus, focused, _role(role[0]) if _ok(role) else "", ref.name
+                )
+        return None
 
     async def _wait_text(self, ref: Ref, expected: str, timeout: float = 1.0) -> str:
         deadline = time.monotonic() + timeout
@@ -2122,6 +2561,14 @@ class LinuxDriver:
             if _has(info["states"], "editable") and ref.role in FIELD_ROLES:
                 await self._focus(bound, ref)
                 return
+            if "gtk" in self._toolkit(ref.bus) and ref.role not in {"menu", "page tab"}:
+                # GTK runs an action that opens a modal dialog inside the
+                # accessibility request, which blocks every further request to
+                # the app until the dialog closes. A pointer click does not.
+                point = self._on_screen_center(bound, ref)
+                if point is not None:
+                    await self._click(bound, *point, 1)
+                    return
             # A click selects a row or cell; "activate" on those opens them.
             verbs = (
                 ("click", "press", "select")
@@ -2224,6 +2671,13 @@ class LinuxDriver:
         text = str(value)
         if len(text.encode()) > MAX_INPUT_TEXT:
             raise DriverError("INVALID_ARGUMENT", "Text must be at most 64 KiB")
+        if ref.role in {"date editor", "time editor", "date time"} or (
+            not _has(states, "editable")
+            and re.fullmatch(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}", text)
+        ):
+            parts = await self._set_date_parts(bound, ref, text)
+            if parts is not None:
+                return parts
         if not _has(states, "editable") and ref.role in {
             "combo box",
             "list box",
@@ -2243,7 +2697,7 @@ class LinuxDriver:
             # Focus first, like typing would: a following pressKey("Return")
             # must reach this field.
             with contextlib.suppress(Exception):
-                await self._focus(bound, ref)
+                ref = await self._focus(bound, ref)
             with contextlib.suppress(Exception):
                 if bus.call(
                     ref.bus, ref.path, EDITABLE, "SetTextContents", (text,), "(s)"
@@ -2261,7 +2715,7 @@ class LinuxDriver:
                             )
                         return {"value": actual}
         for attempt in range(2):
-            await self._focus(bound, ref)
+            ref = await self._focus(bound, ref)
             count = 0
             with contextlib.suppress(Exception):
                 count = int(bus.get(ref.bus, ref.path, TEXT, "CharacterCount"))
@@ -2310,6 +2764,71 @@ class LinuxDriver:
             "ACTION_FAILED",
             f"The field contains {_short(actual, 200)!r} instead of the requested value",
         )
+
+    async def _set_date_parts(
+        self, bound: BoundWindow, ref: Ref, text: str
+    ) -> dict[str, Any] | None:
+        """Fill date/time editors segment by segment (any locale order)."""
+        bus = self.atspi
+        assert bus is not None
+        date = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2}))?", text)
+        clock = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+        if not date and not clock:
+            return None
+        wanted: dict[str, int] = {}
+        if date:
+            wanted.update(year=int(date[1]), month=int(date[2]), day=int(date[3]))
+            if date[4]:
+                wanted.update(hour=int(date[4]), minute=int(date[5]))
+        else:
+            wanted.update(hour=int(clock[1]), minute=int(clock[2]))
+        words = {
+            "year": ("year", "jahr", "année", "año", "anno", "jaar"),
+            "month": ("month", "monat", "mois", "mes", "mese", "maand"),
+            "day": ("day", "tag", "jour", "día", "giorno", "dag"),
+            "hour": ("hour", "stunde", "heure", "hora", "ora", "uur"),
+            "minute": ("minute", "minuten", "minuto", "minuut"),
+            "ampm": ("am/pm", "vormittag", "a.m.", "meridiem"),
+        }
+        nodes, _ = self._walk(ref.bus, ref.path, 200)
+        segments = {}
+        for node in nodes:
+            if node["role"] not in {"spin button", "spin box"}:
+                continue
+            label = node["name"].casefold()
+            for key, names in words.items():
+                if any(label.startswith(name) or f" {name}" in label for name in names):
+                    segments.setdefault(key, node)
+        if not all(key in segments for key in wanted if key != "hour") or not segments:
+            return None
+        if "hour" in wanted and "ampm" in segments:
+            hour = wanted["hour"]
+            wanted["ampm"] = 2 if hour >= 12 else 1
+            wanted["hour"] = hour % 12 or 12
+        for key, number in wanted.items():
+            node = segments.get(key)
+            if node is None:
+                return None
+            # Typing digits is what every date widget accepts (setting the
+            # value property is ignored by some, such as Chromium's).
+            await self._focus(
+                bound, Ref(ref.bus, node["path"], node["role"], node["name"])
+            )
+            if key == "ampm":
+                digits = "A" if number == 1 else "P"
+            else:
+                digits = str(number).zfill(4 if key == "year" else 2)
+            await self._type_characters(bound, digits)
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.15)
+        for key, number in wanted.items():
+            current = bus.get(ref.bus, segments[key]["path"], VALUE, "CurrentValue")
+            if int(round(float(current))) != number:
+                raise DriverError(
+                    "ACTION_FAILED",
+                    f"The {key} field shows {_number(current)} instead of {number}",
+                )
+        return {"value": text}
 
     async def _select_option(
         self, bound: BoundWindow, ref: Ref, text: str, info: dict[str, Any]
@@ -2367,7 +2886,7 @@ class LinuxDriver:
             target = Ref(ref.bus, option["path"], option["role"], option["name"])
             lowered = [a.lower() for a in self._info(target)["actions"]]
             if pointer and _has(option["states"], "showing"):
-                x, y = self._center(target)
+                x, y = self._center(target, bound)
                 await self._click(bound, x, y, 1)
                 self._mark()
                 await self._settle(bound)
@@ -2463,6 +2982,103 @@ class LinuxDriver:
         raise DriverError(
             "ACTION_FAILED", f"Selecting {option['name']!r} could not be confirmed"
         )
+
+    def _overlays(self, bound: BoundWindow, bus_name: str) -> list[str]:
+        """Open popups of the app over this window that its tree lacks: context
+        menus and tooltips (override-redirect windows) and named bubbles drawn
+        inside it. Dialogs with their own window are bound on their own."""
+        bus = self.atspi
+        if bus is None or bound.root is None or self._coords(bus_name) == WINDOW:
+            return []
+        try:
+            children = bus.call(bus_name, ROOT, ACC, "GetChildren", timeout=1000)[0]
+        except Exception:  # noqa: BLE001 - popups are optional
+            return []
+        paths = [
+            path
+            for child_bus, path in children[:40]
+            if child_bus == bus_name and path != bound.root[1]
+        ]
+        if not paths:
+            return []
+        details = bus.many(
+            [
+                request
+                for path in paths
+                for request in (
+                    (bus_name, path, ACC, "GetState", None, None),
+                    (bus_name, path, PROPERTIES, "Get", (ACC, "Name"), "(ss)"),
+                    (bus_name, path, ACC, "GetRoleName", None, None),
+                    (bus_name, path, COMPONENT, "GetExtents", (SCREEN,), "(u)"),
+                )
+            ]
+        )
+        top = None
+        managed: list[tuple[int, int, int, int]] | None = None
+        wx, wy, ww, wh = self._geometry(bound.window)
+        overlays = []
+        for index, path in enumerate(paths):
+            state, name, role, extents = details[index * 4 : index * 4 + 4]
+            if not (_ok(state) and _ok(extents) and _ok(role)):
+                continue
+            states = _states(state)
+            if not _has(states, "showing") or _has(states, "defunct"):
+                continue
+            x, y, width, height = extents[0]
+            if width <= 0 or height <= 0:
+                continue
+            try:
+                child = self.root.translate_coords(
+                    self.root, x + width // 2, y + height // 2
+                ).child
+                if not child or child == X.NONE:
+                    continue
+                if child.get_attributes().override_redirect:
+                    overlays.append(path)
+                    continue
+                if top is None:
+                    top = self._toplevel(bound.window)
+            except error.XError:
+                continue
+            # A bubble drawn inside this window: named, within it, and not
+            # another window of the app (stacked dialogs cover their owner).
+            if not (
+                child.id == top.id
+                and _ok(name)
+                and name[0]
+                and role[0] in {"alert", "dialog", "frame", "notification", "window"}
+                and x >= wx - 4
+                and y >= wy - 4
+                and x + width <= wx + ww + 4
+                and y + height <= wy + wh + 4
+                and width * height < 0.8 * ww * wh
+            ):
+                continue
+            if managed is None:
+                managed = [
+                    (m["x"], m["y"], m["width"], m["height"])
+                    for m in self._list_windows()
+                    if m["id"] != bound.window.id
+                ]
+            if not any(
+                abs(mx - x) < 12
+                and abs(my - y) < 48
+                and abs(mw - width) < 24
+                and abs(mh - height) < 64
+                for mx, my, mw, mh in managed
+            ):
+                overlays.append(path)
+        return overlays[:4]
+
+    def _toplevel(self, window: Any) -> Any:
+        """The root child that holds a window (its window manager frame)."""
+        current = window
+        for _ in range(16):
+            parent = current.query_tree().parent
+            if not parent or parent == X.NONE or parent.id == self.root.id:
+                return current
+            current = parent
+        return current
 
     def _popup_roots(self, bound: BoundWindow, bus_name: str) -> list[str]:
         """Showing popup windows of the same application (GTK/Qt combo menus)."""
@@ -2620,6 +3236,7 @@ class LinuxDriver:
         image = Image.frombytes(
             "RGB", (right - left, bottom - top), raw.data, "raw", "BGRX"
         )
+        self._draw_popups(image, x + left, y + top)
         limit = self.max_dimension
         if args.get("maxDimension"):
             limit = min(limit, max(200, int(args["maxDimension"])))
@@ -2647,6 +3264,92 @@ class LinuxDriver:
             "scale": round((right - left) / image.width, 4),
             "generation": self.generation,
         }
+
+    def _popups(self) -> list[tuple[Any, int, int, int, int, int]]:
+        """Open menus, popovers and tooltips (mapped override-redirect windows),
+        bottom to top: (window, x, y, width, height, depth)."""
+        found = []
+        try:
+            children = self.root.query_tree().children
+        except Exception:  # noqa: BLE001 - no display, no popups
+            return found
+        for child in children:
+            try:
+                attributes = child.get_attributes()
+                if (
+                    not attributes.override_redirect
+                    or attributes.map_state != X.IsViewable
+                    or attributes.win_class == X.InputOnly
+                ):
+                    continue
+                geometry = child.get_geometry()
+                if geometry.width >= 4 and geometry.height >= 4:
+                    found.append(
+                        (
+                            child, geometry.x, geometry.y,
+                            geometry.width, geometry.height, geometry.depth,
+                        )
+                    )  # fmt: skip
+            except error.XError:
+                continue
+        return found
+
+    def _draw_popups(self, image: Any, origin_x: int, origin_y: int) -> None:
+        """Draw open menus over a window image: a compositing window manager
+        keeps them out of the window's own pixels."""
+        width, height = image.size
+        for child, px, py, pw, ph, depth in self._popups():
+            left, top = max(px, origin_x), max(py, origin_y)
+            right = min(px + pw, origin_x + width)
+            bottom = min(py + ph, origin_y + height)
+            if right - left < 2 or bottom - top < 2:
+                continue
+            with contextlib.suppress(Exception):
+                raw = child.get_image(
+                    left - px, top - py, right - left, bottom - top,
+                    X.ZPixmap, 0xFFFFFFFF,
+                )  # fmt: skip
+                size = (right - left, bottom - top)
+                position = (left - origin_x, top - origin_y)
+                if depth == 32:
+                    # Popovers with shadows: keep the window behind them.
+                    patch = Image.frombytes("RGBA", size, raw.data, "raw", "BGRA")
+                    image.paste(patch.convert("RGB"), position, patch)
+                else:
+                    image.paste(
+                        Image.frombytes("RGB", size, raw.data, "raw", "BGRX"), position
+                    )
+
+    def _popup_offset(self, ref: Ref, bound: BoundWindow) -> tuple[int, int]:
+        """GTK 4 places popover contents as if the popover sat at its parent
+        widget; move them to where the popover's own window is."""
+        popups = [
+            (px, py, pw, ph)
+            for _, px, py, pw, ph, _ in self._popups()
+            if pw > 8 and ph > 8
+        ]
+        if not popups or self.atspi is None:
+            return 0, 0
+        origin_x, origin_y = self._content_origin(bound.window)
+        path = ref.path
+        for _ in range(24):
+            try:
+                ex, ey, ew, eh = self.atspi.call(
+                    ref.bus, path, COMPONENT, "GetExtents", (WINDOW,), "(u)"
+                )[0]
+            except Exception:  # noqa: BLE001 - no position to correct
+                return 0, 0
+            for px, py, pw, ph in popups:
+                if abs(ew - pw) <= 2 and abs(eh - ph) <= 2:
+                    return px - (origin_x + ex), py - (origin_y + ey)
+            try:
+                parent = self.atspi.get(ref.bus, path, ACC, "Parent")
+            except Exception:  # noqa: BLE001 - top reached
+                return 0, 0
+            if not parent or parent[1] in {ROOT, "/org/a11y/atspi/null"}:
+                return 0, 0
+            path = parent[1]
+        return 0, 0
 
     def _point(
         self, bound: BoundWindow, args: dict[str, Any], key: str = "coordinates"
@@ -2713,10 +3416,58 @@ class LinuxDriver:
             result.append(code)
         return result
 
+    def _real_input(self, bound: BoundWindow) -> bool:
+        """GTK 4 ignores synthetic (XSendEvent) input; it needs real input."""
+        if bound.real_input is None:
+            root = bound.root
+            bound.real_input = bool(
+                root is not None and self._coords(root[0]) == WINDOW
+            )
+        return bound.real_input
+
+    def _ensure_active(self, bound: BoundWindow) -> None:
+        """Real input goes to the focused window: activate the bound one."""
+        if self._focused(bound.window):
+            return
+        bound.window.configure(stack_mode=X.Above)
+        self.root.send_event(
+            protocol.event.ClientMessage(
+                window=bound.window,
+                client_type=self.connection.intern_atom("_NET_ACTIVE_WINDOW"),
+                data=(32, [2, X.CurrentTime, 0, 0, 0]),
+            ),
+            event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask,
+        )
+        with contextlib.suppress(error.XError):
+            bound.window.set_input_focus(X.RevertToParent, X.CurrentTime)
+        self.connection.sync()
+        deadline = time.monotonic() + 0.5
+        while not self._focused(bound.window) and time.monotonic() < deadline:
+            time.sleep(0.02)
+
     def _send_key(
-        self, bound: BoundWindow, code: int, pressed: bool, state: int
+        self,
+        bound: BoundWindow,
+        code: int,
+        pressed: bool,
+        state: int,
+        shift: bool = False,
     ) -> None:
         """Route a key directly to the bound window without stealing focus."""
+        if self._real_input(bound):
+            from Xlib.ext import xtest
+
+            self._ensure_active(bound)
+            shift_code = self.connection.keysym_to_keycode(XK.XK_Shift_L)
+            if pressed and shift:
+                xtest.fake_input(self.connection, X.KeyPress, shift_code)
+            xtest.fake_input(
+                self.connection, X.KeyPress if pressed else X.KeyRelease, code
+            )
+            if not pressed and shift:
+                xtest.fake_input(self.connection, X.KeyRelease, shift_code)
+            self.connection.sync()
+            return
         event = protocol.event.KeyPress if pressed else protocol.event.KeyRelease
         bound.window.send_event(
             event(
@@ -2768,8 +3519,22 @@ class LinuxDriver:
         button: int = 0,
         state: int = 0,
         target: Any = None,
+        real: bool = False,
     ) -> None:
         """Deliver window-relative pointer events without moving the desktop mouse."""
+        if real or self._real_input(bound):
+            from Xlib.ext import xtest
+
+            self._ensure_active(bound)
+            xtest.fake_input(self.connection, X.MotionNotify, x=x, y=y)
+            if kind != "motion":
+                xtest.fake_input(
+                    self.connection,
+                    X.ButtonPress if kind == "press" else X.ButtonRelease,
+                    button,
+                )
+            self.connection.sync()
+            return
         target = target or bound.window
         origin_x, origin_y, _, _ = self._geometry(target)
         event = {
@@ -2895,8 +3660,9 @@ class LinuxDriver:
                     self.connection.sync()
                     await asyncio.sleep(0.04)
                     code, state = spare, 0
-                self._send_key(bound, code, True, state)
-                self._send_key(bound, code, False, state)
+                shifted = bool(state & X.ShiftMask)
+                self._send_key(bound, code, True, state, shift=shifted)
+                self._send_key(bound, code, False, state, shift=shifted)
                 sent += 1
                 if not mapped:
                     await asyncio.sleep(0.02)
@@ -2973,7 +3739,7 @@ class LinuxDriver:
         focused = bus.focused.get(bound.root[0])
         if focused:
             with contextlib.suppress(Exception):
-                return str(
+                return _role(
                     bus.call(bound.root[0], focused, ACC, "GetRoleName", timeout=500)[0]
                 )
         mirror = bound.mirror or {}
@@ -3209,7 +3975,7 @@ class LinuxDriver:
         # Click the first file like a user (item-view objects can be transient),
         # then select the whole staged folder.
         first = self._lookup(target, cells[0]["id"])
-        x, y = self._center(first)
+        x, y = self._center(first, target)
         await self._click(target, x, y, 1)
         await asyncio.sleep(0.15)
         await self._press(target, "Control_L+a")
@@ -3458,7 +4224,19 @@ class LinuxDriver:
             return {}
         if op in {"windows", "apps", "inventory"}:
             await self._settle(None)
-            windows = [self._public_window(window) for window in self._list_windows()]
+            screen = self.root.get_geometry()
+            # Leave out tooltips and the window manager's off-screen helpers.
+            windows = [
+                public
+                for public in map(self._public_window, self._list_windows())
+                if public["window_type"] not in {"tooltip", "dnd"}
+                and public["width"] > 2
+                and public["height"] > 2
+                and public["x"] < screen.width
+                and public["y"] < screen.height
+                and public["x"] + public["width"] > 0
+                and public["y"] + public["height"] > 0
+            ]
             if op == "windows":
                 return {"items": windows}
             apps = self._apps(windows)
@@ -3482,14 +4260,17 @@ class LinuxDriver:
                     args = {
                         **args,
                         "region": self._to_window(
-                            bound, self._extents(self._lookup(bound, region))
+                            bound, self._extents(self._lookup(bound, region), bound)
                         ),
                     }
                 result.update(self._capture(bound, args))
             return result
         if op == "bounds":
-            rect = self._extents(self._lookup(bound, args.get("elementId")))
-            return self._to_screenshot(bound, rect)
+            # Bounds serve coordinate input: bring the element into view first.
+            ref = self._lookup(bound, args.get("elementId"))
+            with contextlib.suppress(DriverError):
+                await self._visible_center(bound, ref)
+            return self._to_screenshot(bound, self._extents(ref, bound))
         if op == "activate":
             bound.window.configure(stack_mode=X.Above)
             self.root.send_event(
@@ -3593,7 +4374,7 @@ class LinuxDriver:
                             "UNSUPPORTED_ACTION", "Selected element is not editable"
                         )
                     # Chromium exposes editable web fields without EditableText.
-                    await self._focus(bound, ref)
+                    ref = await self._focus(bound, ref)
                     await self._paste_text(bound, text)
                 else:
                     self._insert(ref, text)
@@ -3651,9 +4432,7 @@ class LinuxDriver:
                 await self._click(bound, x, y, button)
         elif op == "scroll_into_view":
             ref = self._ref(bound, args.get("elementId"))
-            if not self.atspi.call(
-                ref.bus, ref.path, COMPONENT, "ScrollTo", (SCROLL_ANYWHERE,), "(u)"
-            )[0]:
+            if await self._bring_into_view(bound, ref) is None:
                 raise DriverError(
                     "ACTION_FAILED", "The application could not scroll to the element"
                 )
@@ -3669,9 +4448,27 @@ class LinuxDriver:
                 else:
                     points.append(self._point(bound, args, key))
             start, end = points
+            if args.get("fromElementId") is not None:
+                # Showing the target may have scrolled the source away.
+                source = self._ref(bound, args["fromElementId"])
+                x, y, width, height = self._extents(source, bound)
+                wx, wy, ww, wh = self._geometry(bound.window)
+                start = (x + width // 2, y + height // 2)
+                if not (wx <= start[0] < wx + ww and wy <= start[1] < wy + wh):
+                    raise DriverError(
+                        "ACTION_FAILED",
+                        "The drag source and target are not visible together; "
+                        "enlarge the window or scroll so that both show",
+                    )
+            # Native drag and drop (GTK, Qt) grabs the pointer and follows the
+            # real one; web pages take synthetic events.
+            root = bound.root
+            toolkit = self._toolkit(root[0]) if root and self.atspi else ""
+            real = any(name in toolkit for name in ("gtk", "gail", "qt"))
             try:
-                self._send_pointer(bound, *start, "motion")
-                self._send_pointer(bound, *start, "press", 1)
+                self._send_pointer(bound, *start, "motion", real=real)
+                self._send_pointer(bound, *start, "press", 1, real=real)
+                await asyncio.sleep(0.1 if real else 0)
                 for step in range(1, 21):
                     self._send_pointer(
                         bound,
@@ -3679,10 +4476,16 @@ class LinuxDriver:
                         round(start[1] + (end[1] - start[1]) * step / 20),
                         "motion",
                         state=X.Button1Mask,
+                        real=real,
                     )
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.03 if real else 0.01)
+                if real:
+                    # Let the drop target take the position before the drop.
+                    await asyncio.sleep(0.3)
+                    self._send_pointer(bound, *end, "motion", real=True)
+                    await asyncio.sleep(0.1)
             finally:
-                self._send_pointer(bound, *end, "release", 1, X.Button1Mask)
+                self._send_pointer(bound, *end, "release", 1, X.Button1Mask, real=real)
         elif op == "choose_files":
             result = await self._choose_files(bound, args)
             self._mark()
@@ -3722,6 +4525,7 @@ class LinuxDriver:
             # A detached Popen: asyncio would kill the app when this driver exits.
             process = subprocess.Popen(
                 arguments,
+                env=self._launch_environment(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=log_file,

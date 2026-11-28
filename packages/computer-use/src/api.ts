@@ -21,14 +21,15 @@ type Target = number | Vec2 | Query;
 type ObservationOptions = { emit?: boolean; disableDiffing?: boolean; root?: Target; maxNodes?: number };
 type ScreenshotOptions = { emit?: boolean; maxDimension?: number; region?: Target | [number, number, number, number] };
 type Node = {
-  id: number; parent: number | null; depth: number; folded?: boolean; role: string; name: string; value: string;
+  id: number; parent: number | null; depth: number; folded?: boolean; popup?: boolean; role: string; name: string; value: string;
   description: string; context: string; states: string[]; actions: string[]; line: string;
 };
 type Tree = { source: string; nodes: Node[]; truncated?: boolean; notice?: string };
 type WindowInfo = { id: number; app: string; title?: string; focused?: boolean; modal?: boolean; window_type?: string; transient_for?: number };
 type WindowQuery = string | RegExp | { windowId?: number; app?: Pattern; title?: Pattern; type?: string; modal?: boolean };
 
-const MAX_EMITTED_TREE = 48 * 1024;
+const MAX_EMITTED_TREE = 32 * 1024;
+const POPUP_WINDOWS = new Set(['menu', 'popup_menu', 'dropdown_menu', 'combo', 'tooltip', 'notification', 'dnd']);
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const ROLE_ALIASES: Record<string, string[]> = {
   button: ['push button', 'button', 'toggle button', 'menu button'],
@@ -88,18 +89,24 @@ function textMatches(pattern: Pattern | undefined, value: string): boolean {
 
 function roleMatches(pattern: Pattern | undefined, node: Node): boolean {
   if (pattern === undefined) return true;
-  if (pattern instanceof RegExp) return textMatches(pattern, node.role);
-  const wanted = pattern.toLowerCase().trim();
-  const aliases = ROLE_ALIASES[wanted.replace(/[\s_-]/g, '')];
-  if (aliases?.includes(node.role)) return true;
-  return node.role === wanted;
+  if (pattern instanceof RegExp) {
+    // /textbox|search/ also means the toolkit roles behind the common names.
+    if (textMatches(pattern, node.role)) return true;
+    return Object.entries(ROLE_ALIASES).some(([alias, roles]) => roles.includes(node.role) && textMatches(pattern, alias));
+  }
+  const compact = (value: string) => value.toLowerCase().replace(/[\s_-]/g, '');
+  const wanted = compact(pattern);
+  // "listbox", "list box", "tree-item" and "treeitem" all name the same role.
+  return ROLE_ALIASES[wanted]?.includes(node.role) || compact(node.role) === wanted;
 }
 
 function nodeMatches(node: Node, query: Query): boolean {
   if (typeof query === 'string' || query instanceof RegExp) return textMatches(query, node.line);
   if (query.id !== undefined && node.id !== query.id) return false;
   if (!roleMatches(query.role, node)) return false;
-  if (!textMatches(query.name, node.name)) return false;
+  // Paragraphs and other text blocks carry their text as the value.
+  const name = node.name || (TEXT_BLOCKS.has(node.role) ? node.value : '');
+  if (!textMatches(query.name, name)) return false;
   if (!textMatches(query.value, node.value)) return false;
   if (!textMatches(query.description, node.description)) return false;
   if (!textMatches(query.context, node.context)) return false;
@@ -114,9 +121,11 @@ function nodeMatches(node: Node, query: Query): boolean {
 
 function exact(node: Node, query: Query): boolean {
   const pattern = typeof query === 'string' ? query : query instanceof RegExp ? undefined : query.name ?? query.text;
-  return typeof pattern === 'string' && node.name.toLowerCase().trim() === pattern.toLowerCase().trim();
+  const name = node.name || (TEXT_BLOCKS.has(node.role) ? node.value : '');
+  return typeof pattern === 'string' && name.toLowerCase().trim() === pattern.toLowerCase().trim();
 }
 
+const TEXT_BLOCKS = new Set(['paragraph', 'heading', 'text', 'static', 'label', 'caption', 'block quote', 'list item', 'table cell']);
 type Purpose = 'any' | 'act' | 'edit';
 const EDITABLE_ROLES = new Set(['combo box', 'list box', 'slider', 'spin button', 'spin box', 'check box', 'radio button', 'toggle button', 'switch', 'page tab list']);
 
@@ -218,8 +227,23 @@ function windowMatches(window: WindowInfo, query: WindowQuery): boolean {
   return true;
 }
 
+/** The only window, or the only focused one among several. */
+function single(list: WindowInfo[]): WindowInfo | undefined {
+  if (list.length === 1) return list[0];
+  const focused = list.filter((window) => window.focused);
+  return focused.length === 1 ? focused[0] : undefined;
+}
+
 function windowLine(window: WindowInfo): string {
-  return `${window.id} ${window.app}${window.title ? ` “${window.title}”` : ''}${window.window_type && window.window_type !== 'normal' ? ` (${window.window_type})` : ''}`;
+  const states = [window.window_type && window.window_type !== 'normal' ? window.window_type : '', window.modal ? 'modal' : '', window.focused ? 'focused' : ''].filter(Boolean);
+  return `${window.id} ${window.app}${window.title ? ` “${window.title}”` : ''}${states.length ? ` (${states.join(', ')})` : ''}`;
+}
+
+type AppInfo = { id: string; displayName: string; windows?: WindowInfo[] };
+
+function appLine(app: AppInfo): string {
+  const open = app.windows?.length ? ` — open: ${app.windows.map((window) => window.id).join(', ')}` : '';
+  return `${app.displayName} (${app.id.replace(/\.desktop$/, '')})${open}`;
 }
 
 /** Adapt the public CUA contract to OpenCuria's run-owned native I/O service. */
@@ -237,7 +261,10 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
     documentation();
     const result = await native(op);
     const value = result.items ?? result;
-    if (options.emit !== false) write(JSON.stringify(value), 'cua.state');
+    if (options.emit !== false) {
+      const lines = op === 'windows' ? (value as WindowInfo[]).map(windowLine) : op === 'apps' ? (value as AppInfo[]).map(appLine) : [JSON.stringify(value)];
+      write(lines.join('\n') || '(none)', 'cua.state');
+    }
     return value;
   }
 
@@ -245,7 +272,7 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
     return (await native('windows')).items as WindowInfo[];
   }
 
-  async function resolveWindow(target: unknown, timeoutMs = 0): Promise<WindowInfo> {
+  async function resolveWindow(target: unknown, timeoutMs = 0, launch = true): Promise<WindowInfo> {
     if (target && typeof target === 'object' && !(target instanceof RegExp) && 'windowId' in target) {
       const id = (target as { windowId: unknown }).windowId;
       if (!Number.isSafeInteger(id) || (id as number) <= 0) throw new Error('getApp requires { windowId } from listWindows(), an app name, or { app, title }.');
@@ -261,14 +288,20 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
     let launched = false;
     while (true) {
       const all = await windows();
-      const matching = all.filter((window) => windowMatches(window, query));
+      let matching = all.filter((window) => windowMatches(window, query));
+      // An open menu or popover is a window of the app too, but not the one meant.
+      if (matching.length > 1) {
+        const main = matching.filter((window) => !POPUP_WINDOWS.has(window.window_type ?? 'normal'));
+        if (main.length) matching = main;
+      }
       if (matching.length === 1) return matching[0];
       if (matching.length > 1) {
         throw new Error(`Several windows match ${describe(query)}; pass { windowId } or a title:\n${matching.slice(0, 12).map(windowLine).join('\n')}`);
       }
-      if (!launched && (typeof query === 'string' || (typeof query === 'object' && !(query instanceof RegExp) && typeof query.app === 'string'))) {
+      // A title names one existing window: launching cannot produce it.
+      if (launch && !launched && (typeof query === 'string' || (typeof query === 'object' && !(query instanceof RegExp) && typeof query.app === 'string' && query.title === undefined && query.windowId === undefined))) {
         const name = String(typeof query === 'string' ? query : (query as { app: string }).app).toLowerCase();
-        const apps = ((await native('apps')).items as Array<{ id: string; displayName: string; windows?: WindowInfo[] }>);
+        const apps = (await native('apps')).items as AppInfo[];
         const candidates = apps.filter((app) => app.displayName.toLowerCase() === name || app.id.toLowerCase().replace(/\.desktop$/, '') === name);
         const loose = candidates.length ? candidates : apps.filter((app) => app.displayName.toLowerCase().includes(name));
         // An installed app's own windows (their class can differ from its name).
@@ -281,17 +314,52 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
           throw new Error(`Several installed apps match ${describe(query)}; pass the exact name:\n${loose.slice(0, 10).map((app) => `${app.displayName} (${app.id})`).join('\n')}`);
         }
         if (loose.length === 1) {
-          await native('launch_app', { app: loose[0].id });
+          // An app that waits for an answer (crash recovery, a modal question)
+          // refuses to start again: hand the agent that dialog instead.
+          const words = loose[0].displayName.toLowerCase().split(/\W+/).filter((word) => word.length >= 4);
+          const waiting = async () => {
+            const open = await windows();
+            const related = (window: WindowInfo) => words.some((word) => `${window.title ?? ''} ${window.app}`.toLowerCase().includes(word));
+            const classes = new Set(open.filter(related).map((window) => window.app));
+            const dialogs = open.filter((window) => (window.window_type === 'dialog' || window.modal) && (related(window) || classes.has(window.app)));
+            const dialog = single(dialogs);
+            if (!dialog) return undefined;
+            write(`[${loose[0].displayName} is waiting for a dialog; bound to it: ${windowLine(dialog)}. Answer it, then call getApp again for the main window.]`, 'cua.state');
+            return dialog;
+          };
+          try {
+            await native('launch_app', { app: loose[0].id });
+          } catch (error) {
+            const dialog = await waiting();
+            if (dialog) return dialog;
+            throw error;
+          }
           launched = true;
           const launchDeadline = Date.now() + 20000;
           const before = new Set(all.map((window) => window.id));
+          let candidate: WindowInfo | undefined;
           while (Date.now() < launchDeadline) {
             await sleep(250);
-            const fresh = (await windows()).filter((window) => !before.has(window.id));
+            // Launchers (exo-open, flatpak, scripts) start programs whose
+            // windows carry another name: take the one new window then.
+            const fresh = (await windows()).filter((window) => !before.has(window.id) && ['normal', 'dialog'].includes(window.window_type ?? 'normal'));
             const own = fresh.filter((window) => windowMatches(window, query) || window.app.toLowerCase().includes(name) || name.includes(window.app.toLowerCase()));
-            if (own.length === 1) return own[0];
-            if (fresh.length === 1 && Date.now() > launchDeadline - 15000) return fresh[0];
+            const next = single(own) ?? (Date.now() > launchDeadline - 18500 ? single(fresh) : undefined);
+            // Apps with a start or splash window replace it right away: only a
+            // window that is still there a moment later is the app's window.
+            if (next && candidate?.id === next.id) {
+              // A question the app asks first (settings apps' main windows are
+              // dialogs too, but belong to no other window).
+              if (next.modal || (next.window_type === 'dialog' && next.transient_for)) {
+                write(`[${loose[0].displayName} opened with a dialog; bound to it: ${windowLine(next)}. Answer it, then call getApp again for the main window.]`, 'cua.state');
+              }
+              return next;
+            }
+            candidate = next;
+            if (next) await sleep(600);
           }
+          const dialog = await waiting();
+          if (dialog) return dialog;
           throw new Error(`Launched ${loose[0].displayName}, but no window appeared within 20 s.`);
         }
       }
@@ -304,14 +372,44 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
 
   async function getApp(target: unknown, options: { emit?: boolean } = {}) {
     documentation();
-    const window = await resolveWindow(target);
-    const binding = await native('bind', { windowId: window.id });
+    let window = await resolveWindow(target);
+    let binding = await native('bind', { windowId: window.id });
     const base = () => ({ windowId: window.id, identity: binding.identity });
     const baselines = new Map<string, Baseline>();
+    const byQuery = !(target && typeof target === 'object' && !(target instanceof RegExp) && 'windowId' in target);
+    /** Apps replace windows (start screens, first-run pages, restarts): an
+     * app bound by name follows when exactly one window matches again. */
+    async function call(op: string, args: Record<string, unknown> = {}): Promise<NativeReply> {
+      try {
+        return await native(op, args);
+      } catch (error) {
+        if (!byQuery || !/Bind this window again|window (?:is not visible|was closed|closed during)/i.test(String((error as Error).message))) throw error;
+        // The app may still be closing or opening its replacement: wait for
+        // one matching window, then start the app again if none appears.
+        let next: WindowInfo | undefined;
+        const deadline = Date.now() + 8000;
+        while (!next && Date.now() < deadline) {
+          try { next = await resolveWindow(target, 0, false); } catch (lookup) {
+            if (/Several windows/.test(String((lookup as Error).message))) throw lookup;
+            await sleep(300);
+          }
+        }
+        if (!next) {
+          try { next = await resolveWindow(target, 0, true); } catch { throw error; }
+        }
+        window = next;
+        binding = await native('bind', { windowId: window.id });
+        baselines.clear();
+        app.windowId = window.id;
+        app.window = window;
+        write(`[The window was replaced; now bound to ${windowLine(window)}]`, 'cua.state');
+        return await native(op, { ...args, ...base() });
+      }
+    }
 
     async function readTree(options: { root?: Target; maxNodes?: number; disableDiffing?: boolean } = {}): Promise<Tree> {
       const root = options.root === undefined ? undefined : await elementId(options.root);
-      return await native('state', { ...base(), text: true, root, maxNodes: options.maxNodes, fresh: options.disableDiffing || undefined }) as Tree;
+      return await call('state', { ...base(), text: true, root, maxNodes: options.maxNodes, fresh: options.disableDiffing || undefined }) as Tree;
     }
 
     async function candidates(query: Query, fresh = false): Promise<{ tree: Tree; matches: Node[] }> {
@@ -344,7 +442,20 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
           return matches[0];
         } else if (matches.length > 1) {
           // Labels often repeat a control's name; actions mean the control.
-          for (const narrowed of [matches.filter((node) => suits(node, purpose)), matches.filter((node) => suits(node, purpose) && exact(node, query)), matches.filter((node) => exact(node, query))]) {
+          // Some toolkits mirror a widget as an empty shell (LibreOffice's second
+          // menu bar); the one with content is the operable one.
+          const parents = new Set(tree.nodes.map((node) => node.parent));
+          let narrowed = matches;
+          for (const prefer of [
+            (node: Node) => suits(node, purpose),
+            // An open menu's item rather than its twin in a closed menu.
+            (node: Node) => !node.folded,
+            (node: Node) => !!node.popup,
+            (node: Node) => exact(node, query),
+            (node: Node) => parents.has(node.id),
+          ]) {
+            const kept = narrowed.filter(prefer);
+            if (kept.length) narrowed = kept;
             if (narrowed.length === 1) return narrowed[0];
           }
           throw new Error(`${matches.length} elements match ${describe(query)}; add role/name/states, or index (0-based):\n${matches.slice(0, 8).map((node) => `${node.id} ${node.line}`).join('\n')}`);
@@ -401,7 +512,7 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
       let region: unknown = options.region;
       if (region !== undefined && !(Array.isArray(region) && region.length === 4)) region = await elementId(region as Target);
       const root = observation.root === undefined ? undefined : await elementId(observation.root);
-      const result = await native('state', { ...base(), image: true, text, region, root, maxDimension: options.maxDimension, maxNodes: observation.maxNodes });
+      const result = await call('state', { ...base(), image: true, text, region, root, maxDimension: options.maxDimension, maxNodes: observation.maxNodes });
       const bytes = Buffer.from(result.image, 'base64');
       let state: string | undefined;
       if (text) state = emitState(describe(observation.root ?? null), result as Tree, { ...observation, emit: options.emit });
@@ -463,21 +574,21 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
       click: async (target: Target, options: { mouseButton?: string; clickCount?: number; durationMs?: number; key?: string; timeoutMs?: number } = {}) => {
         const { timeoutMs, ...click } = options;
         if (click.durationMs !== undefined && (!Number.isSafeInteger(click.durationMs) || click.durationMs < 0)) throw new Error('durationMs must be a non-negative safe integer.');
-        await act(target, timeoutMs, (located) => native('click', { ...base(), ...located, ...click }));
+        await act(target, timeoutMs, (located) => call('click', { ...base(), ...located, ...click }));
       },
       hover: async (target: Target, options: { timeoutMs?: number } = {}) => {
-        await act(target, options.timeoutMs, (located) => native('hover', { ...base(), ...located }));
+        await act(target, options.timeoutMs, (located) => call('hover', { ...base(), ...located }));
       },
       focus: async (target: Target, options: { timeoutMs?: number } = {}) => {
         await act(target, options.timeoutMs, async (located) => {
-          if ('coordinates' in located) await native('click', { ...base(), ...located });
-          else await native('focus', { ...base(), ...located });
+          if ('coordinates' in located) await call('click', { ...base(), ...located });
+          else await call('focus', { ...base(), ...located });
         });
       },
       drag: async (from: Target, to: Target, options: { timeoutMs?: number } = {}) => {
         const start = await locate(from, options.timeoutMs);
         const end = await locate(to, options.timeoutMs);
-        await native('drag', {
+        await call('drag', {
           ...base(),
           ...('coordinates' in start ? { from: start.coordinates } : { fromElementId: start.elementId }),
           ...('coordinates' in end ? { to: end.coordinates } : { toElementId: end.elementId }),
@@ -486,76 +597,76 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
       scroll: async (target: Target, direction: string, distance?: number | { pixels: number }) => {
         if (typeof distance === 'number') throw new Error('Linux scroll accepts { pixels }, not pages.');
         if (distance && (!Number.isFinite(distance.pixels) || distance.pixels <= 0)) throw new Error('pixels must be a positive finite number.');
-        await act(target, undefined, (located) => native('scroll', { ...base(), ...located, direction, ...(distance ? { pixels: distance.pixels } : {}) }));
+        await act(target, undefined, (located) => call('scroll', { ...base(), ...located, direction, ...(distance ? { pixels: distance.pixels } : {}) }));
       },
       scrollIntoView: async (target: Target, options: { timeoutMs?: number } = {}) => {
         await act(target, options.timeoutMs, async (located) => {
           if ('coordinates' in located) throw new Error('scrollIntoView needs an element.');
-          await native('scroll_into_view', { ...base(), ...located });
+          await call('scroll_into_view', { ...base(), ...located });
         });
       },
       selectText: async (target: Target, text: string, options: { prefix?: string; suffix?: string; selectionType?: string } = {}) => {
         await act(target, undefined, async (located) => {
           if ('coordinates' in located) throw new Error('selectText needs an element.');
-          await native('select_text', { ...base(), ...located, text, ...options });
+          await call('select_text', { ...base(), ...located, text, ...options });
         });
       },
       setValue: async (target: Target, value: string | number | boolean, options: { timeoutMs?: number } = {}) => {
         return await act(target, options.timeoutMs, async (located) => {
           if ('coordinates' in located) throw new Error('setValue needs an element (ID or query), not coordinates.');
-          return await native('set_value', { ...base(), ...located, value });
+          return await call('set_value', { ...base(), ...located, value });
         }, 'edit');
       },
       paste: async (text: string, options?: { format?: string }) => {
         if (options?.format !== undefined && options.format !== 'text') throw new Error('Linux paste supports only text format.');
-        await native('type_text', { ...base(), text });
+        await call('type_text', { ...base(), text });
       },
       pressKey: async (key: string, options: { durationMs?: number; repeat?: number } = {}) => {
         if (options.durationMs !== undefined && (!Number.isSafeInteger(options.durationMs) || options.durationMs < 0)) throw new Error('durationMs must be a non-negative safe integer.');
-        await native('press_key', { ...base(), key, ...options });
+        await call('press_key', { ...base(), key, ...options });
       },
       typeCharacters: async (text: string) => {
-        const result = await native('type_characters', { ...base(), text });
+        const result = await call('type_characters', { ...base(), text });
         return { charactersSent: result.charactersSent as number };
       },
       typeText: async (text: string, target?: Target, options: { timeoutMs?: number } = {}) => {
         if (target === undefined || target === null) {
-          await native('type_text', { ...base(), text });
+          await call('type_text', { ...base(), text });
           return;
         }
         await act(target, options.timeoutMs, async (located) => {
           if ('coordinates' in located) {
-            await native('click', { ...base(), ...located });
-            await native('type_text', { ...base(), text });
+            await call('click', { ...base(), ...located });
+            await call('type_text', { ...base(), text });
           } else {
-            await native('type_text', { ...base(), text, ...located });
+            await call('type_text', { ...base(), text, ...located });
           }
         }, 'edit');
       },
       performSecondaryAction: async (target: Target, action: string) => {
         await act(target, undefined, async (located) => {
           if ('coordinates' in located) throw new Error('performSecondaryAction needs an element.');
-          await native('secondary', { ...base(), ...located, action });
+          await call('secondary', { ...base(), ...located, action });
         });
       },
-      getBounds: async (target: Target) => await native('bounds', { ...base(), elementId: await elementId(target) }),
+      getBounds: async (target: Target) => await call('bounds', { ...base(), elementId: await elementId(target) }),
       chooseFiles: async (paths: string | string[], options: { trigger?: Target; timeoutMs?: number } = {}) => {
         let trigger: Record<string, unknown> = {};
         if (options.trigger !== undefined) {
           const located = await locate(options.trigger);
           trigger = 'coordinates' in located ? { triggerCoordinates: located.coordinates } : { triggerElementId: located.elementId };
         }
-        const result = await native('choose_files', { ...base(), paths, timeoutMs: options.timeoutMs, ...trigger });
+        const result = await call('choose_files', { ...base(), paths, timeoutMs: options.timeoutMs, ...trigger });
         write(`Chose ${result.files.length} file(s)${result.dialog ? ` in “${result.dialog}”` : ''}.`, 'cua.state');
         return { files: result.files as string[], dialog: result.dialog as string };
       },
       dropFiles: async (paths: string | string[], target: Target, options: { timeoutMs?: number } = {}) => {
         const located = await locate(target, options.timeoutMs);
-        const result = await native('drop_files', { ...base(), paths, ...located });
+        const result = await call('drop_files', { ...base(), paths, ...located });
         write(`Dropped ${result.files.length} file(s).`, 'cua.state');
         return { files: result.files as string[] };
       },
-      activate: async () => { await native('activate', base()); },
+      activate: async () => { await call('activate', base()); },
     };
     const initial = await readTree();
     emitState('null', initial, { emit: options.emit });
@@ -574,8 +685,10 @@ export function createCua(native: Native, write: Write, emitImage: (value: Uint8
       while (true) {
         const matching = (await windows()).filter((window) => windowMatches(window, query));
         if (matching.length) {
-          if (options.emit !== false) write(`${matching.slice(0, 5).map(windowLine).join('\n')}`, 'cua.state');
-          return matching[0];
+          // Of several, the focused one, else the newest (X ids grow per app).
+          const chosen = single(matching) ?? [...matching].sort((a, b) => b.id - a.id)[0];
+          if (options.emit !== false) write(windowLine(chosen) + (matching.length > 1 ? ` (of ${matching.length} matching windows: focused or newest)` : ''), 'cua.state');
+          return chosen;
         }
         if (Date.now() >= deadline) throw new Error(`No window matching ${describe(query)} appeared within ${timeout} ms.`);
         await sleep(250);

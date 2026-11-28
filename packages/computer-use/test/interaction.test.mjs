@@ -119,6 +119,99 @@ test('real Chrome: native file dialogs and file drops', { skip: !desktop || !exi
   assert.match(text, /drop => shot1\.png:4, notes\.txt:6/);
 });
 
+// Common web patterns, written the way an agent uses the API. Each pattern
+// logs "OK: …" into the page when it worked.
+const ok = (text) => `await web.waitFor({ role: 'listitem', name: ${JSON.stringify('OK: ' + text)} }, { timeoutMs: 8000 });`;
+const widgetScenarios = [
+  { name: 'cookie banner blocks until accepted', code: `
+try { await web.click({ role: 'tab', name: 'Billing' }); ${ok('blocked by banner')} } finally { await web.click({ role: 'button', name: 'Accept all' }); }
+${ok('cookies accepted')}
+await web.waitFor({ role: 'region', name: 'Cookie consent' }, { gone: true, timeoutMs: 5000 });` },
+  { name: 'tabs reveal a hidden panel', code: `
+await web.click({ role: 'tab', name: 'Billing' }); ${ok('tab Billing')}
+await web.setValue({ name: 'IBAN' }, 'DE89 3704 0044 0532 0130 00'); await web.click({ role: 'button', name: 'Save IBAN' }); ${ok('iban DE89 3704 0044 0532 0130 00')}` },
+  { name: 'accordion expands and its link works', code: `
+await web.click({ role: 'button', name: 'How do refunds work?' }); ${ok('faq open')}
+await web.click({ role: 'link', name: 'Request refund' }); ${ok('refund requested')}` },
+  { name: 'menu button opens a menu', code: `
+await web.click({ role: 'button', name: 'Actions' }); await web.click({ role: 'menuitem', name: 'Archive' }); ${ok('menu Archive')}` },
+  { name: 'autocomplete combobox', code: `
+await web.focus({ role: 'combobox', name: 'City' }); await web.typeCharacters('Ber');
+await web.click({ role: 'option', name: 'Bern' }); ${ok('city Bern')}` },
+  { name: 'native multi-select, date, number, range, textarea', code: `
+await web.setValue({ role: 'listbox', name: 'Languages' }, 'German');
+await web.click({ role: 'option', name: 'French' }, { key: 'ctrl' });
+await web.setValue({ name: 'Start date', role: 'date editor' }, '2027-03-15');
+await web.setValue({ name: 'Quantity' }, 7);
+await web.setValue({ role: 'slider', name: 'Volume' }, 80);
+await web.setValue({ name: 'Notes' }, 'Zeile 1\\nZeile 2 ✅');
+await web.click({ role: 'button', name: 'Save inputs' });
+${ok('native German+French 2027-03-15 7 80 "Zeile 1\\nZeile 2 ✅"')}` },
+  { name: 'custom ARIA checkbox, switch, spinbutton', code: `
+await web.setValue({ role: 'checkbox', name: 'I accept the terms' }, true);
+await web.setValue({ role: 'switch', name: 'Dark mode' }, true);
+await web.focus({ role: 'spinbutton', name: 'Seats' }); await web.pressKey('Up', { repeat: 2 });
+await web.click({ role: 'button', name: 'Continue', states: ['!disabled'] }); ${ok('custom terms=true dark=true seats=5')}` },
+  { name: 'tree view expands and selects', code: `
+await web.click({ role: 'tree item', name: /^Documents/ }); await web.click({ role: 'tree item', name: 'Budget.xlsx' }); ${ok('tree Budget.xlsx')}` },
+  { name: 'shadow DOM input', code: `
+await web.setValue({ name: 'Nickname' }, 'Lovelace'); await web.click({ role: 'button', name: 'Update nickname' }); ${ok('shadow Lovelace')}` },
+  { name: 'iframe form', code: `
+await web.setValue({ name: 'Email', within: { role: 'document web', index: 1 } }, 'ada@example.org');
+await web.click({ role: 'button', name: 'Subscribe' }); ${ok('frame newsletter ada@example.org')}` },
+  { name: 'canvas by screenshot coordinates', code: `
+const pad = await web.getBounds({ name: 'Signature pad' });
+await web.click([pad.x + pad.width - 20, pad.y + pad.height - 15]); ${ok('canvas bottom-right')}` },
+  { name: 'HTML5 drag to reorder', code: `
+await web.drag({ role: 'list item', name: 'Gamma' }, { role: 'list item', name: 'Alpha' }); ${ok('order Gamma,Alpha,Beta')}` },
+  { name: 'pointer-driven slider drag', code: `
+const track = await web.getBounds({ name: 'Pointer slider' });
+await web.drag([track.x + 10, track.y + track.height / 2], [track.x + track.width - 10, track.y + track.height / 2]); ${ok('pointer slider right')}` },
+  { name: 'copy and paste between fields', code: `
+await web.focus({ name: 'Source' }); await web.pressKey('ctrl+a'); await web.pressKey('ctrl+c');
+await web.focus({ name: 'Target' }); await web.pressKey('ctrl+v');
+await web.click({ role: 'button', name: 'Check copy' }); ${ok('copy Kopiere mich ✂')}` },
+  { name: 'validation error then success', code: `
+await web.click({ role: 'button', name: 'Sign up' });
+await web.waitFor({ text: 'Username is required' }, { timeoutMs: 5000 });
+const field = (await web.find({ name: 'Username' }, { emit: false })).find(n => n.role === 'entry');
+if (!field.states.includes('invalid')) throw new Error('invalid state missing: ' + field.line);
+await web.setValue({ name: 'Username' }, 'ada'); await web.click({ role: 'button', name: 'Sign up' }); ${ok('signup ada')}` },
+  { name: 'slow job with live status and vanishing toast', code: `
+await web.click({ role: 'button', name: 'Generate report' });
+await web.waitFor('Working', { timeoutMs: 3000 });
+await web.waitFor('Report ready: 42 rows', { timeoutMs: 8000 });
+await web.waitFor('Report saved', { gone: true, timeoutMs: 6000 });` },
+  { name: 'keyboard shortcut opens a modal palette', code: `
+await web.pressKey('ctrl+k'); await web.waitFor({ role: 'dialog', name: 'Command palette' }, { timeoutMs: 5000 });
+await web.setValue({ name: 'Command' }, 'Export PDF'); await web.click({ role: 'button', name: 'Run' }); ${ok('command Export PDF')}` },
+  { name: 'link opens a new tab', code: `
+await web.click({ role: 'link', name: 'Open help in new tab' });
+await web.waitFor({ role: 'tab', name: /OpenCuria help window/, states: ['selected'] }, { timeoutMs: 10000 });
+await web.setValue({ name: 'Question' }, 'Rechnung'); await web.click({ role: 'button', name: 'Ask' });
+await web.waitFor('Answer for Rechnung', { timeoutMs: 5000 });
+await web.pressKey('ctrl+w'); await web.waitFor({ role: 'heading', name: 'Widget gallery' }, { timeoutMs: 10000 });` },
+  { name: 'popup window', code: `
+await web.click({ role: 'button', name: 'Open popup window' });
+const w = await cua.waitForWindow({ title: /OpenCuria help window/ }, { timeoutMs: 10000, emit: false });
+const help = await cua.getApp({ windowId: w.id }, { emit: false });
+await help.setValue({ name: 'Question' }, 'Lieferung'); await help.click({ role: 'button', name: 'Ask' });
+await help.waitFor('Answer for Lieferung', { timeoutMs: 5000 });
+await help.click({ role: 'button', name: 'Close help' });
+await cua.listWindows({ emit: false }).then(ws => { if (ws.some(x => x.id === w.id)) throw new Error('popup still open'); });` },
+];
+
+test('real Chrome: a gallery of common web widgets and patterns', { skip: !desktop || !existsSync(chrome), timeout: 300000 }, async (t) => {
+  const values = await environment();
+  const windowClass = `CuaWidgets${process.pid}`;
+  await chromeWindow(t, values, 'web/widgets.html', windowClass);
+  const js = await session(t, values);
+  await js(`globalThis.web = undefined; for (let i = 0; i < 100 && !web; i++) { try { web = await cua.getApp({ app: ${JSON.stringify(windowClass)} }, { emit: false }); } catch { await new Promise(r => setTimeout(r, 200)); } } await web.waitFor({ role: 'heading', name: 'Widget gallery' }, { timeoutMs: 20000, emit: false });`);
+  for (const scenario of widgetScenarios) {
+    await t.test(scenario.name, async () => { await js(scenario.code); });
+  }
+});
+
 for (const toolkit of ['GTK', 'Qt']) {
   test(`real ${toolkit}: a whole form by queries, layout contexts and its file dialog`, { skip: !desktop, timeout: 120000 }, async (t) => {
     if (toolkit === 'Qt') {

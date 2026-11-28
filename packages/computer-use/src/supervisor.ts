@@ -12,6 +12,7 @@ type Execution = {
   textBytes: number;
   imageBytes: number;
   imageCount: number;
+  imagesOmitted?: boolean;
   textChannels: Map<string | undefined, { type: 'text'; text: string }>;
   nativeBegin?: Promise<unknown>;
   operations: Set<Promise<void>>;
@@ -86,10 +87,14 @@ export class Supervisor {
       }
     } else if (content.type === 'image') {
       const size = Buffer.byteLength(content.data, 'base64');
-      if (++active.imageCount > 2 || active.imageBytes + size > MAX_IMAGE_BYTES) {
-        active.finish(new CuaError('OUTPUT_LIMIT', 'At most two images totalling 4 MiB may be returned. Use a smaller screenshot.', 'possible'));
+      // Leave out further images instead of failing: the code keeps running
+      // and its state survives.
+      if (active.imageCount >= 2 || active.imageBytes + size > MAX_IMAGE_BYTES) {
+        if (!active.imagesOmitted) this.content(active, { type: 'text', text: '[Image omitted: a call returns at most two images totalling 4 MiB; use maxDimension or region for smaller ones.]' }, 'cua.notice');
+        active.imagesOmitted = true;
         return;
       }
+      active.imageCount += 1;
       active.imageBytes += size;
       active.content.push(content);
     }

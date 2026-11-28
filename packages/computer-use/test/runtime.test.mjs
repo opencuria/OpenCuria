@@ -54,6 +54,17 @@ test('reference image blocks keep their MIME, detail hint and text channel', asy
   ]);
 });
 
+test('images beyond the limit are left out without ending the call or its state', async t => {
+  const client = await runtime(t);
+  const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+  const result = await client.callTool({ name: 'js', arguments: { code: `var kept = 1; for (let i = 0; i < 4; i++) await nodeRepl.emitImage('data:image/png;base64,${data}'); nodeRepl.write('done');` } });
+  assert.equal(result.isError, false);
+  assert.equal(result.content.filter(item => item.type === 'image').length, 2);
+  assert.match(text(result), /Image omitted/);
+  assert.match(text(result), /done/);
+  assert.equal(text(await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write(kept);' } })), '1');
+});
+
 test('syntax errors preserve bindings and say that nothing ran; infinite code is terminated and reset', async t => {
   const client = await runtime(t);
   await client.callTool({ name: 'js', arguments: { code: 'var retained = 42;' } });
@@ -108,7 +119,7 @@ test('workspace files can be read from JavaScript, other paths cannot', async t 
 
 test('shipped artifact manifest matches the current source build', async () => {
   const { readFile } = await import('node:fs/promises');
-  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.3.4.json', import.meta.url), 'utf8'));
+  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.3.5.json', import.meta.url), 'utf8'));
   const built = JSON.parse(await readFile(new URL('../dist/manifest.json', import.meta.url), 'utf8'));
   assert.deepEqual(shipped.manifest, built, 'Rebuild and pack the Computer Use artifact after source changes.');
 });

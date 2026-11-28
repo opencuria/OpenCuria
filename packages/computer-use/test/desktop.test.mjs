@@ -68,7 +68,9 @@ test('real GTK desktop: AX, Unicode typing, clipboard, screenshots, and stale bi
       assert.ok(state.split('\n').length <= reference.split('\n').length);
       helper.stdin.write(JSON.stringify({ id: 2, command: 'list_apps', input: {} }) + '\n');
       const apps = JSON.parse((await lines.next()).value).output.map(app => ({ id: app.id, displayName: app.name, isRunning: app.windows.length > 0, windows: app.windows }));
-      assert.deepEqual(JSON.parse(output(await js('nodeRepl.write(JSON.stringify(await cua.listApps({emit:false})));'))), apps);
+      // OpenCuria adds which window a dialog belongs to (transient_for).
+      const ourApps = JSON.parse(output(await js('nodeRepl.write(JSON.stringify(await cua.listApps({emit:false})));')));
+      assert.deepEqual(ourApps.map(app => ({ ...app, windows: app.windows.map(({ transient_for, ...window }) => window) })), apps);
     } finally {
       helper.kill();
       await lines.return();
@@ -80,9 +82,10 @@ test('real GTK desktop: AX, Unicode typing, clipboard, screenshots, and stale bi
   assert.equal(await readFile(resultFile, 'utf8'), 'Semantik äöü');
   await js(`await app.click(${entry}).catch(()=>{}); await app.pressKey('Control_L+a'); await app.typeText('Clipboard ✅ äöü'); await app.click(${button});`);
   assert.equal(await readFile(resultFile, 'utf8'), 'Clipboard ✅ äöü');
-  await js(`await app.pressKey('Control_L+a'); await app.typeText('Semantic replacement äöü', ${entry}); await app.click(${button});`);
+  // A real click on the button moved the focus there: select the entry's text first.
+  await js(`await app.focus(${entry}); await app.pressKey('Control_L+a'); await app.typeText('Semantic replacement äöü', ${entry}); await app.click(${button});`);
   assert.equal(await readFile(resultFile, 'utf8'), 'Semantic replacement äöü');
-  await js(`await app.pressKey('Control_L+a'); await app.typeText('Coordinates correct', ${entry}); await app.getScreenshot({emit:false}); await app.click([300,90]);`);
+  await js(`await app.focus(${entry}); await app.pressKey('Control_L+a'); await app.typeText('Coordinates correct', ${entry}); await app.getScreenshot({emit:false}); await app.click([300,90]);`);
   assert.equal(await readFile(resultFile, 'utf8'), 'Coordinates correct');
   await js('await app.click([300,90]);');
   const screenshot = await js('await app.getAXStateAndScreenshot();');

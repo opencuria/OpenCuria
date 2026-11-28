@@ -64,6 +64,10 @@ test('getApp finds windows by name, explains ambiguity and launches installed ap
   const editor = await launch.cua.getApp('Mousepad', { emit: false });
   assert.equal(editor.windowId, 9);
   assert.ok(launch.calls.some(([op, args]) => op === 'launch_app' && args.app === 'org.xfce.mousepad.desktop'));
+  // A title names an existing window: no launch could produce it.
+  const titled = fake({ windows: [], apps: [{ id: 'org.xfce.mousepad.desktop', displayName: 'Mousepad' }] });
+  await assert.rejects(titled.cua.getApp({ app: 'Mousepad', title: /Notes/ }), /No open window matches/);
+  assert.ok(!titled.calls.some(([op]) => op === 'launch_app'));
   await assert.rejects(fake({ windows: [] }).cua.getApp('Nothing'), /No open window matches "Nothing"/);
   const own = fake({ windows: [{ id: 7, app: 'Xfce4-terminal', title: 'Terminal - root' }], apps: [{ id: 'xfce4-terminal.desktop', displayName: 'Xfce Terminal', windows: [{ id: 7, app: 'xfce4-terminal.desktop', title: 'Terminal - root' }] }] });
   assert.equal((await own.cua.getApp('Xfce Terminal', { emit: false })).windowId, 7);
@@ -87,6 +91,41 @@ test('queries resolve to operable controls, prefer exact names and report ambigu
   await assert.rejects(app.click({ name: 'Missing' }, { timeoutMs: 0 }), /No element matches \{name:"Missing"\} after 0 ms/);
   await app.click([10, 20], { key: 'shift' });
   assert.deepEqual(calls.at(-1)[1].coordinates, [10, 20]);
+  // A RegExp role also covers the toolkit roles behind common names.
+  await app.setValue({ role: /textbox|search/, name: 'Keywords' }, 'x');
+  assert.equal(calls.at(-1)[1].elementId, 3);
+});
+
+test('menus and popovers do not make an app name ambiguous', async () => {
+  const { cua } = fake({ windows: [{ id: 5, app: 'gnome-calculator', title: 'Calculator' }, { id: 6, app: 'gnome-calculator', title: 'gnome-calculator', window_type: 'menu' }] });
+  assert.equal((await cua.getApp('Calculator', { emit: false })).windowId, 5);
+});
+
+test('of several matches the exact, operable one with content wins', async () => {
+  const { cua, calls } = fake({ nodes: [
+    node(1, 'frame Writer', { depth: 0, name: 'Writer' }),
+    node(2, 'menu Formatting Mark', { parent: 1, role: 'menu', name: 'Formatting Mark' }),
+    node(3, 'menu item Hyphen', { parent: 2 }),
+    node(4, 'menu Format', { parent: 1, role: 'menu', name: 'Format' }),
+    node(5, 'menu item Text', { parent: 4 }),
+    node(6, 'menu Format', { parent: 1, role: 'menu', name: 'Format' }),
+  ] });
+  const app = await cua.getApp('Chrome', { emit: false });
+  await app.click({ role: 'menu', name: 'Format' });
+  assert.equal(calls.at(-1)[1].elementId, 4);
+});
+
+test('an app bound by name follows a replaced window', async () => {
+  const { cua, calls, state, output } = fake();
+  const app = await cua.getApp('Chrome', { emit: false });
+  state.windows = [{ id: 8, app: 'Chrome', title: 'Form - Chrome' }];
+  state.failures.push(['click', 'Bind this window again from a fresh inventory']);
+  await app.click({ role: 'button', name: 'Save' });
+  assert.equal(app.windowId, 8);
+  assert.equal(calls.at(-1)[1].windowId, 8);
+  assert.match(output.join(''), /window was replaced; now bound to 8 Chrome/);
+  const fixed = await fake().cua.getApp({ windowId: 5 }, { emit: false });
+  assert.equal(fixed.windowId, 5);
 });
 
 test('a stale query target is resolved again once', async () => {
@@ -131,7 +170,7 @@ test('large trees are cut at a line with a notice; return values stay complete',
   const app = await cua.getApp('Chrome', { emit: false });
   const full = await app.getAXState();
   assert.equal(full.split('\n').length, 3000);
-  assert.ok(Buffer.byteLength(output.at(-1)) <= 48 * 1024 + 1);
+  assert.ok(Buffer.byteLength(output.at(-1)) <= 32 * 1024 + 1);
   assert.match(output.at(-1), /\[Showing \d+ of 2999 lines \(output limit\)/);
 });
 

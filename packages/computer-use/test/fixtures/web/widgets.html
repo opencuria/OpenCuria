@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>OpenCuria widget gallery</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  section { border: 1px solid #ccc; margin: 8px 0; padding: 8px; }
+  [role=tabpanel][hidden], .hidden { display: none; }
+  #banner { position: fixed; bottom: 0; left: 0; right: 0; background: #333; color: #fff; padding: 12px; z-index: 10; }
+  #toast { position: fixed; top: 8px; right: 8px; background: #2a2; color: #fff; padding: 8px; }
+  #canvas { border: 1px solid #000; }
+  #sortable li { padding: 4px; margin: 2px; background: #eef; cursor: move; width: 200px; }
+  #slider-track { position: relative; width: 300px; height: 20px; background: #ddd; }
+  #slider-thumb { position: absolute; left: 0; top: 0; width: 20px; height: 20px; background: #36c; cursor: grab; }
+  [role=listbox] [role=option][aria-selected=true] { background: #ccf; }
+  #palette { position: fixed; top: 80px; left: 200px; background: #fff; border: 2px solid #000; padding: 12px; }
+</style>
+</head>
+<body>
+<h1>Widget gallery</h1>
+<div id="banner" role="region" aria-label="Cookie consent">We use cookies. <button id="accept-cookies">Accept all</button></div>
+
+<section aria-label="Tabs">
+  <div role="tablist" aria-label="Account">
+    <button role="tab" id="tab-profile" aria-selected="true" aria-controls="panel-profile">Profile</button>
+    <button role="tab" id="tab-billing" aria-selected="false" aria-controls="panel-billing" tabindex="-1">Billing</button>
+  </div>
+  <div role="tabpanel" id="panel-profile" aria-labelledby="tab-profile">Profile settings</div>
+  <div role="tabpanel" id="panel-billing" aria-labelledby="tab-billing" hidden>
+    <label>IBAN <input id="iban"></label> <button id="save-iban">Save IBAN</button>
+  </div>
+</section>
+
+<section aria-label="Accordion">
+  <h2><button aria-expanded="false" aria-controls="faq-1" id="faq-btn">How do refunds work?</button></h2>
+  <div id="faq-1" role="region" aria-labelledby="faq-btn" class="hidden">Refunds take 5 days. <a href="#refund" id="refund-link">Request refund</a></div>
+</section>
+
+<section aria-label="Menu button">
+  <button id="actions" aria-haspopup="menu" aria-expanded="false" aria-controls="actions-menu">Actions</button>
+  <ul role="menu" id="actions-menu" class="hidden" aria-label="Actions">
+    <li role="menuitem" tabindex="-1">Duplicate</li>
+    <li role="menuitem" tabindex="-1">Archive</li>
+    <li role="menuitem" tabindex="-1">Delete</li>
+  </ul>
+</section>
+
+<section aria-label="Autocomplete">
+  <label for="city">City</label>
+  <input id="city" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="city-list" autocomplete="off">
+  <ul role="listbox" id="city-list" class="hidden" aria-label="Cities"></ul>
+</section>
+
+<section aria-label="Native inputs">
+  <label>Languages <select id="langs" multiple size="4"><option>German</option><option>English</option><option>French</option><option>Spanish</option></select></label>
+  <label>Start date <input type="date" id="start"></label>
+  <label>Quantity <input type="number" id="qty" min="0" max="99" value="1"></label>
+  <label>Volume <input type="range" id="volume" min="0" max="100" value="50"></label>
+  <label>Notes <textarea id="notes"></textarea></label>
+  <button id="save-native">Save inputs</button>
+</section>
+
+<section aria-label="Custom controls">
+  <div role="checkbox" aria-checked="false" tabindex="0" id="terms">I accept the terms</div>
+  <button role="switch" aria-checked="false" id="dark">Dark mode</button>
+  <div role="spinbutton" tabindex="0" aria-valuenow="3" aria-valuemin="0" aria-valuemax="10" aria-label="Seats" id="seats">3</div>
+  <button id="submit-custom" disabled>Continue</button>
+</section>
+
+<section aria-label="Tree">
+  <ul role="tree" aria-label="Files">
+    <li role="treeitem" aria-expanded="false" id="node-docs">Documents
+      <ul role="group" class="hidden">
+        <li role="treeitem" id="node-report">Report.pdf</li>
+        <li role="treeitem" id="node-budget">Budget.xlsx</li>
+      </ul>
+    </li>
+  </ul>
+</section>
+
+<section aria-label="Shadow DOM">
+  <user-card></user-card>
+</section>
+
+<section aria-label="Frames">
+  <iframe id="same" title="Newsletter frame" srcdoc="<label>Email <input id=mail></label><button onclick=&quot;parent.log('frame newsletter '+document.getElementById('mail').value)&quot;>Subscribe</button>" width="400" height="60"></iframe>
+</section>
+
+<section aria-label="Windows">
+  <a href="popup.html" target="_blank" id="newtab">Open help in new tab</a>
+  <button id="popup">Open popup window</button>
+</section>
+
+<section aria-label="Canvas">
+  <canvas id="canvas" width="200" height="100" aria-label="Signature pad"></canvas>
+</section>
+
+<section aria-label="Sorting">
+  <ul id="sortable" aria-label="Priorities">
+    <li draggable="true">Alpha</li><li draggable="true">Beta</li><li draggable="true">Gamma</li>
+  </ul>
+  <div id="slider-track" aria-label="Pointer slider"><div id="slider-thumb"></div></div>
+</section>
+
+<section aria-label="Clipboard">
+  <label>Source <input id="source" value="Kopiere mich ✂"></label>
+  <label>Target <input id="target"></label>
+  <button id="check-copy">Check copy</button>
+</section>
+
+<section aria-label="Validation">
+  <form id="signup" novalidate>
+    <label>Username <input id="username" required aria-describedby="username-error"></label>
+    <span id="username-error" role="alert"></span>
+    <button type="submit">Sign up</button>
+  </form>
+</section>
+
+<section aria-label="Live region">
+  <button id="slow">Generate report</button>
+  <p id="status" role="status"></p>
+</section>
+
+<h2>Log</h2>
+<ul id="log" aria-label="Log"></ul>
+
+<script>
+function log(text) { const li = document.createElement('li'); li.textContent = 'OK: ' + text; document.getElementById('log').appendChild(li); }
+window.log = log;
+let blocked = true;
+document.addEventListener('click', (event) => {
+  if (blocked && !event.target.closest('#banner')) { event.stopPropagation(); event.preventDefault(); log('blocked by banner'); }
+}, true);
+document.getElementById('accept-cookies').onclick = () => { blocked = false; document.getElementById('banner').remove(); log('cookies accepted'); };
+
+for (const tab of document.querySelectorAll('[role=tab]')) tab.onclick = () => {
+  for (const other of document.querySelectorAll('[role=tab]')) { other.setAttribute('aria-selected', other === tab); document.getElementById(other.getAttribute('aria-controls')).hidden = other !== tab; }
+  log('tab ' + tab.textContent);
+};
+document.getElementById('save-iban').onclick = () => log('iban ' + document.getElementById('iban').value);
+
+const faq = document.getElementById('faq-btn');
+faq.onclick = () => { const open = faq.getAttribute('aria-expanded') !== 'true'; faq.setAttribute('aria-expanded', open); document.getElementById('faq-1').classList.toggle('hidden', !open); log('faq ' + (open ? 'open' : 'closed')); };
+document.getElementById('refund-link').onclick = (e) => { e.preventDefault(); log('refund requested'); };
+
+const actions = document.getElementById('actions'), menu = document.getElementById('actions-menu');
+actions.onclick = () => { const open = actions.getAttribute('aria-expanded') !== 'true'; actions.setAttribute('aria-expanded', open); menu.classList.toggle('hidden', !open); };
+for (const item of menu.children) item.onclick = () => { log('menu ' + item.textContent); menu.classList.add('hidden'); actions.setAttribute('aria-expanded', 'false'); };
+
+const cities = ['Berlin', 'Bern', 'Bergen', 'Bremen', 'Hamburg', 'München'];
+const city = document.getElementById('city'), list = document.getElementById('city-list');
+city.oninput = () => {
+  list.innerHTML = '';
+  const found = city.value ? cities.filter(c => c.toLowerCase().startsWith(city.value.toLowerCase())) : [];
+  for (const name of found) { const li = document.createElement('li'); li.setAttribute('role', 'option'); li.textContent = name; li.onclick = () => { city.value = name; list.classList.add('hidden'); city.setAttribute('aria-expanded', 'false'); log('city ' + name); }; list.appendChild(li); }
+  list.classList.toggle('hidden', !found.length); city.setAttribute('aria-expanded', !!found.length);
+};
+
+document.getElementById('save-native').onclick = () => {
+  const langs = [...document.getElementById('langs').selectedOptions].map(o => o.text).join('+');
+  log(`native ${langs} ${document.getElementById('start').value} ${document.getElementById('qty').value} ${document.getElementById('volume').value} ${JSON.stringify(document.getElementById('notes').value)}`);
+};
+
+const terms = document.getElementById('terms'), submitCustom = document.getElementById('submit-custom');
+const toggleTerms = () => { const on = terms.getAttribute('aria-checked') !== 'true'; terms.setAttribute('aria-checked', on); submitCustom.disabled = !on; };
+terms.onclick = toggleTerms; terms.onkeydown = (e) => { if (e.key === ' ') { e.preventDefault(); toggleTerms(); } };
+const dark = document.getElementById('dark'); dark.onclick = () => dark.setAttribute('aria-checked', dark.getAttribute('aria-checked') !== 'true');
+const seats = document.getElementById('seats');
+seats.onkeydown = (e) => { let v = +seats.getAttribute('aria-valuenow'); if (e.key === 'ArrowUp') v++; if (e.key === 'ArrowDown') v--; v = Math.max(0, Math.min(10, v)); seats.setAttribute('aria-valuenow', v); seats.textContent = v; };
+submitCustom.onclick = () => log(`custom terms=${terms.getAttribute('aria-checked')} dark=${dark.getAttribute('aria-checked')} seats=${seats.getAttribute('aria-valuenow')}`);
+
+const docs = document.getElementById('node-docs');
+docs.onclick = (e) => { if (e.target !== docs) return; const open = docs.getAttribute('aria-expanded') !== 'true'; docs.setAttribute('aria-expanded', open); docs.querySelector('ul').classList.toggle('hidden', !open); };
+for (const leaf of ['node-report', 'node-budget']) document.getElementById(leaf).onclick = (e) => { e.stopPropagation(); log('tree ' + e.target.textContent); };
+
+customElements.define('user-card', class extends HTMLElement {
+  constructor() { super(); const root = this.attachShadow({ mode: 'open' }); root.innerHTML = '<label>Nickname <input id=nick></label><button>Update nickname</button>'; root.querySelector('button').onclick = () => log('shadow ' + root.querySelector('input').value); }
+});
+
+document.getElementById('popup').onclick = () => window.open('popup.html', 'help', 'width=500,height=300');
+
+const canvas = document.getElementById('canvas');
+canvas.onclick = (e) => { const r = canvas.getBoundingClientRect(); const x = Math.round(e.clientX - r.left), y = Math.round(e.clientY - r.top); log(`canvas ${x > 140 && y > 60 ? 'bottom-right' : x < 60 && y < 40 ? 'top-left' : 'middle'}`); };
+
+let dragged;
+for (const li of document.querySelectorAll('#sortable li')) {
+  li.ondragstart = () => { dragged = li; };
+  li.ondragover = (e) => e.preventDefault();
+  li.ondrop = (e) => { e.preventDefault(); if (dragged && dragged !== li) li.parentNode.insertBefore(dragged, li); log('order ' + [...document.querySelectorAll('#sortable li')].map(x => x.textContent).join(',')); };
+}
+const thumb = document.getElementById('slider-thumb'); let start;
+thumb.onmousedown = (e) => { start = e.clientX - thumb.offsetLeft; };
+document.addEventListener('mousemove', (e) => { if (start !== undefined) thumb.style.left = Math.max(0, Math.min(280, e.clientX - start)) + 'px'; });
+document.addEventListener('mouseup', () => { if (start !== undefined) { start = undefined; log('pointer slider ' + (parseInt(thumb.style.left) > 200 ? 'right' : 'left')); } });
+
+document.getElementById('check-copy').onclick = () => log('copy ' + document.getElementById('target').value);
+document.getElementById('signup').onsubmit = (e) => { e.preventDefault(); const u = document.getElementById('username'); const err = document.getElementById('username-error'); if (!u.value) { err.textContent = 'Username is required'; u.setAttribute('aria-invalid', 'true'); } else { err.textContent = ''; u.removeAttribute('aria-invalid'); log('signup ' + u.value); } };
+document.getElementById('slow').onclick = () => { const s = document.getElementById('status'); s.textContent = 'Working…'; setTimeout(() => { s.textContent = 'Report ready: 42 rows'; showToast('Report saved'); }, 2500); };
+function showToast(text) { const t = document.createElement('div'); t.id = 'toast'; t.setAttribute('role', 'status'); t.textContent = text; document.body.appendChild(t); setTimeout(() => t.remove(), 2500); }
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'k') { e.preventDefault(); const p = document.createElement('div'); p.id = 'palette'; p.setAttribute('role', 'dialog'); p.setAttribute('aria-modal', 'true'); p.setAttribute('aria-label', 'Command palette'); p.innerHTML = '<input aria-label="Command" id="command"><button id="run">Run</button>'; document.body.appendChild(p); document.getElementById('command').focus(); document.getElementById('run').onclick = () => { log('command ' + document.getElementById('command').value); p.remove(); }; }
+});
+</script>
+</body>
+</html>
